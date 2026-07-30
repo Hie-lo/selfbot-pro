@@ -41,26 +41,43 @@ class ChannelMonitorPlugin(BasePlugin):
         )
 
         async def monitor_listener(event):
-            # پیام‌های خودمون رو رد کن
             if event.out:
                 return
 
             source_id = event.chat_id
 
-            # چک کن آیا این chat_id در مسیرهای ما هست
+            # لاگ همه پیام‌های غیر PV
+            if not event.is_private:
+                self.logger.info(
+                    f"[DEBUG] msg from chat_id={source_id} | "
+                    f"routes={list(self._routes.keys())}"
+                )
+
             if source_id not in self._routes:
-                return
+                # چک با peer_id هم
+                peer_id = None
+                if hasattr(event, 'message') and hasattr(event.message, 'peer_id'):
+                    peer = event.message.peer_id
+                    if hasattr(peer, 'channel_id'):
+                        peer_id = peer.channel_id
+
+                if peer_id and peer_id in self._routes:
+                    source_id = peer_id
+                    self.logger.info(f"[DEBUG] matched via peer_id={peer_id}")
+                else:
+                    if peer_id:
+                        self.logger.info(
+                            f"[DEBUG] no match: chat_id={event.chat_id} "
+                            f"peer_id={peer_id} routes={list(self._routes.keys())}"
+                        )
+                    return
 
             route = self._routes[source_id]
             dest_id = route["dest_id"]
 
-            self.logger.info(
-                f"Monitor hit: source={source_id} dest={dest_id} "
-                f"msg_id={event.message.id}"
-            )
+            self.logger.info(f"Monitor hit: {source_id} -> {dest_id}")
 
             try:
-                # ارسال کپی پیام
                 if event.message.media:
                     await self.client.send_file(
                         dest_id,
@@ -72,15 +89,10 @@ class ChannelMonitorPlugin(BasePlugin):
                         dest_id,
                         event.message.text or "",
                     )
-
-                self.logger.info(f"Forwarded {source_id} -> {dest_id}")
-
+                self.logger.info(f"Forwarded OK")
             except Exception as e:
-                self.logger.error(f"Monitor forward error: {type(e).__name__}: {e}")
-
-        self._add_handler(monitor_listener, events.NewMessage)
-        self.logger.info(f"loaded with {len(self._routes)} routes")
-
+                self.logger.error(f"Forward error: {type(e).__name__}: {e}")
+                
     async def reload_routes(self):
         self._routes.clear()
         await self._load_routes()
