@@ -22,47 +22,56 @@ class DicePlugin(BasePlugin):
 
     async def start(self):
 
-        @self.client.on(events.NewMessage(
-            pattern=r"^\.تاس\s+([^🎲🎯🎳🏀⚽🎰].*)$",
-            outgoing=True,
-        ))
         async def dice_normal(event):
+            if not event.out:
+                return
+
             num_str = persian_to_english(event.pattern_match.group(1).strip())
             try:
                 target = int(num_str)
             except ValueError:
                 await event.delete()
                 return
+
             if target < 1 or target > 6:
                 await event.delete()
                 return
 
             reply_to = None
             if event.is_reply:
-                reply_to = (await event.get_reply_message()).id
+                reply_msg = await event.get_reply_message()
+                reply_to = reply_msg.id
 
             await event.delete()
 
             for _ in range(100):
-                kwargs = {"file": InputMediaDice("🎲")}
                 if reply_to:
-                    kwargs["reply_to"] = reply_to
-                msg = await self.client.send_message(event.chat_id, **kwargs)
+                    msg = await self.client.send_message(
+                        event.chat_id,
+                        file=InputMediaDice("🎲"),
+                        reply_to=reply_to,
+                    )
+                else:
+                    msg = await self.client.send_message(
+                        event.chat_id,
+                        file=InputMediaDice("🎲"),
+                    )
+
                 if hasattr(msg.media, "value") and msg.media.value == target:
                     break
-                await msg.delete()
-                await asyncio.sleep(0.05)
+                else:
+                    await msg.delete()
+                    await asyncio.sleep(0.05)
 
-        self._add_handler(dice_normal, events.NewMessage(
-            pattern=r"^\.تاس\s+([^🎲🎯🎳🏀⚽🎰].*)$",
-            outgoing=True,
-        ))
+        self._add_handler(
+            dice_normal,
+            events.NewMessage(pattern=r"^\.تاس\s+([^🎲🎯🎳🏀⚽🎰].*)$", outgoing=True),
+        )
 
-        @self.client.on(events.NewMessage(
-            pattern=r"^\.تاس\s+(🎲|🎯|🎳|🏀|⚽|🎰)\s+(.+)$",
-            outgoing=True,
-        ))
         async def dice_emoji(event):
+            if not event.out:
+                return
+
             emoji = event.pattern_match.group(1)
             num_str = persian_to_english(event.pattern_match.group(2).strip())
             try:
@@ -82,24 +91,34 @@ class DicePlugin(BasePlugin):
 
             reply_to = None
             if event.is_reply:
-                reply_to = (await event.get_reply_message()).id
+                reply_msg = await event.get_reply_message()
+                reply_to = reply_msg.id
 
             await event.delete()
 
             max_att = 200 if emoji == "🎰" else 100
             for _ in range(max_att):
-                kwargs = {"file": InputMediaDice(emoji)}
                 if reply_to:
-                    kwargs["reply_to"] = reply_to
-                msg = await self.client.send_message(event.chat_id, **kwargs)
+                    msg = await self.client.send_message(
+                        event.chat_id,
+                        file=InputMediaDice(emoji),
+                        reply_to=reply_to,
+                    )
+                else:
+                    msg = await self.client.send_message(
+                        event.chat_id,
+                        file=InputMediaDice(emoji),
+                    )
+
                 if hasattr(msg.media, "value") and msg.media.value == target:
                     break
-                await msg.delete()
-                await asyncio.sleep(0.03)
+                else:
+                    await msg.delete()
+                    await asyncio.sleep(0.03)
 
-        self._add_handler(dice_emoji, events.NewMessage(
-            pattern=r"^\.تاس\s+(🎲|🎯|🎳|🏀|⚽|🎰)\s+(.+)$",
-            outgoing=True,
-        ))
+        self._add_handler(
+            dice_emoji,
+            events.NewMessage(pattern=r"^\.تاس\s+(🎲|🎯|🎳|🏀|⚽|🎰)\s+(.+)$", outgoing=True),
+        )
 
         self.logger.info("loaded")

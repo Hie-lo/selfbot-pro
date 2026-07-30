@@ -17,15 +17,14 @@ class HeartPlugin(BasePlugin):
 
     async def start(self):
 
-        @self.client.on(events.NewMessage(
-            pattern=r"^\.قلب$",
-            outgoing=True,
-        ))
         async def heart_cmd(event):
+            if not event.out:
+                return
+
             await event.delete()
             msg = await self.client.send_message(event.chat_id, HEARTS[0])
 
-            for _ in range(3):  # 3 دور چرخش
+            for _ in range(3):
                 for heart in HEARTS:
                     try:
                         await msg.edit(heart)
@@ -33,15 +32,14 @@ class HeartPlugin(BasePlugin):
                     except Exception:
                         return
 
-            # آخرش قلب قرمز بمونه
             try:
                 await msg.edit("❤️")
             except Exception:
                 pass
 
-        self._add_handler(heart_cmd, events.NewMessage(
-            pattern=r"^\.قلب$",
-            outgoing=True,
-        ))
+        self._add_handler(
+            heart_cmd,
+            events.NewMessage(pattern=r"^\.قلب$", outgoing=True),
+        )
 
         self.logger.info("loaded")
