@@ -144,11 +144,14 @@ async def update_session_status(
         await conn.execute(
             """
             UPDATE account_sessions
-            SET status = $2,
-                error_message = $3,
-                is_connected = ($2 = 'connected'),
+            SET status = $2::varchar,
+                error_message = $3::text,
+                is_connected = CASE
+                    WHEN $2::varchar = 'connected' THEN TRUE
+                    ELSE FALSE
+                END,
                 last_connected_at = CASE
-                    WHEN $2 = 'connected' THEN NOW()
+                    WHEN $2::varchar = 'connected' THEN NOW()
                     ELSE last_connected_at
                 END
             WHERE user_id = $1
