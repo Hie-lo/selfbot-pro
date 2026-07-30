@@ -5,7 +5,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-
+from bot.keyboards import monitor_menu_kb, mon_confirm_delete_kb
 from telegram import Update
 from telegram.error import NetworkError, TimedOut, RetryAfter
 from telegram.ext import (
@@ -771,6 +771,187 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {sub} `{u['telegram_id']}` {u.get('first_name', '')} @{u.get('username', '-')}\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+# ═══════════════════════════════════
+# مانیتور کانال — پنل
+# ═══════════════════════════════════
+
+STATE_MON_SOURCE = 10
+STATE_MON_DEST = 11
+
+
+async def cb_monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش لیست مسیرهای مانیتور"""
+    query = update.callback_query
+    await query.answer()
+
+    user = await get_or_create_user(update)
+    routes = await db.get_all_channel_routes(user["id"])
+
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**\n\n"
+        "هر کانال را به یک مقصد وصل کنید.\n"
+        "با دکمه ✅/❌ فعال/غیرفعال کنید.\n"
+        "با 🗑 حذف کنید.",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_mon_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فعال/غیرفعال کردن یک مسیر"""
+    query = update.callback_query
+    await query.answer()
+
+    src_id = int(query.data.replace("mon_toggle_", ""))
+    user = await get_or_create_user(update)
+
+    new_state = await db.toggle_channel_route(user["id"], src_id)
+    status = "فعال ✅" if new_state else "غیرفعال ❌"
+    await query.answer(f"مسیر {status} شد", show_alert=False)
+
+    # ── اطلاع به پلاگین ──
+    from core.client_manager import get_client
+    client = await get_client(user["id"])
+    if client:
+        from core.plugin_manager import get_active_plugins
+        plugins = get_active_plugins(user["id"])
+        monitor = plugins.get("channel_monitor")
+        if monitor:
+            await monitor.reload_routes()
+
+    # رفرش منو
+    routes = await db.get_all_channel_routes(user["id"])
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**\n\n"
+        "هر کانال را به یک مقصد وصل کنید.\n"
+        "با دکمه ✅/❌ فعال/غیرفعال کنید.\n"
+        "با 🗑 حذف کنید.",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_mon_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید حذف مسیر"""
+    query = update.callback_query
+    await query.answer()
+
+    src_id = int(query.data.replace("mon_delete_", ""))
+    await query.edit_message_text(
+        f"⚠️ آیا مسیر مانیتور `{src_id}` حذف شود?",
+        reply_markup=mon_confirm_delete_kb(src_id),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_mon_confirm_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف قطعی مسیر"""
+    query = update.callback_query
+    await query.answer()
+
+    src_id = int(query.data.replace("mon_confirm_del_", ""))
+    user = await get_or_create_user(update)
+
+    await db.delete_channel_route(user["id"], src_id)
+
+    # اطلاع به پلاگین
+    from core.client_manager import get_client
+    client = await get_client(user["id"])
+    if client:
+        from core.plugin_manager import get_active_plugins
+        plugins = get_active_plugins(user["id"])
+        monitor = plugins.get("channel_monitor")
+        if monitor:
+            await monitor.reload_routes()
+
+    await query.answer("✅ حذف شد", show_alert=True)
+
+    routes = await db.get_all_channel_routes(user["id"])
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**\n\n"
+        "هر کانال را به یک مقصد وصل کنید.",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_mon_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع اضافه کردن مسیر جدید"""
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        "📡 **اضافه کردن مسیر جدید**\n\n"
+        "آیدی یا یوزرنیم **کانال منبع** را بفرستید:\n\n"
+        "مثال: `@channel_name` یا `-1001234567890`\n\n"
+        "/cancel برای انصراف",
+        parse_mode="Markdown",
+    )
+    return STATE_MON_SOURCE
+
+
+async def handle_mon_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت کانال منبع"""
+    text = update.message.text.strip()
+
+    context.user_data["mon_source_ref"] = text
+    await update.message.reply_text(
+        "✅ منبع دریافت شد.\n\n"
+        "حالا آیدی یا یوزرنیم **مقصد** را بفرستید:\n\n"
+        "مثال: `@dest_channel` یا `-1001234567890`\n\n"
+        "/cancel برای انصراف",
+        parse_mode="Markdown",
+    )
+    return STATE_MON_DEST
+
+
+async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت مقصد و ثبت مسیر"""
+    user = await get_or_create_user(update)
+    src_ref = context.user_data.get("mon_source_ref", "")
+    dst_ref = update.message.text.strip()
+
+    from core.client_manager import get_client
+    client = await get_client(user["id"])
+
+    if not client:
+        await update.message.reply_text(
+            "❌ اکانت متصل نیست.",
+            reply_markup=main_menu_kb(False),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    try:
+        src_entity = await client.get_entity(src_ref)
+        dst_entity = await client.get_entity(dst_ref)
+
+        src_id = src_entity.id
+        dst_id = dst_entity.id
+        src_title = getattr(src_entity, "title", src_ref)
+        dst_title = getattr(dst_entity, "title", dst_ref)
+
+        await db.set_channel_route(
+            user["id"], src_id, src_title, "custom", dst_id, dst_title
+        )
+
+        # اطلاع به پلاگین
+        from core.plugin_manager import get_active_plugins
+        plugins = get_active_plugins(user["id"])
+        monitor = plugins.get("channel_monitor")
+        if monitor:
+            await monitor.reload_routes()
+
+        await update.message.reply_text(
+            f"✅ مسیر ثبت شد:\n📥 منبع: {src_title}\n📤 مقصد: {dst_title}",
+            reply_markup=main_menu_kb(True),
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {str(e)[:100]}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
 
 # ═══════════════════════════════════
 # ثبت هندلرها
@@ -810,9 +991,37 @@ def register_handlers(app: Application):
         ],
         per_user=True,
     )
+    # مانیتور conversation
+    monitor_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"),
+        ],
+        states={
+            STATE_MON_SOURCE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_source),
+            ],
+            STATE_MON_DEST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_dest),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+        ],
+        per_user=True,
+    )
+
+
+    # مانیتور callbacks
+
     # noop — برای دکمه‌های غیرقابل کلیک
     async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
+        
+    app.add_handler(monitor_conv)
+    app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
 
     app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
     app.add_handler(CommandHandler("start", cmd_start))

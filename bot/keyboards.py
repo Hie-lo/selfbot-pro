@@ -206,3 +206,58 @@ def back_kb(target: str = "back_main") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت", callback_data=target)],
     ])
+
+
+# ═══════ مانیتور کانال ═══════
+
+
+def monitor_menu_kb(routes: list) -> InlineKeyboardMarkup:
+    """
+    لیست مسیرهای مانیتور با دکمه فعال/غیرفعال
+    routes: لیست دیکشنری‌ها از DB
+    """
+    buttons = []
+
+    if not routes:
+        buttons.append([
+            InlineKeyboardButton("📭 مسیری تنظیم نشده", callback_data="noop"),
+        ])
+    else:
+        for r in routes:
+            src_title = r.get("source_channel_title", str(r["source_channel_id"]))
+            dst_title = r.get("destination_title", "نامشخص")
+            is_active = r.get("is_active", True)
+            status = "✅" if is_active else "❌"
+            src_id = r["source_channel_id"]
+
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{status} {src_title} → {dst_title}",
+                    callback_data=f"mon_toggle_{src_id}",
+                ),
+                InlineKeyboardButton(
+                    "🗑",
+                    callback_data=f"mon_delete_{src_id}",
+                ),
+            ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "➕ اضافه کردن مسیر جدید",
+            callback_data="mon_add",
+        ),
+    ])
+    buttons.append([
+        InlineKeyboardButton("🔙 بازگشت", callback_data="storage"),
+    ])
+
+    return InlineKeyboardMarkup(buttons)
+
+
+def mon_confirm_delete_kb(source_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ حذف", callback_data=f"mon_confirm_del_{source_id}"),
+            InlineKeyboardButton("❌ انصراف", callback_data="storage_monitor_menu"),
+        ]
+    ])

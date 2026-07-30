@@ -446,3 +446,32 @@ async def delete_auto_response_rule(user_id: int, target_user_id: int) -> None:
             "DELETE FROM auto_response_rules WHERE user_id = $1 AND target_user_id = $2",
             user_id, target_user_id,
         )
+
+# ═══════ Channel Monitor (extended) ═══════
+
+
+async def get_all_channel_routes(user_id: int) -> list[dict]:
+    """همه مسیرها شامل غیرفعال‌ها"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM channel_monitor_routes WHERE user_id = $1 ORDER BY created_at",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def toggle_channel_route(user_id: int, source_channel_id: int) -> bool:
+    """تغییر وضعیت فعال/غیرفعال — خروجی: وضعیت جدید"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE channel_monitor_routes
+            SET is_active = NOT is_active
+            WHERE user_id = $1 AND source_channel_id = $2
+            RETURNING is_active
+            """,
+            user_id, source_channel_id,
+        )
+        return row["is_active"] if row else False
