@@ -154,4 +154,20 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_audit_user
     ON audit_logs(user_id);
 
+CREATE TABLE IF NOT EXISTS channel_monitor_routes (
+    id                      SERIAL PRIMARY KEY,
+    user_id                 INT REFERENCES users(id) ON DELETE CASCADE,
+    source_channel_id       BIGINT NOT NULL,
+    source_channel_title    VARCHAR(255) DEFAULT '',
+    destination_type        VARCHAR(20) NOT NULL,
+    destination_id          BIGINT,
+    destination_title       VARCHAR(255) DEFAULT '',
+    filter_type             VARCHAR(20) DEFAULT 'all',
+    is_active               BOOLEAN DEFAULT TRUE,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, source_channel_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cmr_user
+    ON channel_monitor_routes(user_id);
 """

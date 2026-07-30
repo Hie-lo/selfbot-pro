@@ -6,12 +6,13 @@ import logging
 from database import db
 from core.crypto import decrypt
 from core.client_manager import reconnect_client, disconnect_all
+from core.plugin_manager import load_plugins_for_user, unload_all
 
 logger = logging.getLogger("engine")
 
 
 async def startup():
-    """اتصال مجدد کلاینت‌های ذخیره شده"""
+    """اتصال مجدد + بارگذاری پلاگین‌ها"""
     logger.info("Starting engine...")
 
     sessions = await db.get_all_active_sessions()
@@ -19,9 +20,7 @@ async def startup():
 
     for s in sessions:
         try:
-            # رمزگشایی session string (نه شماره تلفن)
             session_string = decrypt(s["session_data_enc"])
-
             client = await reconnect_client(
                 user_db_id=s["user_id"],
                 session_string=session_string,
@@ -29,6 +28,10 @@ async def startup():
 
             if client:
                 await db.update_session_status(s["user_id"], "connected")
+
+                # بارگذاری پلاگین‌ها
+                await load_plugins_for_user(s["user_id"], client)
+
                 connected += 1
             else:
                 await db.update_session_status(
@@ -46,6 +49,7 @@ async def startup():
 async def shutdown():
     """خاموش کردن تمیز"""
     logger.info("Shutting down...")
+    await unload_all()
     await disconnect_all()
     await db.close_db()
     logger.info("Engine stopped")

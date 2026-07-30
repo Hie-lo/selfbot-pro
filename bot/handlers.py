@@ -215,13 +215,19 @@ async def cb_features(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     feature_name = query.data.replace("toggle_", "")
+
+    # noop برای دکمه‌های غیرفعال
+    if feature_name == "noop" or query.data == "noop":
+        await query.answer()
+        return
+
     user = await get_or_create_user(update)
     has_sub = await check_subscription(user)
     if not has_sub:
         await query.answer("❌ اشتراک ندارید", show_alert=True)
         return
+
     is_on = await db.is_feature_enabled(user["id"], feature_name)
     new_state = not is_on
     await db.set_feature(user["id"], feature_name, new_state)
@@ -229,8 +235,22 @@ async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["id"], "feature_toggle",
         f"{feature_name} -> {'ON' if new_state else 'OFF'}",
     )
-    fname = dict(FEATURES).get(feature_name, feature_name)
+
+    # load/unload plugin در لحظه
+    from core.client_manager import get_client
+    from core.plugin_manager import enable_plugin, disable_plugin
+
+    client = await get_client(user["id"])
+    if client:
+        if new_state:
+            await enable_plugin(user["id"], feature_name, client)
+        else:
+            await disable_plugin(user["id"], feature_name)
+
+    from bot.keyboards import ALL_FEATURES
+    fname = ALL_FEATURES.get(feature_name, feature_name)
     await query.answer(f"{'✅' if new_state else '❌'} {fname}", show_alert=False)
+
     features = await db.get_features(user["id"])
     enabled_map = {f["feature_name"]: f["is_enabled"] for f in features}
     await query.edit_message_text(
@@ -656,6 +676,8 @@ async def cb_confirm_disconnect(update: Update, context: ContextTypes.DEFAULT_TY
         await client_manager.disconnect_client(user["id"])
     except Exception as e:
         logger.error(f"Disconnect error: {e}")
+    from core.plugin_manager import unload_all_for_user
+    await unload_all_for_user(user["id"])
     await db.delete_session(user["id"])
     await db.audit_log(user["id"], "disconnect", "")
     await query.edit_message_text(
@@ -788,7 +810,11 @@ def register_handlers(app: Application):
         ],
         per_user=True,
     )
+    # noop — برای دکمه‌های غیرقابل کلیک
+    async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
 
+    app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("activate", cmd_activate))

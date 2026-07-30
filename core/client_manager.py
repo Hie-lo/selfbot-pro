@@ -155,23 +155,23 @@ async def complete_2fa(user_db_id: int, password: str) -> str:
 
 async def finalize_login(user_db_id: int) -> str:
     """
-    مرحله نهایی: گرفتن session string و فعال‌سازی کلاینت
-    خروجی: session_string رمزنگاری نشده
+    نهایی کردن لاگین + بارگذاری پلاگین‌ها
+    خروجی: session_string
     """
     info = _pending.get(user_db_id)
     if not info:
         raise ValueError("درخواست لاگین منقضی شده.")
 
     client = info["client"]
-
-    # گرفتن session string
     session_string = client.session.save()
 
     # انتقال به active
     active_clients[user_db_id] = client
-
-    # حذف از pending (بدون disconnect)
     del _pending[user_db_id]
+
+    # بارگذاری پلاگین‌ها
+    from core.plugin_manager import load_plugins_for_user
+    await load_plugins_for_user(user_db_id, client)
 
     logger.info(f"Client finalized for user_db_id={user_db_id}")
     return session_string

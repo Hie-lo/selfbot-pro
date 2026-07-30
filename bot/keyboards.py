@@ -9,7 +9,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 def main_menu_kb(has_account: bool = False) -> InlineKeyboardMarkup:
     buttons = []
-
     if has_account:
         buttons.append([
             InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="panel"),
@@ -26,22 +25,16 @@ def main_menu_kb(has_account: bool = False) -> InlineKeyboardMarkup:
         buttons.append([
             InlineKeyboardButton("🔗 اتصال اکانت", callback_data="connect"),
         ])
-
     buttons.append([
         InlineKeyboardButton("💎 اشتراک", callback_data="subscription"),
         InlineKeyboardButton("📖 راهنما", callback_data="help"),
     ])
-
     return InlineKeyboardMarkup(buttons)
 
 
-# ═══════ کیبورد مجازی (Virtual Numpad) ═══════
+# ═══════ کیبورد مجازی ═══════
 
 def numpad_kb(entered_digits: str = "") -> InlineKeyboardMarkup:
-    """
-    کیبورد شیشه‌ای برای وارد کردن کد ۵ رقمی
-    entered_digits: ارقام وارد شده تا الان (مثلاً "12")
-    """
     buttons = [
         [
             InlineKeyboardButton("1", callback_data="code_1"),
@@ -64,15 +57,10 @@ def numpad_kb(entered_digits: str = "") -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ لغو", callback_data="code_cancel"),
         ],
     ]
-
     return InlineKeyboardMarkup(buttons)
 
 
 def format_code_display(entered: str, total: int = 5) -> str:
-    """
-    نمایش ارقام وارد شده
-    مثلاً اگر "12" وارد شده: ● ● ○ ○ ○
-    """
     display = ""
     for i in range(total):
         if i < len(entered):
@@ -83,10 +71,8 @@ def format_code_display(entered: str, total: int = 5) -> str:
 
 
 def code_entry_text(entered: str = "", total: int = 5) -> str:
-    """متن نمایشی بالای کیبورد"""
     dots = format_code_display(entered, total)
     count = len(entered)
-
     return (
         f"🔢 **کد تایید را وارد کنید:**\n\n"
         f"    {dots}\n\n"
@@ -95,42 +81,70 @@ def code_entry_text(entered: str = "", total: int = 5) -> str:
     )
 
 
-# ═══════ پنل قابلیت‌ها ═══════
+# ═══════ قابلیت‌ها ═══════
 
-FEATURES = [
-    ("dice", "🎲 تاس تقلبی"),
-    ("banner", "📢 بنر تبلیغاتی"),
-    ("timed_saver", "⏳ ذخیره تایم‌دار"),
-    ("auto_download", "📥 دانلود خودکار"),
-    ("anti_delete", "🗑 ضد حذف"),
-    ("anti_edit", "✏️ ضد ویرایش"),
-    ("save_from_link", "🔗 ذخیره از لینک"),
-    ("sticker_convert", "🖼 تبدیل استیکر"),
-    ("heart_animation", "❤️ قلب متحرک"),
-    ("channel_monitor", "📡 مانیتور کانال"),
-    ("auto_response", "💬 پاسخ خودکار"),
-    ("upload_url", "📤 آپلود از لینک"),
+# قابلیت‌های همیشه روشن (command-based)
+ALWAYS_ON_FEATURES = [
+    ("dice", "🎲 تاس تقلبی", ".تاس"),
+    ("save_from_link", "🔗 ذخیره از لینک", ".ذخیره"),
+    ("sticker_convert", "🖼 تبدیل استیکر", ".استیکر"),
+    ("heart_animation", "❤️ قلب متحرک", ".قلب"),
+    ("upload_url", "📤 آپلود از لینک", ".آپلود"),
 ]
+
+# قابلیت‌های قابل روشن/خاموش
+TOGGLEABLE_FEATURES = [
+    ("banner", "📢 بنر تبلیغاتی", ".بنر"),
+    ("timed_saver", "⏳ ذخیره تایم‌دار", None),
+    ("auto_download", "📥 دانلود خودکار", None),
+    ("anti_delete", "🗑 ضد حذف", ".ضدحذف"),
+    ("anti_edit", "✏️ ضد ویرایش", ".ضدویرایش"),
+    ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
+    ("auto_response", "💬 پاسخ خودکار", ".دشمن"),
+]
+
+# همه قابلیت‌ها
+ALL_FEATURES = {f[0]: f[1] for f in ALWAYS_ON_FEATURES + TOGGLEABLE_FEATURES}
 
 
 def features_kb(enabled_features: dict) -> InlineKeyboardMarkup:
     buttons = []
-    for feat_key, feat_name in FEATURES:
-        is_on = enabled_features.get(feat_key, False)
-        status = "✅" if is_on else "❌"
+
+    # همیشه روشن
+    buttons.append([
+        InlineKeyboardButton("── همیشه فعال ──", callback_data="noop"),
+    ])
+    for feat_key, feat_name, cmd in ALWAYS_ON_FEATURES:
+        cmd_text = f" ({cmd})" if cmd else ""
         buttons.append([
             InlineKeyboardButton(
-                f"{status} {feat_name}",
+                f"✅ {feat_name}{cmd_text}",
+                callback_data="noop",
+            )
+        ])
+
+    # قابل تنظیم
+    buttons.append([
+        InlineKeyboardButton("── قابل تنظیم ──", callback_data="noop"),
+    ])
+    for feat_key, feat_name, cmd in TOGGLEABLE_FEATURES:
+        is_on = enabled_features.get(feat_key, False)
+        status = "✅" if is_on else "❌"
+        cmd_text = f" ({cmd})" if cmd else ""
+        buttons.append([
+            InlineKeyboardButton(
+                f"{status} {feat_name}{cmd_text}",
                 callback_data=f"toggle_{feat_key}",
             )
         ])
+
     buttons.append([
         InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"),
     ])
     return InlineKeyboardMarkup(buttons)
 
 
-# ═══════ مسیر ذخیره‌سازی ═══════
+# ═══════ ذخیره‌سازی ═══════
 
 STORAGE_FEATURES = [
     ("anti_delete", "🗑 ضد حذف"),
@@ -138,7 +152,6 @@ STORAGE_FEATURES = [
     ("timed_saver", "⏳ تایم‌دار"),
     ("auto_download", "📥 دانلود خودکار"),
     ("save_from_link", "🔗 ذخیره از لینک"),
-    ("channel_monitor", "📡 مانیتور کانال"),
 ]
 
 
@@ -151,6 +164,13 @@ def storage_menu_kb() -> InlineKeyboardMarkup:
                 callback_data=f"storage_{feat_key}",
             )
         ])
+    # مانیتور کانال جداست
+    buttons.append([
+        InlineKeyboardButton(
+            "📡 مانیتور کانال (per-channel)",
+            callback_data="storage_monitor_menu",
+        )
+    ])
     buttons.append([
         InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"),
     ])
@@ -167,9 +187,7 @@ def storage_target_kb(feature_name: str) -> InlineKeyboardMarkup:
             "📢 چنل/گروه (ارسال آیدی)",
             callback_data=f"starget_{feature_name}_custom",
         )],
-        [InlineKeyboardButton(
-            "🔙 بازگشت", callback_data="storage",
-        )],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="storage")],
     ])
 
 

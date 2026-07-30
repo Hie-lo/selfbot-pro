@@ -288,3 +288,51 @@ async def audit_log(
                VALUES ($1, $2, $3)""",
             user_id, action, detail,
         )
+
+# ═══════ Channel Monitor Routes ═══════
+
+
+async def set_channel_route(
+    user_id: int,
+    source_channel_id: int,
+    source_title: str,
+    dest_type: str,
+    dest_id: int,
+    dest_title: str = "",
+    filter_type: str = "all",
+) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO channel_monitor_routes
+                (user_id, source_channel_id, source_channel_title,
+                 destination_type, destination_id, destination_title, filter_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (user_id, source_channel_id) DO UPDATE
+                SET destination_type = $4, destination_id = $5,
+                    destination_title = $6, filter_type = $7,
+                    source_channel_title = $3
+            """,
+            user_id, source_channel_id, source_title,
+            dest_type, dest_id, dest_title, filter_type,
+        )
+
+
+async def get_channel_routes(user_id: int) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM channel_monitor_routes WHERE user_id = $1 AND is_active = TRUE",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def delete_channel_route(user_id: int, source_channel_id: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM channel_monitor_routes WHERE user_id = $1 AND source_channel_id = $2",
+            user_id, source_channel_id,
+        )
