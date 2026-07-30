@@ -32,7 +32,7 @@ TOGGLEABLE_PLUGINS = {
     "anti_delete": AntiDeletePlugin,
     "anti_edit": AntiEditPlugin,
     "auto_response": AutoResponsePlugin,
-    "channel_monitor": ChannelMonitorPlugin,
+    # "channel_monitor": ChannelMonitorPlugin,
 }
 
 # پلاگین‌های فعال هر کاربر

@@ -99,7 +99,7 @@ TOGGLEABLE_FEATURES = [
     ("auto_download", "📥 دانلود خودکار", None),
     ("anti_delete", "🗑 ضد حذف", ".ضدحذف"),
     ("anti_edit", "✏️ ضد ویرایش", ".ضدویرایش"),
-    ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
+    # ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
     ("auto_response", "💬 پاسخ خودکار", ".دشمن"),
 ]
 
