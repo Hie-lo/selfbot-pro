@@ -8,31 +8,27 @@ from database import db
 
 from plugins.dice import DicePlugin
 from plugins.heart import HeartPlugin
+from plugins.save_from_link import SaveFromLinkPlugin
+from plugins.sticker_convert import StickerConvertPlugin
+from plugins.banner import BannerPlugin
+from plugins.timed_saver import TimedSaverPlugin
+from plugins.anti_delete import AntiDeletePlugin
+from plugins.anti_edit import AntiEditPlugin
 
 logger = logging.getLogger("plugin_manager")
 
-# ═══════ Registry ═══════
-
-# پلاگین‌های همیشه روشن
 ALWAYS_ON_PLUGINS = {
     "dice": DicePlugin,
     "heart_animation": HeartPlugin,
-    # بعداً اضافه می‌شه:
-    # "save_from_link": SaveFromLinkPlugin,
-    # "sticker_convert": StickerConvertPlugin,
-    # "upload_url": UploadUrlPlugin,
+    "save_from_link": SaveFromLinkPlugin,
+    "sticker_convert": StickerConvertPlugin,
 }
 
-# پلاگین‌های قابل toggle
 TOGGLEABLE_PLUGINS = {
-    # بعداً اضافه می‌شه:
-    # "banner": BannerPlugin,
-    # "timed_saver": TimedSaverPlugin,
-    # "auto_download": AutoDownloadPlugin,
-    # "anti_delete": AntiDeletePlugin,
-    # "anti_edit": AntiEditPlugin,
-    # "channel_monitor": ChannelMonitorPlugin,
-    # "auto_response": AutoResponsePlugin,
+    "banner": BannerPlugin,
+    "timed_saver": TimedSaverPlugin,
+    "anti_delete": AntiDeletePlugin,
+    "anti_edit": AntiEditPlugin,
 }
 
 # پلاگین‌های فعال هر کاربر

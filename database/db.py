@@ -335,3 +335,70 @@ async def delete_channel_route(user_id: int, source_channel_id: int) -> None:
             "DELETE FROM channel_monitor_routes WHERE user_id = $1 AND source_channel_id = $2",
             user_id, source_channel_id,
         )
+
+# ═══════ Banners ═══════
+
+
+async def save_banner(user_id: int, chat_id: int, msg_id: int, interval: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO banners (user_id, chat_id, source_msg_id, interval_seconds)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING
+            """,
+            user_id, chat_id, msg_id, interval,
+        )
+
+
+async def get_banners_for_chat(user_id: int, chat_id: int) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM banners
+               WHERE user_id = $1 AND chat_id = $2 AND is_active = TRUE""",
+            user_id, chat_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_all_banners(user_id: int) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM banners WHERE user_id = $1 AND is_active = TRUE",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def clear_banners(user_id: int, chat_id: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM banners WHERE user_id = $1 AND chat_id = $2",
+            user_id, chat_id,
+        )
+
+
+# ═══════ Saved Messages Record ═══════
+
+
+async def save_message_record(
+    user_id: int, source_type: str, chat_id: int,
+    chat_title: str, msg_id: int, text: str,
+    media_type: str = None, media_path: str = None,
+) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO saved_messages
+                (user_id, source_type, source_chat_id, source_chat_title,
+                 source_msg_id, original_text, media_type, media_path_enc, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            """,
+            user_id, source_type, chat_id, chat_title,
+            msg_id, text, media_type, media_path or "",
+        )
