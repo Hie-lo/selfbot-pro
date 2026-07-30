@@ -1,5 +1,9 @@
 """
 پلاگین مانیتور کانال
+کامندها:
+  .مانیتور @source @dest
+  .مانیتور حذف @source
+  .لیست مانیتور
 """
 
 from telethon import events
@@ -37,29 +41,50 @@ class ChannelMonitorPlugin(BasePlugin):
         )
 
         async def monitor_listener(event):
+            # پیام‌های خودمون رو رد کن
             if event.out:
                 return
+
             source_id = event.chat_id
+
+            # چک کن آیا این chat_id در مسیرهای ما هست
             if source_id not in self._routes:
                 return
 
             route = self._routes[source_id]
             dest_id = route["dest_id"]
 
+            self.logger.info(
+                f"Monitor hit: source={source_id} dest={dest_id} "
+                f"msg_id={event.message.id}"
+            )
+
             try:
-                await self.client.send_message(dest_id, event.message)
+                # ارسال کپی پیام
+                if event.message.media:
+                    await self.client.send_file(
+                        dest_id,
+                        event.message.media,
+                        caption=event.message.text or "",
+                    )
+                else:
+                    await self.client.send_message(
+                        dest_id,
+                        event.message.text or "",
+                    )
+
                 self.logger.info(f"Forwarded {source_id} -> {dest_id}")
+
             except Exception as e:
-                self.logger.error(f"Monitor forward error: {e}")
+                self.logger.error(f"Monitor forward error: {type(e).__name__}: {e}")
 
         self._add_handler(monitor_listener, events.NewMessage)
-        self.logger.info("loaded")
+        self.logger.info(f"loaded with {len(self._routes)} routes")
 
     async def reload_routes(self):
-        """بارگذاری مجدد مسیرها از DB — فراخوانی از پنل بات"""
         self._routes.clear()
         await self._load_routes()
-        self.logger.info("routes reloaded")
+        self.logger.info(f"routes reloaded: {len(self._routes)} active")
 
     async def _add_monitor(self, event):
         parts = event.message.text.split()
@@ -82,13 +107,18 @@ class ChannelMonitorPlugin(BasePlugin):
             await db.set_channel_route(
                 self.user_id, src_id, src_title, "custom", dst_id, dst_title
             )
-            self._routes[src_id] = {"dest_id": dst_id, "dest_title": dst_title}
+            self._routes[src_id] = {
+                "dest_id": dst_id,
+                "dest_title": dst_title,
+            }
 
             await event.delete()
             await self.client.send_message(
                 event.chat_id,
-                f"✅ مانیتور:\n📥 {src_title}\n📤 {dst_title}"
+                f"✅ مانیتور:\n📥 {src_title} (`{src_id}`)\n📤 {dst_title} (`{dst_id}`)"
             )
+            self.logger.info(f"Route added: {src_id} -> {dst_id}")
+
         except Exception as e:
             await event.delete()
             await self.client.send_message(event.chat_id, f"❌ خطا: {e}")
@@ -109,6 +139,7 @@ class ChannelMonitorPlugin(BasePlugin):
             self._routes.pop(src_id, None)
             await event.delete()
             await self.client.send_message(event.chat_id, "✅ حذف شد.")
+            self.logger.info(f"Route removed: {src_id}")
         except Exception as e:
             await event.delete()
             await self.client.send_message(event.chat_id, f"❌ خطا: {e}")
@@ -120,8 +151,8 @@ class ChannelMonitorPlugin(BasePlugin):
             return
 
         text = "📡 **مسیرها:**\n\n"
-        for src_id, data in self._routes.items():
-            text += f"🔹 `{src_id}` → {data['dest_title']}\n"
+        for i, (src_id, data) in enumerate(self._routes.items(), 1):
+            text += f"{i}. `{src_id}` → {data['dest_title']}\n"
 
         await event.delete()
         await self.client.send_message(event.chat_id, text)
