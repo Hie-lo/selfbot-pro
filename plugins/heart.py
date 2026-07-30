@@ -1,6 +1,7 @@
 """
 پلاگین قلب متحرک
 کامند: .قلب
+اگه ریپلای باشه، روی همون پیام ریپلای میشه
 """
 
 import asyncio
@@ -22,37 +23,36 @@ class HeartPlugin(BasePlugin):
             if not event.out:
                 return
 
+            reply_to = None
+            if event.is_reply:
+                reply_msg = await event.get_reply_message()
+                reply_to = reply_msg.id
+
             await event.delete()
 
-            # شروع با یک متن که حاوی ایموجی باشه
-            msg = await self.client.send_message(
-                event.chat_id,
-                f"  {HEARTS[0]}  "
-            )
+            # ارسال اولیه با ریپلای
+            if reply_to:
+                msg = await self.client.send_message(
+                    event.chat_id, f"  {HEARTS[0]}  ", reply_to=reply_to
+                )
+            else:
+                msg = await self.client.send_message(
+                    event.chat_id, f"  {HEARTS[0]}  "
+                )
 
             for round_num in range(3):
                 for heart in HEARTS:
                     try:
-                        # فاصله‌ها متفاوت تا تلگرام ادیت رو قبول کنه
                         spaces = " " * ((round_num + HEARTS.index(heart)) % 3 + 1)
-                        new_text = f"{spaces}{heart}{spaces}"
-
-                        await msg.edit(new_text)
+                        await msg.edit(f"{spaces}{heart}{spaces}")
                         await asyncio.sleep(0.5)
-
                     except MessageNotModifiedError:
-                        # اگه متن تغییر نکرده بود
                         continue
-
                     except FloodWaitError as e:
-                        self.logger.warning(f"FloodWait {e.seconds}s")
                         await asyncio.sleep(e.seconds + 1)
-
-                    except Exception as e:
-                        self.logger.error(f"Edit error: {type(e).__name__}: {e}")
+                    except Exception:
                         return
 
-            # پایان
             try:
                 await msg.edit("  ❤️  ")
             except Exception:
