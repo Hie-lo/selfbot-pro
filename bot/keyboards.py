@@ -35,9 +35,68 @@ def main_menu_kb(has_account: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+# ═══════ کیبورد مجازی (Virtual Numpad) ═══════
+
+def numpad_kb(entered_digits: str = "") -> InlineKeyboardMarkup:
+    """
+    کیبورد شیشه‌ای برای وارد کردن کد ۵ رقمی
+    entered_digits: ارقام وارد شده تا الان (مثلاً "12")
+    """
+    buttons = [
+        [
+            InlineKeyboardButton("1", callback_data="code_1"),
+            InlineKeyboardButton("2", callback_data="code_2"),
+            InlineKeyboardButton("3", callback_data="code_3"),
+        ],
+        [
+            InlineKeyboardButton("4", callback_data="code_4"),
+            InlineKeyboardButton("5", callback_data="code_5"),
+            InlineKeyboardButton("6", callback_data="code_6"),
+        ],
+        [
+            InlineKeyboardButton("7", callback_data="code_7"),
+            InlineKeyboardButton("8", callback_data="code_8"),
+            InlineKeyboardButton("9", callback_data="code_9"),
+        ],
+        [
+            InlineKeyboardButton("⌫", callback_data="code_back"),
+            InlineKeyboardButton("0", callback_data="code_0"),
+            InlineKeyboardButton("❌ لغو", callback_data="code_cancel"),
+        ],
+    ]
+
+    return InlineKeyboardMarkup(buttons)
+
+
+def format_code_display(entered: str, total: int = 5) -> str:
+    """
+    نمایش ارقام وارد شده
+    مثلاً اگر "12" وارد شده: ● ● ○ ○ ○
+    """
+    display = ""
+    for i in range(total):
+        if i < len(entered):
+            display += "● "
+        else:
+            display += "○ "
+    return display.strip()
+
+
+def code_entry_text(entered: str = "", total: int = 5) -> str:
+    """متن نمایشی بالای کیبورد"""
+    dots = format_code_display(entered, total)
+    count = len(entered)
+
+    return (
+        f"🔢 **کد تایید را وارد کنید:**\n\n"
+        f"    {dots}\n\n"
+        f"    ({count} از {total} رقم)\n\n"
+        f"💡 کد تایید به اپ تلگرام شما ارسال شده."
+    )
+
+
 # ═══════ پنل قابلیت‌ها ═══════
 
-# لیست قابلیت‌ها
 FEATURES = [
     ("dice", "🎲 تاس تقلبی"),
     ("banner", "📢 بنر تبلیغاتی"),
@@ -55,9 +114,6 @@ FEATURES = [
 
 
 def features_kb(enabled_features: dict) -> InlineKeyboardMarkup:
-    """
-    enabled_features = {"dice": True, "banner": False, ...}
-    """
     buttons = []
     for feat_key, feat_name in FEATURES:
         is_on = enabled_features.get(feat_key, False)
@@ -68,11 +124,9 @@ def features_kb(enabled_features: dict) -> InlineKeyboardMarkup:
                 callback_data=f"toggle_{feat_key}",
             )
         ])
-
     buttons.append([
         InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"),
     ])
-
     return InlineKeyboardMarkup(buttons)
 
 
@@ -97,11 +151,9 @@ def storage_menu_kb() -> InlineKeyboardMarkup:
                 callback_data=f"storage_{feat_key}",
             )
         ])
-
     buttons.append([
         InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"),
     ])
-
     return InlineKeyboardMarkup(buttons)
 
 
@@ -121,7 +173,7 @@ def storage_target_kb(feature_name: str) -> InlineKeyboardMarkup:
     ])
 
 
-# ═══════ تایید ═══════
+# ═══════ تایید و بازگشت ═══════
 
 def confirm_kb(action: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -131,8 +183,6 @@ def confirm_kb(action: str) -> InlineKeyboardMarkup:
         ]
     ])
 
-
-# ═══════ بازگشت ═══════
 
 def back_kb(target: str = "back_main") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
