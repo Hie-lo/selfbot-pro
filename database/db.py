@@ -178,13 +178,12 @@ async def get_all_active_sessions() -> list[dict]:
                    u.plan_expires_at, u.is_banned
             FROM account_sessions s
             JOIN users u ON s.user_id = u.id
-            WHERE s.status = 'active'
+            WHERE s.status IN ('active', 'connected')
               AND u.is_active = TRUE
               AND u.is_banned = FALSE
             """
         )
         return [dict(r) for r in rows]
-
 
 # ═══════ Features ═══════
 
