@@ -402,3 +402,47 @@ async def save_message_record(
             user_id, source_type, chat_id, chat_title,
             msg_id, text, media_type, media_path or "",
         )
+
+# ═══════ Auto Response Rules ═══════
+
+
+async def save_auto_response_rule(
+    user_id: int, target_user_id: int, response_list: list,
+) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO auto_response_rules
+                (user_id, target_user_id, response_list)
+            VALUES ($1, $2, $3::jsonb)
+            ON CONFLICT DO NOTHING
+            """,
+            user_id, target_user_id, json.dumps(response_list),
+        )
+
+
+async def get_auto_response_rules(user_id: int) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM auto_response_rules
+               WHERE user_id = $1 AND is_active = TRUE""",
+            user_id,
+        )
+        result = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("response_list"), str):
+                d["response_list"] = json.loads(d["response_list"])
+            result.append(d)
+        return result
+
+
+async def delete_auto_response_rule(user_id: int, target_user_id: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM auto_response_rules WHERE user_id = $1 AND target_user_id = $2",
+            user_id, target_user_id,
+        )

@@ -14,6 +14,7 @@ from plugins.banner import BannerPlugin
 from plugins.timed_saver import TimedSaverPlugin
 from plugins.anti_delete import AntiDeletePlugin
 from plugins.anti_edit import AntiEditPlugin
+from plugins.auto_response import AutoResponsePlugin
 
 logger = logging.getLogger("plugin_manager")
 
@@ -29,6 +30,7 @@ TOGGLEABLE_PLUGINS = {
     "timed_saver": TimedSaverPlugin,
     "anti_delete": AntiDeletePlugin,
     "anti_edit": AntiEditPlugin,
+    "auto_response": AutoResponsePlugin,
 }
 
 # پلاگین‌های فعال هر کاربر
