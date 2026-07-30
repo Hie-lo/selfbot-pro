@@ -29,7 +29,7 @@ from bot.keyboards import (
     back_kb,
     numpad_kb,
     code_entry_text,
-    FEATURES,
+    ALL_FEATURES,
 )
 from database import db
 from core.security import (
@@ -290,7 +290,7 @@ async def cb_storage_feature(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if target:
         current = "💾 Saved Messages" if target["target_type"] == "saved" else f"📢 {target.get('target_title', target['target_id'])}"
     from bot.keyboards import STORAGE_FEATURES
-    fname = dict(STORAGE_FEATURES).get(feature_name, feature_name)
+    fname = ALL_FEATURES.get(feature_name, feature_name)
     await query.edit_message_text(
         f"📂 **{fname}**\n\nمسیر فعلی: {current}\n\nمقصد جدید:",
         reply_markup=storage_target_kb(feature_name),
