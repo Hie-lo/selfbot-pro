@@ -1,5 +1,5 @@
 """
-پلاگین ضد ویرایش — فقط PV
+پلاگین ضد ویرایش — فقط PV — نسخه اصلاح‌شده و ایمن
 """
 
 from datetime import datetime, timezone
@@ -28,12 +28,17 @@ class AntiEditPlugin(BasePlugin):
         async def cache_original(event):
             if not event.is_private:
                 return
-            if not event.message or not event.message.text:
+            
+            # دریافت مطمئن پیام برای کش کردن
+            msg = event.message
+            if not msg:
+                msg = await event.get_message()
+            if not msg or not msg.text:
                 return
 
             chat_id = event.chat_id
-            msg_id = event.message.id
-            sender_id = event.message.sender_id
+            msg_id = msg.id
+            sender_id = msg.sender_id
             is_me = (sender_id == self._my_id)
 
             if chat_id not in self._originals:
@@ -58,34 +63,35 @@ class AntiEditPlugin(BasePlugin):
                     sender_name = str(sender_id) if sender_id else "نامشخص"
 
             self._originals[chat_id][msg_id] = {
-                "text": event.message.text,
+                "text": msg.text,
                 "sender_name": sender_name,
                 "sender_id": sender_id,
                 "is_me": is_me,
             }
-
             self.logger.debug(f"Cached original msg {msg_id} in chat {chat_id}")
 
         self._add_handler(cache_original, events.NewMessage)
 
         async def on_edit(event):
-            self.logger.info(
-                f"Edit event: chat={event.chat_id}, "
-                f"is_private={event.is_private}, "
-                f"msg_id={event.message.id if event.message else None}"
-            )
+            # دریافت پیام ویرایش شده به صورت کاملاً امن از سرور تلگرام
+            msg = event.message
+            if not msg:
+                msg = await event.get_message()
+            
+            if not msg:
+                self.logger.debug("Failed to fetch edited message object")
+                return
+
+            self.logger.info(f"Edit event: chat={event.chat_id}, msg_id={msg.id}")
 
             if not event.is_private:
-                self.logger.debug(f"Skipping non-private edit in chat {event.chat_id}")
-                return
-            if not event.message:
                 return
 
             chat_id = event.chat_id
-            msg_id = event.message.id
-            new_text = event.message.text or ""
+            msg_id = msg.id
+            new_text = msg.text or ""
 
-            # جستجو در تمام کش‌ها (برای handling chat_id=None)
+            # جستجوی سراسری در کش برای هندل کردن آیدی‌های None چت
             original_data = None
             found_chat_id = None
 
@@ -93,12 +99,11 @@ class AntiEditPlugin(BasePlugin):
                 if msg_id in msgs:
                     original_data = msgs[msg_id]
                     found_chat_id = cid
-                    # آپدیت کش با متن جدید
                     self._originals[cid][msg_id]["text"] = new_text
                     break
 
             if not original_data:
-                self.logger.debug(f"Msg {msg_id} not found in any cache")
+                self.logger.debug(f"Original text for msg {msg_id} not found in cache (not pre-cached)")
                 return
 
             original_text = original_data.get("text", "")
@@ -106,7 +111,6 @@ class AntiEditPlugin(BasePlugin):
             sender_id = original_data.get("sender_id", "")
             is_me = original_data.get("is_me", False)
 
-            # اگر متن تغییر نکرده بود
             if original_text == new_text:
                 return
 
@@ -149,31 +153,20 @@ class AntiEditPlugin(BasePlugin):
         self.logger.info("AntiEdit loaded")
 
     async def _get_dest_peer(self):
-        """یافتن مقصد با نرمال‌سازی آیدی کانال"""
         target = await db.get_storage_target(self.user_id, "anti_edit")
-        self.logger.debug(f"Storage target: {target}")
-
         dest_id = self._my_id
         if target and target.get("target_id"):
             dest_id = target["target_id"]
 
-        self.logger.debug(f"Dest ID raw: {dest_id}")
-
         if dest_id == self._my_id:
             return self._my_id
 
-        # نرمال‌سازی: اگر عدد مثبت بزرگه، ممکنه کانال باشه
         if isinstance(dest_id, int) and dest_id > 0 and dest_id < 10000000000:
-            normalized = int(f"-100{dest_id}")
-            self.logger.debug(f"Normalized {dest_id} -> {normalized}")
-            dest_id = normalized
+            dest_id = int(f"-100{dest_id}")
 
         try:
-            entity = await self.client.get_entity(dest_id)
-            self.logger.debug(f"Resolved entity: {getattr(entity, 'title', dest_id)}")
-            return entity
-        except Exception as e:
-            self.logger.warning(f"Failed to resolve dest {dest_id}: {e}")
+            return await self.client.get_entity(dest_id)
+        except Exception:
             return dest_id
 
     async def stop(self):
