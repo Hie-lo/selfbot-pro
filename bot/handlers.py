@@ -358,24 +358,28 @@ async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT
 async def handle_storage_target_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update)
     feature_name = context.user_data.get("awaiting_storage_target")
-    
+
     if not feature_name:
-        return  # پیام عادی است، نادیده بگیر
+        return
 
     text = update.message.text.strip()
     safe_text = html.escape(text)
 
-    # اعتبارسنجی اولیه فرمت ورودی
-    if not (text.startswith("@") or text.lstrip("-").isdigit()):
+    # اعتبارسنجی سختگیرانه
+    is_username = text.startswith("@") and len(text) > 1
+    is_numeric = text.lstrip("-").isdigit()
+
+    if not (is_username or is_numeric):
         await update.message.reply_text(
-            "❌ <b>فرمت نامعتبر است.</b>\n"
-            "لطفاً فقط یوزرنیم با @ یا آیدی عددی با -100 بفرستید.\n\n"
+            "❌ <b>فرمت نامعتبر است.</b>\n\n"
+            "لطفاً یکی از این فرمت‌ها را بفرستید:\n"
+            "• یوزرنیم با @ (مثل <code>@channel</code>)\n"
+            "• آیدی عددی (مثل <code>-1001234567890</code>)\n\n"
             "برای انصراف /cancel بزنید.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return
 
-    # دریافت کلاینت تلگرام کاربر برای بررسی دسترسی به کانال
     from core.client_manager import get_client
     client = await get_client(user["id"])
 
@@ -393,8 +397,6 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
     try:
         from telethon import utils
         entity = await client.get_entity(text)
-        
-        # استفاده از متد استاندارد برای آیدی صحیح
         target_id = utils.get_peer_id(entity)
 
         if hasattr(entity, "title") and entity.title:
@@ -410,9 +412,10 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
             f"❌ کانال یا گروه «<b>{safe_text}</b>» پیدا نشد.\n\n"
             f"📌 <b>دلایل احتمالی:</b>\n"
             f"۱. اکانت سلف‌بات شما هنوز عضو این کانال نشده است.\n"
-            f"۲. یوزرنیم یا آیدی وارد شده اشتباه است.\n\n"
+            f"۲. یوزرنیم یا آیدی وارد شده اشتباه است.\n"
+            f"۳. کانال حذف شده یا خصوصی است.\n\n"
             f"لطفاً مجدداً ارسال کنید یا برای انصراف /cancel بزنید.",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         return
 
@@ -420,11 +423,9 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("❌ آیدی مقصد نامعتبر است. مجدداً تلاش کنید.")
         return
 
-    # پاکسازی امن ورودی‌ها برای دیتابیس و نمایش
-    safe_title = html.escape(target_title)
+    safe_title = html.escape(str(target_title))
     safe_feature = html.escape(feature_name)
 
-    # ذخیره در دیتابیس PostgreSQL
     try:
         await db.set_storage_target(
             user["id"], feature_name, "custom",
@@ -440,10 +441,8 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
         context.user_data.pop("awaiting_storage_target", None)
         return
 
-    # حذف وضعیت انتظار از حافظه موقت
     context.user_data.pop("awaiting_storage_target", None)
 
-    # ارسال پیام موفقیت با فرمت امن HTML
     await update.message.reply_text(
         f"✅ مسیر ذخیره‌سازی «<b>{safe_feature}</b>» با موفقیت تنظیم شد:\n\n"
         f"📂 نام مقصد: <b>{safe_title}</b>\n"
@@ -469,22 +468,24 @@ async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t("no_subscription", price=f"{MONTHLY_PRICE_TOMAN:,}"),
             reply_markup=back_kb(),
         )
-        return ConversationHandler.END
+        return
 
     session = await db.get_session(user["id"])
     if session:
         await query.edit_message_text(t("login_already"), reply_markup=back_kb())
-        return ConversationHandler.END
+        return
 
     if not check_rate_limit(user["telegram_id"], "login", 3, 300):
         await query.edit_message_text(t("login_too_many"), reply_markup=back_kb())
-        return ConversationHandler.END
+        return
 
+    # ست کردن state
+    context.user_data["awaiting_phone"] = True
     await query.edit_message_text(t("login_start"))
-    return STATE_PHONE
 
 
-async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت شماره تلفن"""
     user = await get_or_create_user(update)
     raw_phone = update.message.text.strip()
 
@@ -496,10 +497,12 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = validate_phone(raw_phone)
     if not phone:
         await safe_send(update.effective_chat, t("login_invalid_phone"))
-        return STATE_PHONE
+        return
 
     context.user_data["login_phone"] = phone
     context.user_data["login_phone_hash"] = hash_phone(phone)
+    # حذف awaiting_phone چون به مرحله کد میریم
+    context.user_data.pop("awaiting_phone", None)
 
     try:
         phone_code_hash = await client_manager.request_login_code(
@@ -514,7 +517,7 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_kb(False),
         )
         context.user_data.clear()
-        return ConversationHandler.END
+        return
     except Exception as e:
         logger.error(f"Login code error user {user['id']}: {type(e).__name__}: {e}")
         await client_manager.cleanup_pending(user["id"])
@@ -524,11 +527,9 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t("login_failed", error="خطا در ارسال کد"),
             reply_markup=main_menu_kb(False),
         )
-        return ConversationHandler.END
+        return
 
     await db.audit_log(user["id"], "login_code_sent", "")
-
-    # نمایش کیبورد مجازی
     context.user_data["entered_code"] = ""
 
     try:
@@ -540,10 +541,6 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.warning(f"Numpad display failed user {user['id']}: {e}")
-
-    # از اینجا به بعد conversation تمام می‌شود
-    # و ادامه لاگین از طریق callback query (کیبورد مجازی) انجام می‌شود
-    return ConversationHandler.END
 
 
 async def cb_code_digit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -663,25 +660,42 @@ async def _process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code
         )
 
 
-async def handle_2fa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    هندلر پیام متنی برای 2FA
-    فقط وقتی فعاله که awaiting_2fa = True باشه
+    Router واحد برای همه پیام‌های متنی PV
+    بر اساس state در user_data تصمیم می‌گیره
     """
- # اولویت ۱: storage target
+    # اولویت ۱: storage target
     if context.user_data.get("awaiting_storage_target"):
         await handle_storage_target_input(update, context)
         return
 
     # اولویت ۲: monitor source
-    if context.user_data.get("mon_source_ref"):
-        # ... (کد قبلی monitor)
+    if context.user_data.get("awaiting_mon_source"):
+        await handle_mon_source_input(update, context)
         return
 
-    # اولویت ۳: 2FA
-    if not context.user_data.get("awaiting_2fa"):
+    # اولویت ۳: monitor dest
+    if context.user_data.get("awaiting_mon_dest"):
+        await handle_mon_dest_input(update, context)
         return
-    
+
+    # اولویت ۴: login phone
+    if context.user_data.get("awaiting_phone"):
+        await handle_phone_input(update, context)
+        return
+
+    # اولویت ۵: 2FA
+    if context.user_data.get("awaiting_2fa"):
+        await handle_2fa_input(update, context)
+        return
+
+    # هیچ state ای نیست → نادیده بگیر
+    return
+
+
+async def handle_2fa_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش 2FA"""
     user = await get_or_create_user(update)
     raw_password = update.message.text.strip()
 
@@ -827,7 +841,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # پاکسازی ALL stateها
+    # پاکسازی همه stateها
     context.user_data.clear()
 
     session = await db.get_session(user["id"])
@@ -835,7 +849,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❌ عملیات لغو شد.",
         reply_markup=main_menu_kb(session is not None),
     )
-    return ConversationHandler.END
 
 # ═══════════════════════════════════
 # ادمین
@@ -991,36 +1004,71 @@ async def cb_mon_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    context.user_data["awaiting_mon_source"] = True
+
     await query.edit_message_text(
-        "📡 **اضافه کردن مسیر جدید**\n\n"
-        "آیدی یا یوزرنیم **کانال منبع** را بفرستید:\n\n"
-        "مثال: `@channel_name` یا `-1001234567890`\n\n"
+        "📡 <b>اضافه کردن مسیر جدید</b>\n\n"
+        "آیدی یا یوزرنیم <b>کانال منبع</b> را بفرستید:\n\n"
+        "مثال: <code>@channel_name</code> یا <code>-1001234567890</code>\n\n"
         "/cancel برای انصراف",
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
-    return STATE_MON_SOURCE
 
 
-async def handle_mon_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_mon_source_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت کانال منبع"""
     text = update.message.text.strip()
+    safe_text = html.escape(text)
+
+    # اعتبارسنجی فرمت
+    if not (text.startswith("@") or text.lstrip("-").isdigit()):
+        await update.message.reply_text(
+            "❌ <b>فرمت نامعتبر است.</b>\n\n"
+            "لطفاً یکی از این فرمت‌ها را بفرستید:\n"
+            "• یوزرنیم با @ (مثل <code>@channel</code>)\n"
+            "• آیدی عددی (مثل <code>-1001234567890</code>)\n\n"
+            "/cancel برای انصراف",
+            parse_mode="HTML",
+        )
+        return
 
     context.user_data["mon_source_ref"] = text
+    context.user_data.pop("awaiting_mon_source", None)
+    context.user_data["awaiting_mon_dest"] = True
+
     await update.message.reply_text(
-        "✅ منبع دریافت شد.\n\n"
-        "حالا آیدی یا یوزرنیم **مقصد** را بفرستید:\n\n"
-        "مثال: `@dest_channel` یا `-1001234567890`\n\n"
-        "/cancel برای انصراف",
-        parse_mode="Markdown",
+        f"✅ منبع دریافت شد: <code>{safe_text}</code>\n\n"
+        f"حالا آیدی یا یوزرنیم <b>مقصد</b> را بفرستید:\n\n"
+        f"مثال: <code>@dest_channel</code> یا <code>-1001234567890</code>\n\n"
+        f"/cancel برای انصراف",
+        parse_mode="HTML",
     )
-    return STATE_MON_DEST
 
 
-async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت مقصد و ثبت مسیر"""
     user = await get_or_create_user(update)
     src_ref = context.user_data.get("mon_source_ref", "")
     dst_ref = update.message.text.strip()
+    safe_dst = html.escape(dst_ref)
+
+    # اعتبارسنجی
+    if not src_ref:
+        await update.message.reply_text(
+            "❌ منبع مشخص نیست. از اول شروع کنید.",
+            reply_markup=main_menu_kb(True),
+        )
+        context.user_data.clear()
+        return
+
+    if not (dst_ref.startswith("@") or dst_ref.lstrip("-").isdigit()):
+        await update.message.reply_text(
+            "❌ <b>فرمت مقصد نامعتبر است.</b>\n\n"
+            "لطفاً یوزرنیم با @ یا آیدی عددی بفرستید.\n\n"
+            "/cancel برای انصراف",
+            parse_mode="HTML",
+        )
+        return
 
     from core.client_manager import get_client
     client = await get_client(user["id"])
@@ -1031,14 +1079,15 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_kb(False),
         )
         context.user_data.clear()
-        return ConversationHandler.END
+        return
 
     try:
+        from telethon import utils
         src_entity = await client.get_entity(src_ref)
         dst_entity = await client.get_entity(dst_ref)
 
-        src_id = src_entity.id
-        dst_id = dst_entity.id
+        src_id = utils.get_peer_id(src_entity)
+        dst_id = utils.get_peer_id(dst_entity)
         src_title = getattr(src_entity, "title", src_ref)
         dst_title = getattr(dst_entity, "title", dst_ref)
 
@@ -1046,23 +1095,33 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user["id"], src_id, src_title, "custom", dst_id, dst_title
         )
 
-        # اطلاع به پلاگین
         from core.plugin_manager import get_active_plugins
         plugins = get_active_plugins(user["id"])
         monitor = plugins.get("channel_monitor")
         if monitor:
             await monitor.reload_routes()
 
+        safe_src_title = html.escape(str(src_title))
+        safe_dst_title = html.escape(str(dst_title))
+
         await update.message.reply_text(
-            f"✅ مسیر ثبت شد:\n📥 منبع: {src_title}\n📤 مقصد: {dst_title}",
+            f"✅ مسیر ثبت شد:\n"
+            f"📥 منبع: <b>{safe_src_title}</b>\n"
+            f"📤 مقصد: <b>{safe_dst_title}</b>",
             reply_markup=main_menu_kb(True),
+            parse_mode="HTML",
         )
+        logger.info(f"Monitor route added: {src_id} -> {dst_id}")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {str(e)[:100]}")
+        logger.error(f"Monitor add failed: {e}")
+        await update.message.reply_text(
+            f"❌ خطا در ثبت مسیر:\n<code>{html.escape(str(e)[:200])}</code>\n\n"
+            f"مطمئن شو اکانتت عضو کانال‌هاست.",
+            parse_mode="HTML",
+        )
 
     context.user_data.clear()
-    return ConversationHandler.END
 
 
 
@@ -1072,91 +1131,56 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_handlers(app: Application):
+    """ثبت همه هندلرها با اولویت درست"""
 
-    # ── Conversations اول ──
-
-    login_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(cb_connect, pattern="^connect$"),
-        ],
-        states={
-            STATE_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-        ],
-        per_user=True,
-        per_chat=True,
-        conversation_timeout=LOGIN_TIMEOUT,
-    )
-
-
-    monitor_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"),
-        ],
-        states={
-            STATE_MON_SOURCE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_source),
-            ],
-            STATE_MON_DEST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_dest),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-        ],
-        per_user=True,
-        per_chat=True,
-        conversation_timeout=300,
-    )
-
-    # ── ثبت به ترتیب اولویت ──
-
-    # 1. Commands
+    # ── 1. Commands ──
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("activate", cmd_activate))
     app.add_handler(CommandHandler("users", cmd_users))
 
-    # 2. Conversations (باید قبل از MessageHandler عمومی باشن)
-    app.add_handler(login_conv)
-    app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
-    app.add_handler(monitor_conv)
-
-    # 3. Callback queries
+    # ── 2. Callback queries ──
+    # کیبورد لاگین
     app.add_handler(CallbackQueryHandler(cb_code_digit, pattern=r"^code_[0-9]$"))
     app.add_handler(CallbackQueryHandler(cb_code_back, pattern="^code_back$"))
     app.add_handler(CallbackQueryHandler(cb_code_cancel, pattern="^code_cancel$"))
 
+    # noop
     async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-
     app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
 
+    # منوی اصلی
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))
+    app.add_handler(CallbackQueryHandler(cb_connect, pattern="^connect$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern="^panel$"))
     app.add_handler(CallbackQueryHandler(cb_features, pattern="^features$"))
     app.add_handler(CallbackQueryHandler(cb_toggle_feature, pattern=r"^toggle_"))
+
+    # ذخیره‌سازی — ترتیب مهمه!
     app.add_handler(CallbackQueryHandler(cb_storage, pattern="^storage$"))
     app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
+
+    # مانیتور
+    app.add_handler(CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"))
     app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
     app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
     app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
-    app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
-    app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
+
+    # سایر
     app.add_handler(CallbackQueryHandler(cb_subscription, pattern="^subscription$"))
     app.add_handler(CallbackQueryHandler(cb_status, pattern="^status$"))
     app.add_handler(CallbackQueryHandler(cb_disconnect, pattern="^disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_disconnect, pattern="^confirm_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_help, pattern="^help$"))
 
-    # 4. Message handler عمومی (فقط برای 2FA — آخرین اولویت)
+    # ── 3. Text Router (state-based) ──
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_2fa_message,
+        handle_text_router,
     ))
 
     logger.info("All handlers registered")

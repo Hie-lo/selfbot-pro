@@ -69,9 +69,14 @@ class AntiEditPlugin(BasePlugin):
         self._add_handler(cache_original, events.NewMessage)
 
         async def on_edit(event):
-            self.logger.info(f"Edit event: chat={event.chat_id}, msg_id={event.message.id if event.message else None}")
+            self.logger.info(
+                f"Edit event: chat={event.chat_id}, "
+                f"is_private={event.is_private}, "
+                f"msg_id={event.message.id if event.message else None}"
+            )
 
             if not event.is_private:
+                self.logger.debug(f"Skipping non-private edit in chat {event.chat_id}")
                 return
             if not event.message:
                 return
