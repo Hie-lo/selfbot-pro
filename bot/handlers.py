@@ -1,11 +1,11 @@
 """
-هندلرهای ربات تلگرام — نسخه کیبورد مجازی
+هندلرهای ربات تلگرام — نسخه نهایی بدون ConversationHandler برای storage/monitor
 """
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from bot.keyboards import monitor_menu_kb, mon_confirm_delete_kb
+from datetime import datetime, timezone, timedelta
+
 from telegram import Update
 from telegram.error import NetworkError, TimedOut, RetryAfter
 from telegram.ext import (
@@ -29,11 +29,15 @@ from bot.keyboards import (
     back_kb,
     numpad_kb,
     code_entry_text,
+    monitor_menu_kb,
+    mon_confirm_delete_kb,
+    FEATURES,
     ALL_FEATURES,
 )
 from database import db
 from core.security import (
     validate_phone,
+    validate_telegram_code,
     validate_2fa_password,
     check_rate_limit,
     hash_phone,
@@ -43,18 +47,13 @@ from core import client_manager
 
 logger = logging.getLogger("bot.handlers")
 
-# ── Conversation States ──
-(
-    STATE_PHONE,
-    STATE_2FA,
-    STATE_STORAGE_TARGET,
-) = range(3)
+# ── Conversation States (فقط برای لاگین) ──
+STATE_PHONE = 0
 
 
 # ═══════════════════════════════════
 # Helpers
 # ═══════════════════════════════════
-
 
 async def check_subscription(user: dict) -> bool:
     if not user:
@@ -107,7 +106,6 @@ def extract_storage_feature(callback_data: str, suffix: str) -> str:
 # /start
 # ═══════════════════════════════════
 
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update)
     name = update.effective_user.first_name or "کاربر"
@@ -122,10 +120,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Callbacks: منو
 # ═══════════════════════════════════
 
-
 async def cb_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    context.user_data.clear()
     user = await get_or_create_user(update)
     session = await db.get_session(user["id"])
     name = update.effective_user.first_name or "کاربر"
@@ -188,7 +186,6 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # قابلیت‌ها
 # ═══════════════════════════════════
 
-
 async def cb_features(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -216,30 +213,21 @@ async def cb_features(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     feature_name = query.data.replace("toggle_", "")
-
-    # noop برای دکمه‌های غیرفعال
-    if feature_name == "noop" or query.data == "noop":
+    if query.data == "noop" or feature_name == "noop":
         await query.answer()
         return
-
     user = await get_or_create_user(update)
     has_sub = await check_subscription(user)
     if not has_sub:
         await query.answer("❌ اشتراک ندارید", show_alert=True)
         return
-
     is_on = await db.is_feature_enabled(user["id"], feature_name)
     new_state = not is_on
     await db.set_feature(user["id"], feature_name, new_state)
-    await db.audit_log(
-        user["id"], "feature_toggle",
-        f"{feature_name} -> {'ON' if new_state else 'OFF'}",
-    )
+    await db.audit_log(user["id"], "feature_toggle", f"{feature_name} -> {'ON' if new_state else 'OFF'}")
 
-    # load/unload plugin در لحظه
     from core.client_manager import get_client
     from core.plugin_manager import enable_plugin, disable_plugin
-
     client = await get_client(user["id"])
     if client:
         if new_state:
@@ -247,10 +235,8 @@ async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await disable_plugin(user["id"], feature_name)
 
-    from bot.keyboards import ALL_FEATURES
     fname = ALL_FEATURES.get(feature_name, feature_name)
     await query.answer(f"{'✅' if new_state else '❌'} {fname}", show_alert=False)
-
     features = await db.get_features(user["id"])
     enabled_map = {f["feature_name"]: f["is_enabled"] for f in features}
     await query.edit_message_text(
@@ -261,9 +247,8 @@ async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════
-# ذخیره‌سازی
+# ذخیره‌سازی — بدون ConversationHandler
 # ═══════════════════════════════════
-
 
 async def cb_storage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -290,7 +275,7 @@ async def cb_storage_feature(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if target:
         current = "💾 Saved Messages" if target["target_type"] == "saved" else f"📢 {target.get('target_title', target['target_id'])}"
     from bot.keyboards import STORAGE_FEATURES
-    fname = ALL_FEATURES.get(feature_name, feature_name)
+    fname = dict(STORAGE_FEATURES).get(feature_name, feature_name)
     await query.edit_message_text(
         f"📂 **{fname}**\n\nمسیر فعلی: {current}\n\nمقصد جدید:",
         reply_markup=storage_target_kb(feature_name),
@@ -317,24 +302,27 @@ async def cb_storage_target_saved(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دکمه چنل/گروه زده شد — منتظر پیام متنی"""
+    """
+    دکمه چنل/گروه — فقط state ست می‌کنه و پیام می‌ده
+    هیچ ConversationHandler درگیر نیست
+    """
     query = update.callback_query
     await query.answer()
 
     try:
         feature_name = extract_storage_feature(query.data, "_custom")
     except ValueError:
-        await query.edit_message_text(
-            t("error_general"),
-            reply_markup=back_kb("storage"),
-        )
+        logger.error(f"Invalid callback data: {query.data}")
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
         return
 
-    # به جای conversation، از user_data استفاده می‌کنیم
+    # ست کردن state ساده
     context.user_data["awaiting_storage_target"] = feature_name
 
+    logger.info(f"Storage target mode activated for feature={feature_name}, user={query.from_user.id}")
+
     await query.edit_message_text(
-        f"📢 **تنظیم مقصد برای «{feature_name}»**\n\n"
+        f"📢 **تنظیم مقصد «{feature_name}»**\n\n"
         f"آیدی عددی یا یوزرنیم مقصد را بفرستید:\n\n"
         f"مثال:\n"
         f"`-1001234567890`\n"
@@ -344,103 +332,104 @@ async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-async def handle_storage_target_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت آیدی/یوزرنیم مقصد — بدون ConversationHandler"""
-    # فقط وقتی فعال باشه که کاربر دکمه custom زده باشه
-    feature_name = context.user_data.get("awaiting_storage_target")
-    if not feature_name:
-        return  # پیام عادی، کاری نکن
+# ═══════════════════════════════════
+# مانیتور کانال — بدون ConversationHandler
+# ═══════════════════════════════════
 
+async def cb_monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     user = await get_or_create_user(update)
-    text = update.message.text.strip()
+    routes = await db.get_all_channel_routes(user["id"])
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**\n\n"
+        "هر کانال را به یک مقصد وصل کنید.",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
 
-    # اعتبارسنجی فرمت
-    if not (text.startswith("@") or text.lstrip("-").isdigit()):
-        await update.message.reply_text(
-            "❌ فرمت نامعتبر.\n"
-            "@username یا آیدی عددی بفرستید.\n\n"
-            "/cancel برای انصراف",
-        )
-        return
 
-    # resolve با Telethon
+async def cb_mon_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    src_id = int(query.data.replace("mon_toggle_", ""))
+    user = await get_or_create_user(update)
+    new_state = await db.toggle_channel_route(user["id"], src_id)
+    status = "فعال ✅" if new_state else "غیرفعال ❌"
+    await query.answer(f"مسیر {status} شد", show_alert=False)
     from core.client_manager import get_client
+    from core.plugin_manager import get_active_plugins
     client = await get_client(user["id"])
+    if client:
+        plugins = get_active_plugins(user["id"])
+        monitor = plugins.get("channel_monitor")
+        if monitor:
+            await monitor.reload_routes()
+    routes = await db.get_all_channel_routes(user["id"])
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
 
-    if not client:
-        await update.message.reply_text(
-            "❌ اکانت متصل نیست.",
-            reply_markup=main_menu_kb(False),
-        )
-        context.user_data.pop("awaiting_storage_target", None)
-        return
 
-    target_id = 0
-    target_title = text
+async def cb_mon_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    src_id = int(query.data.replace("mon_delete_", ""))
+    await query.edit_message_text(
+        f"⚠️ حذف مسیر `{src_id}`?",
+        reply_markup=mon_confirm_delete_kb(src_id),
+        parse_mode="Markdown",
+    )
 
-    try:
-        entity = await client.get_entity(text)
-        target_id = entity.id
 
-        if hasattr(entity, "title") and entity.title:
-            target_title = entity.title
-        elif hasattr(entity, "first_name") and entity.first_name:
-            target_title = entity.first_name
+async def cb_mon_confirm_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    src_id = int(query.data.replace("mon_confirm_del_", ""))
+    user = await get_or_create_user(update)
+    await db.delete_channel_route(user["id"], src_id)
+    from core.client_manager import get_client
+    from core.plugin_manager import get_active_plugins
+    client = await get_client(user["id"])
+    if client:
+        plugins = get_active_plugins(user["id"])
+        monitor = plugins.get("channel_monitor")
+        if monitor:
+            await monitor.reload_routes()
+    await query.answer("✅ حذف شد", show_alert=True)
+    routes = await db.get_all_channel_routes(user["id"])
+    await query.edit_message_text(
+        "📡 **مانیتور کانال**",
+        reply_markup=monitor_menu_kb(routes),
+        parse_mode="Markdown",
+    )
 
-        logger.info(f"Resolved storage: {text} -> {target_id} ({target_title})")
 
-    except Exception as e:
-        logger.warning(f"Resolve failed for {text}: {e}")
-        await update.message.reply_text(
-            f"❌ «{text}» پیدا نشد.\n"
-            f"• اکانت عضو نیست؟\n"
-            f"• یوزرنیم اشتباه؟\n\n"
-            f"دوباره امتحان کنید یا /cancel",
-        )
-        return
-
-    if not target_id:
-        await update.message.reply_text("❌ آیدی نامعتبر.")
-        return
-
-    # ذخیره در DB
-    try:
-        await db.set_storage_target(
-            user["id"], feature_name, "custom",
-            target_id, target_title,
-        )
-        await db.audit_log(
-            user["id"], "storage_set",
-            f"{feature_name} -> {target_title} ({target_id})",
-        )
-    except Exception as e:
-        logger.error(f"DB storage save failed: {e}")
-        await update.message.reply_text("❌ خطا در ذخیره.")
-        context.user_data.pop("awaiting_storage_target", None)
-        return
-
-    # پاک کردن state
-    context.user_data.pop("awaiting_storage_target", None)
-
-    await update.message.reply_text(
-        f"✅ مسیر «{feature_name}» تنظیم شد:\n"
-        f"📂 {target_title}\n"
-        f"🆔 `{target_id}`",
-        reply_markup=main_menu_kb(True),
+async def cb_mon_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دکمه اضافه کردن مسیر — state ست می‌کنه"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["awaiting_monitor_source"] = True
+    logger.info(f"Monitor add mode activated, user={query.from_user.id}")
+    await query.edit_message_text(
+        "📡 **اضافه کردن مسیر**\n\n"
+        "آیدی یا یوزرنیم **کانال منبع** را بفرستید:\n\n"
+        "مثال: `@channel` یا `-1001234567890`\n\n"
+        "/cancel برای انصراف",
         parse_mode="Markdown",
     )
 
 
 # ═══════════════════════════════════
-# لاگین — کیبورد مجازی
+# لاگین — ConversationHandler (فقط لاگین)
 # ═══════════════════════════════════
-
 
 async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = await get_or_create_user(update)
-
     has_sub = await check_subscription(user)
     if not has_sub:
         await query.edit_message_text(
@@ -448,16 +437,13 @@ async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_kb(),
         )
         return ConversationHandler.END
-
     session = await db.get_session(user["id"])
     if session:
         await query.edit_message_text(t("login_already"), reply_markup=back_kb())
         return ConversationHandler.END
-
     if not check_rate_limit(user["telegram_id"], "login", 3, 300):
         await query.edit_message_text(t("login_too_many"), reply_markup=back_kb())
         return ConversationHandler.END
-
     await query.edit_message_text(t("login_start"))
     return STATE_PHONE
 
@@ -465,7 +451,6 @@ async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update)
     raw_phone = update.message.text.strip()
-
     try:
         await update.message.delete()
     except Exception:
@@ -481,32 +466,21 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         phone_code_hash = await client_manager.request_login_code(
-            user_db_id=user["id"],
-            phone=phone,
+            user_db_id=user["id"], phone=phone,
         )
         context.user_data["phone_code_hash"] = phone_code_hash
     except ValueError as e:
-        await safe_send(
-            update.effective_chat,
-            t("login_failed", error=str(e)),
-            reply_markup=main_menu_kb(False),
-        )
+        await safe_send(update.effective_chat, t("login_failed", error=str(e)), reply_markup=main_menu_kb(False))
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Login code error user {user['id']}: {type(e).__name__}: {e}")
         await client_manager.cleanup_pending(user["id"])
         context.user_data.clear()
-        await safe_send(
-            update.effective_chat,
-            t("login_failed", error="خطا در ارسال کد"),
-            reply_markup=main_menu_kb(False),
-        )
+        await safe_send(update.effective_chat, t("login_failed", error="خطا در ارسال کد"), reply_markup=main_menu_kb(False))
         return ConversationHandler.END
 
     await db.audit_log(user["id"], "login_code_sent", "")
-
-    # نمایش کیبورد مجازی
     context.user_data["entered_code"] = ""
 
     try:
@@ -517,51 +491,40 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     except Exception as e:
-        logger.warning(f"Numpad display failed user {user['id']}: {e}")
+        logger.warning(f"Numpad display failed: {e}")
 
-    # از اینجا به بعد conversation تمام می‌شود
-    # و ادامه لاگین از طریق callback query (کیبورد مجازی) انجام می‌شود
     return ConversationHandler.END
 
 
-async def cb_code_digit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """کاربر یک رقم از کیبورد مجازی زد"""
-    query = update.callback_query
+# ═══════════════════════════════════
+# کیبورد مجازی لاگین
+# ═══════════════════════════════════
 
+async def cb_code_digit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     digit = query.data.replace("code_", "")
     entered = context.user_data.get("entered_code", "")
-
     if len(entered) >= 5:
-        await query.answer("کد کامل وارد شده")
+        await query.answer("کد کامل شده")
         return
-
     entered += digit
     context.user_data["entered_code"] = entered
-
     await query.answer(f"رقم {digit}")
-
-    # آپدیت نمایش
     await query.edit_message_text(
         code_entry_text(entered),
         reply_markup=numpad_kb(entered),
         parse_mode="Markdown",
     )
-
-    # اگر ۵ رقم کامل شد → لاگین
     if len(entered) == 5:
         await _process_code(update, context, entered)
 
 
 async def cb_code_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دکمه پاک کردن (Backspace)"""
     query = update.callback_query
-
     entered = context.user_data.get("entered_code", "")
-
     if entered:
         entered = entered[:-1]
         context.user_data["entered_code"] = entered
-
     await query.answer()
     await query.edit_message_text(
         code_entry_text(entered),
@@ -571,145 +534,52 @@ async def cb_code_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_code_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دکمه لغو از کیبورد مجازی"""
     query = update.callback_query
     await query.answer()
-
     user = await get_or_create_user(update)
     await client_manager.cleanup_pending(user["id"])
     context.user_data.clear()
-
-    await query.edit_message_text(
-        "❌ ورود لغو شد.",
-        reply_markup=main_menu_kb(False),
-    )
+    await query.edit_message_text("❌ ورود لغو شد.", reply_markup=main_menu_kb(False))
 
 
 async def _process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
-    """پردازش کد ۵ رقمی بعد از تکمیل شدن"""
     query = update.callback_query
     user = await get_or_create_user(update)
-
-    # نمایش loading
-    await query.edit_message_text(
-        "⏳ **در حال بررسی کد...**",
-        parse_mode="Markdown",
-    )
+    await query.edit_message_text("⏳ **در حال بررسی...**", parse_mode="Markdown")
 
     try:
-        result = await client_manager.complete_login(
-            user_db_id=user["id"],
-            code=code,
-        )
+        result = await client_manager.complete_login(user_db_id=user["id"], code=code)
     except ValueError as e:
         context.user_data.clear()
-        await query.edit_message_text(
-            t("login_failed", error=str(e)),
-            reply_markup=main_menu_kb(False),
-        )
+        await query.edit_message_text(t("login_failed", error=str(e)), reply_markup=main_menu_kb(False))
         return
     except Exception as e:
-        logger.error(f"Login verify failed user {user['id']}: {type(e).__name__}: {e}")
+        logger.error(f"Login verify failed: {e}")
         await client_manager.cleanup_pending(user["id"])
         context.user_data.clear()
-        await query.edit_message_text(
-            t("login_failed", error="کد اشتباه یا منقضی شده"),
-            reply_markup=main_menu_kb(False),
-        )
+        await query.edit_message_text(t("login_failed", error="کد اشتباه یا منقضی"), reply_markup=main_menu_kb(False))
         return
 
     if result == "2fa_required":
-        await query.edit_message_text(
-            t("login_2fa", timeout=LOGIN_TIMEOUT),
-        )
-        # 2FA از طریق متن عادی وارد می‌شود
         context.user_data["awaiting_2fa"] = True
-        return
-
-    # لاگین موفق
-    try:
-        await _finalize_and_save(user, context)
-        await query.edit_message_text(
-            t("login_success"),
-            reply_markup=main_menu_kb(True),
-        )
-    except Exception as e:
-        logger.error(f"Finalize failed user {user['id']}: {type(e).__name__}: {e}")
-        await query.edit_message_text(
-            t("login_failed", error="خطا در ذخیره سشن"),
-            reply_markup=main_menu_kb(False),
-        )
-
-
-async def handle_2fa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    هندلر پیام متنی برای 2FA
-    فقط وقتی فعاله که awaiting_2fa = True باشه
-    """
- # اولویت ۱: storage target
-    if context.user_data.get("awaiting_storage_target"):
-        await handle_storage_target_input(update, context)
-        return
-
-    # اولویت ۲: monitor source
-    if context.user_data.get("mon_source_ref"):
-        # ... (کد قبلی monitor)
-        return
-
-    # اولویت ۳: 2FA
-    if not context.user_data.get("awaiting_2fa"):
-        return
-    
-    user = await get_or_create_user(update)
-    raw_password = update.message.text.strip()
-
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-    password = validate_2fa_password(raw_password)
-    if not password:
-        await safe_send(update.effective_chat, "❌ رمز نامعتبر. دوباره وارد کنید:")
-        return
-
-    try:
-        await client_manager.complete_2fa(
-            user_db_id=user["id"],
-            password=password,
-        )
-    except Exception as e:
-        logger.error(f"2FA failed user {user['id']}: {type(e).__name__}: {e}")
-        await client_manager.cleanup_pending(user["id"])
-        context.user_data.clear()
-        await safe_send(
-            update.effective_chat,
-            t("login_failed", error="رمز دوعاملی اشتباه"),
-            reply_markup=main_menu_kb(False),
-        )
+        await query.edit_message_text(t("login_2fa", timeout=LOGIN_TIMEOUT))
         return
 
     try:
         await _finalize_and_save(user, context)
-        await safe_send(
-            update.effective_chat,
-            t("login_success"),
-            reply_markup=main_menu_kb(True),
-        )
+        await query.edit_message_text(t("login_success"), reply_markup=main_menu_kb(True))
     except Exception as e:
-        logger.error(f"Finalize 2FA failed user {user['id']}: {type(e).__name__}: {e}")
-        await safe_send(
-            update.effective_chat,
-            t("login_failed", error="خطا در ذخیره سشن"),
-            reply_markup=main_menu_kb(False),
-        )
+        logger.error(f"Finalize failed: {e}")
+        await query.edit_message_text(t("login_failed", error="خطا در ذخیره سشن"), reply_markup=main_menu_kb(False))
 
+
+# ═══════════════════════════════════
+# Finalize & Save
+# ═══════════════════════════════════
 
 async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
     from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
-
     session_string = await client_manager.finalize_login(user["id"])
-
     try:
         await db.save_session(
             user_id=user["id"],
@@ -731,7 +601,6 @@ async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
             pass
         context.user_data.clear()
         raise
-
     context.user_data.clear()
 
 
@@ -739,12 +608,11 @@ async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
 # قطع اکانت
 # ═══════════════════════════════════
 
-
 async def cb_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
-        "⚠️ آیا مطمئنید؟\nتمام قابلیت‌ها غیرفعال می‌شوند.",
+        "⚠️ آیا مطمئنید؟",
         reply_markup=confirm_kb("disconnect"),
     )
 
@@ -753,24 +621,20 @@ async def cb_confirm_disconnect(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user = await get_or_create_user(update)
+    from core.plugin_manager import unload_all_for_user
+    await unload_all_for_user(user["id"])
     try:
         await client_manager.disconnect_client(user["id"])
     except Exception as e:
         logger.error(f"Disconnect error: {e}")
-    from core.plugin_manager import unload_all_for_user
-    await unload_all_for_user(user["id"])
     await db.delete_session(user["id"])
     await db.audit_log(user["id"], "disconnect", "")
-    await query.edit_message_text(
-        "✅ اکانت قطع شد.",
-        reply_markup=main_menu_kb(False),
-    )
+    await query.edit_message_text("✅ اکانت قطع شد.", reply_markup=main_menu_kb(False))
 
 
 # ═══════════════════════════════════
 # راهنما
 # ═══════════════════════════════════
-
 
 async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -794,19 +658,13 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Cancel
 # ═══════════════════════════════════
 
-
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """لغو هر عملیاتی"""
     user = await get_or_create_user(update)
-
     try:
         await client_manager.cleanup_pending(user["id"])
     except Exception:
         pass
-
-    # پاکسازی همه state ها
     context.user_data.clear()
-
     session = await db.get_session(user["id"])
     await update.message.reply_text(
         "❌ عملیات لغو شد.",
@@ -818,7 +676,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════
 # ادمین
 # ═══════════════════════════════════
-
 
 async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
@@ -833,7 +690,6 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid args")
         return
-    from datetime import timedelta
     user = await db.get_user(target_id)
     if not user:
         await update.message.reply_text("User not found")
@@ -860,196 +716,144 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {sub} `{u['telegram_id']}` {u.get('first_name', '')} @{u.get('username', '-')}\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
 # ═══════════════════════════════════
-# مانیتور کانال — پنل
+# Message Handler عمومی — پردازش state ها
 # ═══════════════════════════════════
 
-STATE_MON_SOURCE = 10
-STATE_MON_DEST = 11
-
-
-async def cb_monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش لیست مسیرهای مانیتور"""
-    query = update.callback_query
-    await query.answer()
-
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    هندلر واحد برای همه پیام‌های متنی
+    بر اساس state در user_data تصمیم می‌گیره
+    """
     user = await get_or_create_user(update)
-    routes = await db.get_all_channel_routes(user["id"])
-
-    await query.edit_message_text(
-        "📡 **مانیتور کانال**\n\n"
-        "هر کانال را به یک مقصد وصل کنید.\n"
-        "با دکمه ✅/❌ فعال/غیرفعال کنید.\n"
-        "با 🗑 حذف کنید.",
-        reply_markup=monitor_menu_kb(routes),
-        parse_mode="Markdown",
-    )
-
-
-async def cb_mon_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فعال/غیرفعال کردن یک مسیر"""
-    query = update.callback_query
-    await query.answer()
-
-    src_id = int(query.data.replace("mon_toggle_", ""))
-    user = await get_or_create_user(update)
-
-    new_state = await db.toggle_channel_route(user["id"], src_id)
-    status = "فعال ✅" if new_state else "غیرفعال ❌"
-    await query.answer(f"مسیر {status} شد", show_alert=False)
-
-    # ── اطلاع به پلاگین ──
-    from core.client_manager import get_client
-    client = await get_client(user["id"])
-    if client:
-        from core.plugin_manager import get_active_plugins
-        plugins = get_active_plugins(user["id"])
-        monitor = plugins.get("channel_monitor")
-        if monitor:
-            await monitor.reload_routes()
-
-    # رفرش منو
-    routes = await db.get_all_channel_routes(user["id"])
-    await query.edit_message_text(
-        "📡 **مانیتور کانال**\n\n"
-        "هر کانال را به یک مقصد وصل کنید.\n"
-        "با دکمه ✅/❌ فعال/غیرفعال کنید.\n"
-        "با 🗑 حذف کنید.",
-        reply_markup=monitor_menu_kb(routes),
-        parse_mode="Markdown",
-    )
-
-
-async def cb_mon_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تایید حذف مسیر"""
-    query = update.callback_query
-    await query.answer()
-
-    src_id = int(query.data.replace("mon_delete_", ""))
-    await query.edit_message_text(
-        f"⚠️ آیا مسیر مانیتور `{src_id}` حذف شود?",
-        reply_markup=mon_confirm_delete_kb(src_id),
-        parse_mode="Markdown",
-    )
-
-
-async def cb_mon_confirm_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف قطعی مسیر"""
-    query = update.callback_query
-    await query.answer()
-
-    src_id = int(query.data.replace("mon_confirm_del_", ""))
-    user = await get_or_create_user(update)
-
-    await db.delete_channel_route(user["id"], src_id)
-
-    # اطلاع به پلاگین
-    from core.client_manager import get_client
-    client = await get_client(user["id"])
-    if client:
-        from core.plugin_manager import get_active_plugins
-        plugins = get_active_plugins(user["id"])
-        monitor = plugins.get("channel_monitor")
-        if monitor:
-            await monitor.reload_routes()
-
-    await query.answer("✅ حذف شد", show_alert=True)
-
-    routes = await db.get_all_channel_routes(user["id"])
-    await query.edit_message_text(
-        "📡 **مانیتور کانال**\n\n"
-        "هر کانال را به یک مقصد وصل کنید.",
-        reply_markup=monitor_menu_kb(routes),
-        parse_mode="Markdown",
-    )
-
-
-async def cb_mon_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """شروع اضافه کردن مسیر جدید"""
-    query = update.callback_query
-    await query.answer()
-
-    await query.edit_message_text(
-        "📡 **اضافه کردن مسیر جدید**\n\n"
-        "آیدی یا یوزرنیم **کانال منبع** را بفرستید:\n\n"
-        "مثال: `@channel_name` یا `-1001234567890`\n\n"
-        "/cancel برای انصراف",
-        parse_mode="Markdown",
-    )
-    return STATE_MON_SOURCE
-
-
-async def handle_mon_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت کانال منبع"""
     text = update.message.text.strip()
 
-    context.user_data["mon_source_ref"] = text
-    await update.message.reply_text(
-        "✅ منبع دریافت شد.\n\n"
-        "حالا آیدی یا یوزرنیم **مقصد** را بفرستید:\n\n"
-        "مثال: `@dest_channel` یا `-1001234567890`\n\n"
-        "/cancel برای انصراف",
-        parse_mode="Markdown",
-    )
-    return STATE_MON_DEST
+    # ── State 1: Storage Target ──
+    if context.user_data.get("awaiting_storage_target"):
+        feature_name = context.user_data["awaiting_storage_target"]
+        logger.info(f"Processing storage target input: {text} for feature={feature_name}")
 
+        if not (text.startswith("@") or text.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "❌ فرمت نامعتبر. @username یا آیدی عددی بفرستید.\n/cancel برای انصراف",
+            )
+            return
 
-async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت مقصد و ثبت مسیر"""
-    user = await get_or_create_user(update)
-    src_ref = context.user_data.get("mon_source_ref", "")
-    dst_ref = update.message.text.strip()
+        from core.client_manager import get_client
+        client = await get_client(user["id"])
+        if not client:
+            await update.message.reply_text("❌ اکانت متصل نیست.", reply_markup=main_menu_kb(False))
+            context.user_data.clear()
+            return
 
-    from core.client_manager import get_client
-    client = await get_client(user["id"])
+        try:
+            entity = await client.get_entity(text)
+            target_id = entity.id
+            target_title = getattr(entity, "title", "") or getattr(entity, "first_name", text)
+            logger.info(f"Resolved: {text} -> {target_id} ({target_title})")
+        except Exception as e:
+            logger.warning(f"Resolve failed: {text}: {e}")
+            await update.message.reply_text(
+                f"❌ «{text}» پیدا نشد.\n"
+                f"• عضو هستید؟\n"
+                f"• یوزرنیم درسته؟\n\n"
+                f"دوباره امتحان کنید یا /cancel",
+            )
+            return
 
-    if not client:
-        await update.message.reply_text(
-            "❌ اکانت متصل نیست.",
-            reply_markup=main_menu_kb(False),
-        )
+        await db.set_storage_target(user["id"], feature_name, "custom", target_id, target_title)
+        await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title} ({target_id})")
         context.user_data.clear()
-        return ConversationHandler.END
-
-    try:
-        src_entity = await client.get_entity(src_ref)
-        dst_entity = await client.get_entity(dst_ref)
-
-        src_id = src_entity.id
-        dst_id = dst_entity.id
-        src_title = getattr(src_entity, "title", src_ref)
-        dst_title = getattr(dst_entity, "title", dst_ref)
-
-        await db.set_channel_route(
-            user["id"], src_id, src_title, "custom", dst_id, dst_title
-        )
-
-        # اطلاع به پلاگین
-        from core.plugin_manager import get_active_plugins
-        plugins = get_active_plugins(user["id"])
-        monitor = plugins.get("channel_monitor")
-        if monitor:
-            await monitor.reload_routes()
 
         await update.message.reply_text(
-            f"✅ مسیر ثبت شد:\n📥 منبع: {src_title}\n📤 مقصد: {dst_title}",
+            f"✅ مسیر «{feature_name}» تنظیم شد:\n📂 {target_title}\n🆔 `{target_id}`",
             reply_markup=main_menu_kb(True),
+            parse_mode="Markdown",
         )
+        return
 
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {str(e)[:100]}")
+    # ── State 2: Monitor Source ──
+    if context.user_data.get("awaiting_monitor_source"):
+        logger.info(f"Processing monitor source: {text}")
+        context.user_data["mon_source_ref"] = text
+        context.user_data.pop("awaiting_monitor_source", None)
+        context.user_data["awaiting_monitor_dest"] = True
+        await update.message.reply_text(
+            f"✅ منبع: {text}\n\nحالا **مقصد** را بفرستید:\n/cancel برای انصراف",
+        )
+        return
 
-    context.user_data.clear()
-    return ConversationHandler.END
+    # ── State 3: Monitor Dest ──
+    if context.user_data.get("awaiting_monitor_dest"):
+        src_ref = context.user_data.get("mon_source_ref", "")
+        dst_ref = text
+        logger.info(f"Processing monitor dest: {dst_ref}")
+
+        from core.client_manager import get_client
+        client = await get_client(user["id"])
+        if not client:
+            await update.message.reply_text("❌ اکانت متصل نیست.")
+            context.user_data.clear()
+            return
+
+        try:
+            src_entity = await client.get_entity(src_ref)
+            dst_entity = await client.get_entity(dst_ref)
+            await db.set_channel_route(
+                user["id"], src_entity.id,
+                getattr(src_entity, "title", src_ref),
+                "custom", dst_entity.id,
+                getattr(dst_entity, "title", dst_ref),
+            )
+            from core.plugin_manager import get_active_plugins
+            plugins = get_active_plugins(user["id"])
+            monitor = plugins.get("channel_monitor")
+            if monitor:
+                await monitor.reload_routes()
+            await update.message.reply_text(
+                f"✅ مسیر ثبت شد:\n📥 {getattr(src_entity, 'title', src_ref)}\n📤 {getattr(dst_entity, 'title', dst_ref)}",
+                reply_markup=main_menu_kb(True),
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطا: {str(e)[:100]}")
+
+        context.user_data.clear()
+        return
+
+    # ── State 4: 2FA ──
+    if context.user_data.get("awaiting_2fa"):
+        password = validate_2fa_password(text)
+        if not password:
+            await update.message.reply_text("❌ رمز نامعتبر.")
+            return
+
+        try:
+            await client_manager.complete_2fa(user_db_id=user["id"], password=password)
+            await _finalize_and_save(user, context)
+            await safe_send(update.effective_chat, t("login_success"), reply_markup=main_menu_kb(True))
+        except Exception as e:
+            logger.error(f"2FA failed: {e}")
+            await client_manager.cleanup_pending(user["id"])
+            context.user_data.clear()
+            await safe_send(update.effective_chat, t("login_failed", error="رمز اشتباه"), reply_markup=main_menu_kb(False))
+        return
+
+
+# ═══════════════════════════════════
+# Noop
+# ═══════════════════════════════════
+
+async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
 
 # ═══════════════════════════════════
 # ثبت هندلرها
 # ═══════════════════════════════════
 
-
 def register_handlers(app: Application):
-    # ── Conversations اول ──
-
+    # 1. Login conversation (فقط شماره)
     login_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_connect, pattern="^connect$"),
@@ -1059,79 +863,55 @@ def register_handlers(app: Application):
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
             ],
         },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-        ],
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
         per_user=True,
         per_chat=True,
         conversation_timeout=LOGIN_TIMEOUT,
     )
 
-
-    monitor_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"),
-        ],
-        states={
-            STATE_MON_SOURCE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_source),
-            ],
-            STATE_MON_DEST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mon_dest),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-        ],
-        per_user=True,
-        per_chat=True,
-        conversation_timeout=300,
-    )
-
-    # ── ثبت به ترتیب اولویت ──
-
-    # 1. Commands
+    # 2. Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("activate", cmd_activate))
     app.add_handler(CommandHandler("users", cmd_users))
 
-    # 2. Conversations (باید قبل از MessageHandler عمومی باشن)
+    # 3. Login conversation
     app.add_handler(login_conv)
-    app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
-    app.add_handler(monitor_conv)
 
-    # 3. Callback queries
+    # 4. Numpad callbacks
     app.add_handler(CallbackQueryHandler(cb_code_digit, pattern=r"^code_[0-9]$"))
     app.add_handler(CallbackQueryHandler(cb_code_back, pattern="^code_back$"))
     app.add_handler(CallbackQueryHandler(cb_code_cancel, pattern="^code_cancel$"))
 
-    async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-
+    # 5. Menu callbacks
     app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
-
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern="^panel$"))
     app.add_handler(CallbackQueryHandler(cb_features, pattern="^features$"))
     app.add_handler(CallbackQueryHandler(cb_toggle_feature, pattern=r"^toggle_"))
-    app.add_handler(CallbackQueryHandler(cb_storage, pattern="^storage$"))
-    app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
-    app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
-    app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
-    app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
-    app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
-    app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
     app.add_handler(CallbackQueryHandler(cb_subscription, pattern="^subscription$"))
     app.add_handler(CallbackQueryHandler(cb_status, pattern="^status$"))
     app.add_handler(CallbackQueryHandler(cb_disconnect, pattern="^disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_disconnect, pattern="^confirm_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_help, pattern="^help$"))
 
-    # 4. Message handler عمومی (فقط برای 2FA — آخرین اولویت)
+    # 6. Storage callbacks
+    app.add_handler(CallbackQueryHandler(cb_storage, pattern="^storage$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
+
+    # 7. Monitor callbacks
+    app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"))
+
+    # 8. Message handler عمومی (آخرین اولویت)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_2fa_message,
+        handle_text_message,
     ))
 
     logger.info("All handlers registered")
