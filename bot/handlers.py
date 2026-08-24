@@ -1045,21 +1045,30 @@ async def handle_mon_source_input(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
-async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت مقصد و ثبت مسیر"""
     user = await get_or_create_user(update)
     src_ref = context.user_data.get("mon_source_ref", "")
     dst_ref = update.message.text.strip()
+    safe_dst = html.escape(dst_ref)
 
-    # جلوگیری سختگیرانه از ارسال مقادیر خالی به تلون
-    if not src_ref or not dst_ref:
+    # اعتبارسنجی
+    if not src_ref:
         await update.message.reply_text(
-            "❌ <b>خطا: نشست مانیتور منقضی شده است.</b>\n"
-            "لطفاً مجدداً از پنل مانیتور اقدام به ثبت مسیر کنید.",
-            parse_mode="HTML"
+            "❌ منبع مشخص نیست. از اول شروع کنید.",
+            reply_markup=main_menu_kb(True),
         )
         context.user_data.clear()
-        return ConversationHandler.END
+        return
+
+    if not (dst_ref.startswith("@") or dst_ref.lstrip("-").isdigit()):
+        await update.message.reply_text(
+            "❌ <b>فرمت مقصد نامعتبر است.</b>\n\n"
+            "لطفاً یوزرنیم با @ یا آیدی عددی بفرستید.\n\n"
+            "/cancel برای انصراف",
+            parse_mode="HTML",
+        )
+        return
 
     from core.client_manager import get_client
     client = await get_client(user["id"])
@@ -1070,7 +1079,7 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_kb(False),
         )
         context.user_data.clear()
-        return ConversationHandler.END
+        return
 
     try:
         from telethon import utils
@@ -1086,29 +1095,33 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user["id"], src_id, src_title, "custom", dst_id, dst_title
         )
 
-        # اطلاع به پلاگین
         from core.plugin_manager import get_active_plugins
         plugins = get_active_plugins(user["id"])
         monitor = plugins.get("channel_monitor")
         if monitor:
             await monitor.reload_routes()
 
+        safe_src_title = html.escape(str(src_title))
+        safe_dst_title = html.escape(str(dst_title))
+
         await update.message.reply_text(
-            f"✅ مسیر ثبت شد:\n📥 منبع: {src_title}\n📤 مقصد: {dst_title}",
+            f"✅ مسیر ثبت شد:\n"
+            f"📥 منبع: <b>{safe_src_title}</b>\n"
+            f"📤 مقصد: <b>{safe_dst_title}</b>",
             reply_markup=main_menu_kb(True),
+            parse_mode="HTML",
         )
+        logger.info(f"Monitor route added: {src_id} -> {dst_id}")
 
     except Exception as e:
-        safe_err = html.escape(str(e))
+        logger.error(f"Monitor add failed: {e}")
         await update.message.reply_text(
-            f"❌ <b>خطا در ثبت مسیر مانیتور:</b>\n"
-            f"<code>{safe_err[:150]}</code>\n\n"
-            f"مطمئن شوید ربات سلف‌بات شما در کانال منبع عضو است.",
-            parse_mode="HTML"
+            f"❌ خطا در ثبت مسیر:\n<code>{html.escape(str(e)[:200])}</code>\n\n"
+            f"مطمئن شو اکانتت عضو کانال‌هاست.",
+            parse_mode="HTML",
         )
 
     context.user_data.clear()
-    return ConversationHandler.END
 
 
 
