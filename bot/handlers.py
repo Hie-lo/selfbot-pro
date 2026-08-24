@@ -317,36 +317,41 @@ async def cb_storage_target_saved(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دکمه چنل/گروه زده شد — منتظر پیام متنی"""
     query = update.callback_query
     await query.answer()
+
     try:
         feature_name = extract_storage_feature(query.data, "_custom")
     except ValueError:
-        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
-        return ConversationHandler.END
-    context.user_data["storage_feature"] = feature_name
+        await query.edit_message_text(
+            t("error_general"),
+            reply_markup=back_kb("storage"),
+        )
+        return
+
+    # به جای conversation، از user_data استفاده می‌کنیم
+    context.user_data["awaiting_storage_target"] = feature_name
+
     await query.edit_message_text(
-        "📢 آیدی عددی یا یوزرنیم مقصد:\n\n"
-        "مثال: `-1001234567890` یا `@channel`\n\n"
-        "/cancel برای انصراف",
+        f"📢 **تنظیم مقصد برای «{feature_name}»**\n\n"
+        f"آیدی عددی یا یوزرنیم مقصد را بفرستید:\n\n"
+        f"مثال:\n"
+        f"`-1001234567890`\n"
+        f"`@my_channel`\n\n"
+        f"برای انصراف /cancel بزنید.",
         parse_mode="Markdown",
     )
-    return STATE_STORAGE_TARGET
 
 
 async def handle_storage_target_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت آیدی/یوزرنیم مقصد ذخیره‌سازی"""
-    user = await get_or_create_user(update)
-    feature_name = context.user_data.get("storage_feature")
-
+    """دریافت آیدی/یوزرنیم مقصد — بدون ConversationHandler"""
+    # فقط وقتی فعال باشه که کاربر دکمه custom زده باشه
+    feature_name = context.user_data.get("awaiting_storage_target")
     if not feature_name:
-        await update.message.reply_text(
-            t("error_general"),
-            reply_markup=main_menu_kb(True),
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
+        return  # پیام عادی، کاری نکن
 
+    user = await get_or_create_user(update)
     text = update.message.text.strip()
 
     # اعتبارسنجی فرمت
@@ -356,7 +361,7 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
             "@username یا آیدی عددی بفرستید.\n\n"
             "/cancel برای انصراف",
         )
-        return STATE_STORAGE_TARGET
+        return
 
     # resolve با Telethon
     from core.client_manager import get_client
@@ -364,11 +369,11 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
 
     if not client:
         await update.message.reply_text(
-            "❌ اکانت متصل نیست. ابتدا از پنل وصل کنید.",
+            "❌ اکانت متصل نیست.",
             reply_markup=main_menu_kb(False),
         )
-        context.user_data.clear()
-        return ConversationHandler.END
+        context.user_data.pop("awaiting_storage_target", None)
+        return
 
     target_id = 0
     target_title = text
@@ -377,35 +382,28 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
         entity = await client.get_entity(text)
         target_id = entity.id
 
-        # نام مقصد
         if hasattr(entity, "title") and entity.title:
             target_title = entity.title
         elif hasattr(entity, "first_name") and entity.first_name:
             target_title = entity.first_name
-        else:
-            target_title = text
 
-        logger.info(f"Resolved storage target: {text} -> {target_id} ({target_title})")
+        logger.info(f"Resolved storage: {text} -> {target_id} ({target_title})")
 
     except Exception as e:
         logger.warning(f"Resolve failed for {text}: {e}")
         await update.message.reply_text(
-            f"❌ نتونستم «{text}» رو پیدا کنم.\n\n"
-            f"دلایل احتمالی:\n"
-            f"• اکانت شما عضو نیست\n"
-            f"• یوزرنیم اشتباهه\n"
-            f"• کانال حذف شده\n\n"
-            f"دوباره امتحان کنید یا /cancel بزنید.",
+            f"❌ «{text}» پیدا نشد.\n"
+            f"• اکانت عضو نیست؟\n"
+            f"• یوزرنیم اشتباه؟\n\n"
+            f"دوباره امتحان کنید یا /cancel",
         )
-        return STATE_STORAGE_TARGET
+        return
 
     if not target_id:
-        await update.message.reply_text(
-            "❌ آیدی نامعتبر. دوباره امتحان کنید یا /cancel بزنید.",
-        )
-        return STATE_STORAGE_TARGET
+        await update.message.reply_text("❌ آیدی نامعتبر.")
+        return
 
-    # ذخیره
+    # ذخیره در DB
     try:
         await db.set_storage_target(
             user["id"], feature_name, "custom",
@@ -416,24 +414,21 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
             f"{feature_name} -> {target_title} ({target_id})",
         )
     except Exception as e:
-        logger.error(f"DB save storage failed: {e}")
-        await update.message.reply_text(
-            "❌ خطا در ذخیره‌سازی.",
-            reply_markup=main_menu_kb(True),
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
+        logger.error(f"DB storage save failed: {e}")
+        await update.message.reply_text("❌ خطا در ذخیره.")
+        context.user_data.pop("awaiting_storage_target", None)
+        return
+
+    # پاک کردن state
+    context.user_data.pop("awaiting_storage_target", None)
 
     await update.message.reply_text(
-        f"✅ مسیر ذخیره‌سازی «{feature_name}» تنظیم شد:\n"
+        f"✅ مسیر «{feature_name}» تنظیم شد:\n"
         f"📂 {target_title}\n"
         f"🆔 `{target_id}`",
         reply_markup=main_menu_kb(True),
         parse_mode="Markdown",
     )
-
-    context.user_data.clear()
-    return ConversationHandler.END
 
 
 # ═══════════════════════════════════
@@ -651,16 +646,20 @@ async def handle_2fa_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     هندلر پیام متنی برای 2FA
     فقط وقتی فعاله که awaiting_2fa = True باشه
     """
-    # اگه در حال تنظیم مسیر ذخیره هستیم، دخالت نکن
-    if context.user_data.get("storage_feature"):
-        return
-    # اگه در حال اضافه کردن مسیر مانیتور هستیم، دخالت نکن
-    if context.user_data.get("mon_source_ref"):
-        return
-    # اگه 2FA فعال نیست، دخالت نکن
-    if not context.user_data.get("awaiting_2fa"):
+ # اولویت ۱: storage target
+    if context.user_data.get("awaiting_storage_target"):
+        await handle_storage_target_input(update, context)
         return
 
+    # اولویت ۲: monitor source
+    if context.user_data.get("mon_source_ref"):
+        # ... (کد قبلی monitor)
+        return
+
+    # اولویت ۳: 2FA
+    if not context.user_data.get("awaiting_2fa"):
+        return
+    
     user = await get_or_create_user(update)
     raw_password = update.message.text.strip()
 
@@ -800,7 +799,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """لغو هر عملیاتی"""
     user = await get_or_create_user(update)
 
-    # پاکسازی pending login
     try:
         await client_manager.cleanup_pending(user["id"])
     except Exception:
@@ -1069,22 +1067,6 @@ def register_handlers(app: Application):
         conversation_timeout=LOGIN_TIMEOUT,
     )
 
-    storage_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"),
-        ],
-        states={
-            STATE_STORAGE_TARGET: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_storage_target_input),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cmd_cancel),
-        ],
-        per_user=True,
-        per_chat=True,
-        conversation_timeout=300,
-    )
 
     monitor_conv = ConversationHandler(
         entry_points=[
@@ -1116,7 +1098,7 @@ def register_handlers(app: Application):
 
     # 2. Conversations (باید قبل از MessageHandler عمومی باشن)
     app.add_handler(login_conv)
-    app.add_handler(storage_conv)
+    app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
     app.add_handler(monitor_conv)
 
     # 3. Callback queries
