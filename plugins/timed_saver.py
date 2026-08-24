@@ -1,6 +1,7 @@
 """
 پلاگین ذخیره پیام‌های تایم‌دار
 — فقط پیام‌های طرف مقابل ذخیره می‌شوند
+— جلوگیری از ذخیره تکراری
 """
 
 import os
@@ -15,6 +16,10 @@ class TimedSaverPlugin(BasePlugin):
     name = "timed_saver"
     description = "ذخیره تایم‌دار"
     always_on = False
+
+    # کش برای جلوگیری از ذخیره تکراری
+    _processed_msgs: set = set()
+    _max_cache = 1000
 
     async def start(self):
         me = await self.client.get_me()
@@ -34,13 +39,31 @@ class TimedSaverPlugin(BasePlugin):
             if ttl is None:
                 return
 
+            msg_id = event.message.id
+            chat_id = event.chat_id
+
+            # ❌ جلوگیری از پردازش تکراری
+            cache_key = f"{chat_id}_{msg_id}"
+            if cache_key in self._processed_msgs:
+                self.logger.debug(f"Already processed timed msg {cache_key}")
+                return
+            
+            if len(self._processed_msgs) >= self._max_cache:
+                # پاک کردن قدیمی‌ها
+                self._processed_msgs.clear()
+            
+            self._processed_msgs.add(cache_key)
+
             # ❌ پیام‌های خودی رو ذخیره نکن
             if event.message.sender_id == my_id:
-                self.logger.debug(f"Skipping self-sent timed msg {event.message.id}")
+                self.logger.debug(f"Skipping self-sent timed msg {msg_id}")
                 return
 
-            chat_id = event.chat_id
-            msg_id = event.message.id
+            # ❌ اگر پیام فوروارد هست (ممکنه از Saved Messages اومده باشه)
+            if event.message.forward:
+                self.logger.debug(f"Skipping forwarded timed msg {msg_id}")
+                return
+
             text = event.message.text or ""
 
             self.logger.info(f"Timed message detected: msg_id={msg_id}, chat_id={chat_id}")
@@ -142,4 +165,5 @@ class TimedSaverPlugin(BasePlugin):
             return dest_id
 
     async def stop(self):
+        self._processed_msgs.clear()
         await super().stop()

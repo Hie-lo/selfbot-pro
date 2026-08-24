@@ -47,10 +47,8 @@ class ChannelMonitorPlugin(BasePlugin):
             if event.out:
                 return
 
-            # دریافت آیدی نرمال‌شده کانال
             source_id = event.chat_id
             
-            # اگر event.chat_id نداریم، از peer_id استفاده کن
             if source_id is None and hasattr(event, 'message') and event.message:
                 peer = event.message.peer_id
                 if hasattr(peer, 'channel_id'):
@@ -59,7 +57,6 @@ class ChannelMonitorPlugin(BasePlugin):
             if source_id is None:
                 return
 
-            # نرمال‌سازی آیدی
             normalized_id = self._normalize_channel_id(source_id)
 
             self.logger.debug(f"Monitor: raw_id={source_id}, normalized={normalized_id}, routes={list(self._routes.keys())}")
@@ -95,11 +92,9 @@ class ChannelMonitorPlugin(BasePlugin):
         if chat_id is None:
             return None
         
-        # اگر از قبل -100 داره
         if isinstance(chat_id, int) and chat_id < 0:
             return chat_id
         
-        # اگر مثبته، تبدیل به کانال
         if isinstance(chat_id, int) and chat_id > 0:
             return int(f"-100{chat_id}")
         
@@ -109,7 +104,6 @@ class ChannelMonitorPlugin(BasePlugin):
         self._routes.clear()
         await self._load_routes()
         
-        # نرمال‌سازی همه آیدی‌ها
         normalized_routes = {}
         for src_id, data in self._routes.items():
             norm_id = self._normalize_channel_id(src_id)
@@ -121,27 +115,47 @@ class ChannelMonitorPlugin(BasePlugin):
 
     async def _add_monitor(self, event):
         parts = event.message.text.split()
+        
+        # اعتبارسنجی تعداد پارامترها
         if len(parts) < 3:
             await event.delete()
             await self.client.send_message(
-                event.chat_id, "❌ فرمت: `.مانیتور @منبع @مقصد`"
+                event.chat_id,
+                "❌ فرمت درست:\n"
+                "`.مانیتور @منبع @مقصد`\n\n"
+                "مثال:\n"
+                "`.مانیتور @channel1 @channel2`"
             )
             return
 
+        src_ref = parts[1].strip()
+        dst_ref = parts[2].strip()
+
+        # اعتبارسنجی خالی نبودن
+        if not src_ref or not dst_ref:
+            await event.delete()
+            await self.client.send_message(
+                event.chat_id,
+                "❌ آیدی کانال‌ها نمی‌تونه خالی باشه.\n"
+                "از @username یا آیدی عددی استفاده کن."
+            )
+            return
+
+        self.logger.info(f"Adding monitor: src={src_ref}, dst={dst_ref}")
+
         try:
-            src_entity = await self.client.get_entity(parts[1])
-            dst_entity = await self.client.get_entity(parts[2])
+            src_entity = await self.client.get_entity(src_ref)
+            dst_entity = await self.client.get_entity(dst_ref)
 
             src_id = utils.get_peer_id(src_entity)
             dst_id = utils.get_peer_id(dst_entity)
-            src_title = getattr(src_entity, "title", parts[1])
-            dst_title = getattr(dst_entity, "title", parts[2])
+            src_title = getattr(src_entity, "title", src_ref)
+            dst_title = getattr(dst_entity, "title", dst_ref)
 
             await db.set_channel_route(
                 self.user_id, src_id, src_title, "custom", dst_id, dst_title
             )
             
-            # نرمال‌سازی برای کش داخلی
             norm_src_id = self._normalize_channel_id(src_id)
             self._routes[norm_src_id] = {
                 "dest_id": dst_id,
@@ -151,13 +165,26 @@ class ChannelMonitorPlugin(BasePlugin):
             await event.delete()
             await self.client.send_message(
                 event.chat_id,
-                f"✅ مانیتور:\n📥 {src_title} (`{src_id}`)\n📤 {dst_title} (`{dst_id}`)"
+                f"✅ مانیتور تنظیم شد:\n"
+                f"📥 منبع: {src_title} (`{src_id}`)\n"
+                f"📤 مقصد: {dst_title} (`{dst_id}`)"
             )
             self.logger.info(f"Route added: {src_id} -> {dst_id}")
 
+        except ValueError as e:
+            await event.delete()
+            await self.client.send_message(
+                event.chat_id,
+                f"❌ کانال پیدا نشد.\n"
+                f"منبع: `{src_ref}`\n"
+                f"مقصد: `{dst_ref}`\n\n"
+                f"مطمئن شو اکانتت عضو کانال‌ها هست."
+            )
+            self.logger.warning(f"Channel not found: src={src_ref}, dst={dst_ref}")
         except Exception as e:
             await event.delete()
-            await self.client.send_message(event.chat_id, f"❌ خطا: {e}")
+            await self.client.send_message(event.chat_id, f"❌ خطا: {str(e)[:150]}")
+            self.logger.error(f"Add monitor error: {e}")
 
     async def _remove_monitor(self, event):
         parts = event.message.text.split()
@@ -168,8 +195,14 @@ class ChannelMonitorPlugin(BasePlugin):
             )
             return
 
+        src_ref = parts[2].strip()
+        if not src_ref:
+            await event.delete()
+            await self.client.send_message(event.chat_id, "❌ آیدی کانال خالیه.")
+            return
+
         try:
-            src_entity = await self.client.get_entity(parts[2])
+            src_entity = await self.client.get_entity(src_ref)
             src_id = utils.get_peer_id(src_entity)
             norm_src_id = self._normalize_channel_id(src_id)
             
@@ -177,7 +210,7 @@ class ChannelMonitorPlugin(BasePlugin):
             self._routes.pop(norm_src_id, None)
             
             await event.delete()
-            await self.client.send_message(event.chat_id, "✅ حذف شد.")
+            await self.client.send_message(event.chat_id, f"✅ حذف شد.")
             self.logger.info(f"Route removed: {src_id}")
         except Exception as e:
             await event.delete()
