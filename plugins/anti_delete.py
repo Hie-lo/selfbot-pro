@@ -16,7 +16,7 @@ class AntiDeletePlugin(BasePlugin):
     def __init__(self, client, user_id: int):
         super().__init__(client, user_id)
         self._cache: dict[int, dict[int, dict]] = {}
-        self._max_cache = 500
+        self._max_cache_per_chat = 500
         self._my_id = None
 
     async def start(self):
@@ -26,6 +26,7 @@ class AntiDeletePlugin(BasePlugin):
         self.logger.info(f"AntiDelete started for user {self.user_id}, my_id={self._my_id}")
 
         async def cache_message(event):
+            # فقط PV کش کن
             if not event.is_private:
                 return
             if not event.message:
@@ -37,7 +38,7 @@ class AntiDeletePlugin(BasePlugin):
             if chat_id not in self._cache:
                 self._cache[chat_id] = {}
 
-            if len(self._cache[chat_id]) >= self._max_cache:
+            if len(self._cache[chat_id]) >= self._max_cache_per_chat:
                 oldest = min(self._cache[chat_id].keys())
                 del self._cache[chat_id][oldest]
 
@@ -84,31 +85,41 @@ class AntiDeletePlugin(BasePlugin):
                 "date": msg.date,
             }
 
-            self.logger.debug(f"Cached msg {msg.id} in chat {chat_id}")
+            self.logger.debug(f"Cached msg {msg.id} in chat {chat_id} ({chat_name})")
 
         self._add_handler(cache_message, events.NewMessage)
 
         async def on_delete(event):
-            self.logger.info(f"Delete event: chat={event.chat_id}, ids={event.deleted_ids}")
+            # لاگ اولیه
+            self.logger.info(
+                f"Delete event: chat={event.chat_id}, ids={event.deleted_ids}, "
+                f"is_private={event.is_private}"
+            )
 
-            if not event.is_private:
-                self.logger.debug(f"Skipping non-private chat {event.chat_id}")
-                return
+            # Telethon گاهی chat_id رو None می‌فرسته برای PV
+            # پس به جای تکیه بر event.chat_id، در تمام کش‌ها جستجو می‌کنیم
 
             for msg_id in event.deleted_ids:
-                chat_id = event.chat_id
+                cached = None
+                found_chat_id = None
 
-                if chat_id not in self._cache:
-                    self.logger.debug(f"Chat {chat_id} not in cache")
+                # جستجو در تمام چت‌های کش‌شده
+                for chat_id, msgs in self._cache.items():
+                    if msg_id in msgs:
+                        cached = msgs.pop(msg_id)
+                        found_chat_id = chat_id
+                        break
+
+                if not cached:
+                    self.logger.debug(f"Msg {msg_id} not found in any cache")
                     continue
 
-                if msg_id not in self._cache[chat_id]:
-                    self.logger.debug(f"Msg {msg_id} not in cache")
-                    continue
+                self.logger.info(
+                    f"Found cached deleted msg {msg_id} from "
+                    f"{cached.get('sender_name')} in chat {found_chat_id}"
+                )
 
-                cached = self._cache[chat_id].pop(msg_id)
-                self.logger.info(f"Found cached deleted msg {msg_id} from {cached.get('sender_name')}")
-
+                # فیلتر پیام‌های قدیمی
                 if cached.get("date"):
                     now = datetime.now(timezone.utc)
                     msg_date = cached["date"]
@@ -138,7 +149,7 @@ class AntiDeletePlugin(BasePlugin):
         if dest_id == self._my_id:
             return self._my_id
 
-        # نرمال‌سازی: اگر عدد مثبت بزرگ باشه، ممکنه کانال باشه
+        # نرمال‌سازی: اگر عدد مثبت بزرگه، ممکنه کانال باشه
         if isinstance(dest_id, int) and dest_id > 0 and dest_id < 10000000000:
             normalized = int(f"-100{dest_id}")
             self.logger.debug(f"Normalized {dest_id} -> {normalized}")
