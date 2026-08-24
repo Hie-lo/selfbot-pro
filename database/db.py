@@ -389,19 +389,29 @@ async def save_message_record(
     user_id: int, source_type: str, chat_id: int,
     chat_title: str, msg_id: int, text: str,
     media_type: str = None, media_path: str = None,
-) -> None:
+) -> bool:
+    """
+    ذخیره پیام با جلوگیری قطعی از تکراری‌ها.
+    خروجی:
+      True  = رکورد جدید اضافه شد
+      False = رکورد تکراری بود
+    """
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        row = await conn.fetchrow(
             """
             INSERT INTO saved_messages
                 (user_id, source_type, source_chat_id, source_chat_title,
                  source_msg_id, original_text, media_type, media_path_enc, timestamp)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            ON CONFLICT (user_id, source_type, source_chat_id, source_msg_id)
+            DO NOTHING
+            RETURNING id
             """,
             user_id, source_type, chat_id, chat_title,
             msg_id, text, media_type, media_path or "",
         )
+        return row is not None
 
 # ═══════ Auto Response Rules ═══════
 

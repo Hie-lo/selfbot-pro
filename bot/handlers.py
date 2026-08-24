@@ -1065,16 +1065,7 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def cleanup_stale_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    اگر کاربر در stateای گیر کرده و پیام عادی فرستاده،
-    state رو پاک کن تا دکمه‌ها دوباره کار کنن
-    """
-    # فقط اگر stateهای مشکوک داریم
-    stale_keys = ["awaiting_storage_target", "mon_source_ref", "mon_dest_ref", "awaiting_2fa"]
-    if any(k in context.user_data for k in stale_keys):
-        logger.warning(f"Cleaning stale state for user {update.effective_user.id}: {list(context.user_data.keys())}")
-        context.user_data.clear()
+
 # ═══════════════════════════════════
 # ثبت هندلرها
 # ═══════════════════════════════════
@@ -1082,11 +1073,6 @@ async def cleanup_stale_state(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def register_handlers(app: Application):
 
-    # ── اول: Cleanup handler برای stateهای رها شده ──
-    app.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND,
-        cleanup_stale_state,
-    ), group=-1)  # group=-1 یعنی قبل از همه handlerهای دیگه اجرا بشه
     # ── Conversations اول ──
 
     login_conv = ConversationHandler(
