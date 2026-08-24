@@ -7,6 +7,7 @@
 """
 
 from telethon import events
+from telethon import utils
 from plugins.base import BasePlugin
 from database import db
 
@@ -22,6 +23,8 @@ class ChannelMonitorPlugin(BasePlugin):
 
     async def start(self):
         await self._load_routes()
+
+        self.logger.info(f"ChannelMonitor loaded with {len(self._routes)} routes")
 
         async def cmd_handler(event):
             if not event.out:
@@ -44,38 +47,30 @@ class ChannelMonitorPlugin(BasePlugin):
             if event.out:
                 return
 
+            # دریافت آیدی نرمال‌شده کانال
             source_id = event.chat_id
+            
+            # اگر event.chat_id نداریم، از peer_id استفاده کن
+            if source_id is None and hasattr(event, 'message') and event.message:
+                peer = event.message.peer_id
+                if hasattr(peer, 'channel_id'):
+                    source_id = peer.channel_id
 
-            # لاگ همه پیام‌های غیر PV
-            if not event.is_private:
-                self.logger.info(
-                    f"[DEBUG] msg from chat_id={source_id} | "
-                    f"routes={list(self._routes.keys())}"
-                )
+            if source_id is None:
+                return
 
-            if source_id not in self._routes:
-                # چک با peer_id هم
-                peer_id = None
-                if hasattr(event, 'message') and hasattr(event.message, 'peer_id'):
-                    peer = event.message.peer_id
-                    if hasattr(peer, 'channel_id'):
-                        peer_id = peer.channel_id
+            # نرمال‌سازی آیدی
+            normalized_id = self._normalize_channel_id(source_id)
 
-                if peer_id and peer_id in self._routes:
-                    source_id = peer_id
-                    self.logger.info(f"[DEBUG] matched via peer_id={peer_id}")
-                else:
-                    if peer_id:
-                        self.logger.info(
-                            f"[DEBUG] no match: chat_id={event.chat_id} "
-                            f"peer_id={peer_id} routes={list(self._routes.keys())}"
-                        )
-                    return
+            self.logger.debug(f"Monitor: raw_id={source_id}, normalized={normalized_id}, routes={list(self._routes.keys())}")
 
-            route = self._routes[source_id]
+            if normalized_id not in self._routes:
+                return
+
+            route = self._routes[normalized_id]
             dest_id = route["dest_id"]
 
-            self.logger.info(f"Monitor hit: {source_id} -> {dest_id}")
+            self.logger.info(f"Monitor hit: {normalized_id} -> {dest_id}")
 
             try:
                 if event.message.media:
@@ -89,14 +84,40 @@ class ChannelMonitorPlugin(BasePlugin):
                         dest_id,
                         event.message.text or "",
                     )
-                self.logger.info(f"Forwarded OK")
+                self.logger.info(f"✅ Forwarded OK")
             except Exception as e:
-                self.logger.error(f"Forward error: {type(e).__name__}: {e}")
-                
+                self.logger.error(f"❌ Forward error: {type(e).__name__}: {e}")
+
+        self._add_handler(monitor_listener, events.NewMessage)
+
+    def _normalize_channel_id(self, chat_id):
+        """تبدیل آیدی کانال به فرمت استاندارد -100..."""
+        if chat_id is None:
+            return None
+        
+        # اگر از قبل -100 داره
+        if isinstance(chat_id, int) and chat_id < 0:
+            return chat_id
+        
+        # اگر مثبته، تبدیل به کانال
+        if isinstance(chat_id, int) and chat_id > 0:
+            return int(f"-100{chat_id}")
+        
+        return chat_id
+
     async def reload_routes(self):
         self._routes.clear()
         await self._load_routes()
-        self.logger.info(f"routes reloaded: {len(self._routes)} active")
+        
+        # نرمال‌سازی همه آیدی‌ها
+        normalized_routes = {}
+        for src_id, data in self._routes.items():
+            norm_id = self._normalize_channel_id(src_id)
+            if norm_id:
+                normalized_routes[norm_id] = data
+        
+        self._routes = normalized_routes
+        self.logger.info(f"Routes reloaded: {len(self._routes)} active")
 
     async def _add_monitor(self, event):
         parts = event.message.text.split()
@@ -111,15 +132,18 @@ class ChannelMonitorPlugin(BasePlugin):
             src_entity = await self.client.get_entity(parts[1])
             dst_entity = await self.client.get_entity(parts[2])
 
-            src_id = src_entity.id
-            dst_id = dst_entity.id
+            src_id = utils.get_peer_id(src_entity)
+            dst_id = utils.get_peer_id(dst_entity)
             src_title = getattr(src_entity, "title", parts[1])
             dst_title = getattr(dst_entity, "title", parts[2])
 
             await db.set_channel_route(
                 self.user_id, src_id, src_title, "custom", dst_id, dst_title
             )
-            self._routes[src_id] = {
+            
+            # نرمال‌سازی برای کش داخلی
+            norm_src_id = self._normalize_channel_id(src_id)
+            self._routes[norm_src_id] = {
                 "dest_id": dst_id,
                 "dest_title": dst_title,
             }
@@ -146,9 +170,12 @@ class ChannelMonitorPlugin(BasePlugin):
 
         try:
             src_entity = await self.client.get_entity(parts[2])
-            src_id = src_entity.id
+            src_id = utils.get_peer_id(src_entity)
+            norm_src_id = self._normalize_channel_id(src_id)
+            
             await db.delete_channel_route(self.user_id, src_id)
-            self._routes.pop(src_id, None)
+            self._routes.pop(norm_src_id, None)
+            
             await event.delete()
             await self.client.send_message(event.chat_id, "✅ حذف شد.")
             self.logger.info(f"Route removed: {src_id}")
@@ -172,10 +199,12 @@ class ChannelMonitorPlugin(BasePlugin):
     async def _load_routes(self):
         routes = await db.get_channel_routes(self.user_id)
         for r in routes:
-            self._routes[r["source_channel_id"]] = {
-                "dest_id": r["destination_id"],
-                "dest_title": r["destination_title"],
-            }
+            src_id = self._normalize_channel_id(r["source_channel_id"])
+            if src_id:
+                self._routes[src_id] = {
+                    "dest_id": r["destination_id"],
+                    "dest_title": r["destination_title"],
+                }
         if routes:
             self.logger.info(f"loaded {len(routes)} routes")
 

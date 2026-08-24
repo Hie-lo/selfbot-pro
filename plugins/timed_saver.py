@@ -19,6 +19,8 @@ class TimedSaverPlugin(BasePlugin):
         me = await self.client.get_me()
         my_id = me.id
 
+        self.logger.info(f"TimedSaver started for user {self.user_id}, my_id={my_id}")
+
         async def on_message(event):
             if not event.is_private:
                 return
@@ -32,12 +34,15 @@ class TimedSaverPlugin(BasePlugin):
             msg_id = event.message.id
             text = event.message.text or ""
 
+            self.logger.info(f"Timed message detected: msg_id={msg_id}, chat_id={chat_id}")
+
             try:
                 entity = await self.client.get_entity(chat_id)
                 chat_title = getattr(entity, "first_name", str(chat_id))
                 if hasattr(entity, "last_name") and entity.last_name:
                     chat_title += " " + entity.last_name
-            except Exception:
+            except Exception as e:
+                self.logger.debug(f"Get chat entity failed: {e}")
                 chat_title = str(chat_id)
 
             safe_title = "".join(c for c in chat_title if c.isalnum() or c in " -_")
@@ -55,6 +60,7 @@ class TimedSaverPlugin(BasePlugin):
                     new_path = os.path.join(folder, f"{ts}_{msg_id}{ext}")
                     os.rename(fp, new_path)
                     media_path = new_path
+                    self.logger.debug(f"Downloaded timed media: {media_path}")
             except Exception as e:
                 self.logger.error(f"Download failed: {e}")
 
@@ -63,11 +69,7 @@ class TimedSaverPlugin(BasePlugin):
                 msg_id, text, media_type, media_path,
             )
 
-            # فیکس مسیر ذخیره‌سازی
-            target = await db.get_storage_target(self.user_id, "timed_saver")
-            dest_id = my_id
-            if target and target.get("target_id"):
-                dest_id = target["target_id"]
+            dest_peer = await self._get_dest_peer(my_id)
 
             caption = f"⏳ تایم‌دار از {chat_title}"
             if text:
@@ -75,13 +77,43 @@ class TimedSaverPlugin(BasePlugin):
 
             try:
                 if media_path and os.path.exists(media_path):
-                    await self.client.send_file(dest_id, media_path, caption=caption)
+                    await self.client.send_file(dest_peer, media_path, caption=caption)
                 else:
-                    await self.client.send_message(dest_id, caption)
+                    await self.client.send_message(dest_peer, caption)
+                self.logger.info(f"✅ Timed saved from {chat_title}")
             except Exception as e:
-                self.logger.error(f"Forward failed: {e}")
-
-            self.logger.info(f"Timed saved from {chat_title}")
+                self.logger.error(f"❌ Forward failed: {e}")
 
         self._add_handler(on_message, events.NewMessage)
-        self.logger.info("loaded")
+        self.logger.info("TimedSaver loaded")
+
+    async def _get_dest_peer(self, my_id):
+        """یافتن مقصد با نرمال‌سازی آیدی کانال"""
+        target = await db.get_storage_target(self.user_id, "timed_saver")
+        self.logger.debug(f"Storage target: {target}")
+
+        dest_id = my_id
+        if target and target.get("target_id"):
+            dest_id = target["target_id"]
+
+        self.logger.debug(f"Dest ID raw: {dest_id}")
+
+        if dest_id == my_id:
+            return my_id
+
+        # نرمال‌سازی: اگر عدد مثبت بزرگه، ممکنه کانال باشه
+        if isinstance(dest_id, int) and dest_id > 0 and dest_id < 10000000000:
+            normalized = int(f"-100{dest_id}")
+            self.logger.debug(f"Normalized {dest_id} -> {normalized}")
+            dest_id = normalized
+
+        try:
+            entity = await self.client.get_entity(dest_id)
+            self.logger.debug(f"Resolved entity: {getattr(entity, 'title', dest_id)}")
+            return entity
+        except Exception as e:
+            self.logger.warning(f"Failed to resolve dest {dest_id}: {e}")
+            return dest_id
+
+    async def stop(self):
+        await super().stop()
