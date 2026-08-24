@@ -391,16 +391,18 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
     target_title = text
 
     try:
-        # بررسی وجود کانال/گروه در کلاینت کاربر (Resolve Entity)
+        from telethon import utils
         entity = await client.get_entity(text)
-        target_id = entity.id
+        
+        # استفاده از متد استاندارد برای آیدی صحیح
+        target_id = utils.get_peer_id(entity)
 
         if hasattr(entity, "title") and entity.title:
             target_title = entity.title
         elif hasattr(entity, "first_name") and entity.first_name:
             target_title = entity.first_name
 
-        logger.info(f"Resolved storage target: {text} -> {target_id} ({target_title})")
+        logger.info(f"Resolved storage: {text} -> {target_id} ({target_title})")
 
     except Exception as e:
         logger.warning(f"Resolve failed for {text}: {e}")
