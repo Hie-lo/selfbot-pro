@@ -335,56 +335,104 @@ async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_storage_target_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت آیدی/یوزرنیم مقصد ذخیره‌سازی"""
     user = await get_or_create_user(update)
     feature_name = context.user_data.get("storage_feature")
+
     if not feature_name:
-        await update.message.reply_text(t("error_general"), reply_markup=back_kb())
+        await update.message.reply_text(
+            t("error_general"),
+            reply_markup=main_menu_kb(True),
+        )
+        context.user_data.clear()
         return ConversationHandler.END
 
     text = update.message.text.strip()
+
+    # اعتبارسنجی فرمت
+    if not (text.startswith("@") or text.lstrip("-").isdigit()):
+        await update.message.reply_text(
+            "❌ فرمت نامعتبر.\n"
+            "@username یا آیدی عددی بفرستید.\n\n"
+            "/cancel برای انصراف",
+        )
+        return STATE_STORAGE_TARGET
+
+    # resolve با Telethon
+    from core.client_manager import get_client
+    client = await get_client(user["id"])
+
+    if not client:
+        await update.message.reply_text(
+            "❌ اکانت متصل نیست. ابتدا از پنل وصل کنید.",
+            reply_markup=main_menu_kb(False),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     target_id = 0
     target_title = text
 
-    if text.startswith("@") or text.lstrip("-").isdigit():
-        # تلاش برای resolve از طریق Telethon
-        from core.client_manager import get_client
-        client = await get_client(user["id"])
+    try:
+        entity = await client.get_entity(text)
+        target_id = entity.id
 
-        if client:
-            try:
-                entity = await client.get_entity(text)
-                target_id = entity.id
-                target_title = getattr(entity, "title", "") or getattr(entity, "first_name", text)
-                self_logger = __import__("logging").getLogger("bot.handlers")
-                self_logger.info(f"Resolved {text} -> {target_id}")
-            except Exception as e:
-                await update.message.reply_text(
-                    f"❌ نتونستم «{text}» رو پیدا کنم.\n"
-                    f"مطمئن شو اکانتت عضوش هست.\n"
-                    f"خطا: {str(e)[:100]}"
-                )
-                return STATE_STORAGE_TARGET
+        # نام مقصد
+        if hasattr(entity, "title") and entity.title:
+            target_title = entity.title
+        elif hasattr(entity, "first_name") and entity.first_name:
+            target_title = entity.first_name
         else:
-            # اگه کلاینت نبود، عددی ذخیره کن
-            if text.lstrip("-").isdigit():
-                target_id = int(text)
-                target_title = str(target_id)
-    else:
-        await update.message.reply_text("❌ فرمت نامعتبر. @username یا آیدی عددی بفرستید.")
+            target_title = text
+
+        logger.info(f"Resolved storage target: {text} -> {target_id} ({target_title})")
+
+    except Exception as e:
+        logger.warning(f"Resolve failed for {text}: {e}")
+        await update.message.reply_text(
+            f"❌ نتونستم «{text}» رو پیدا کنم.\n\n"
+            f"دلایل احتمالی:\n"
+            f"• اکانت شما عضو نیست\n"
+            f"• یوزرنیم اشتباهه\n"
+            f"• کانال حذف شده\n\n"
+            f"دوباره امتحان کنید یا /cancel بزنید.",
+        )
         return STATE_STORAGE_TARGET
 
     if not target_id:
-        await update.message.reply_text("❌ آیدی مقصد پیدا نشد.")
+        await update.message.reply_text(
+            "❌ آیدی نامعتبر. دوباره امتحان کنید یا /cancel بزنید.",
+        )
         return STATE_STORAGE_TARGET
 
-    await db.set_storage_target(user["id"], feature_name, "custom", target_id, target_title)
-    await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title} ({target_id})")
+    # ذخیره
+    try:
+        await db.set_storage_target(
+            user["id"], feature_name, "custom",
+            target_id, target_title,
+        )
+        await db.audit_log(
+            user["id"], "storage_set",
+            f"{feature_name} -> {target_title} ({target_id})",
+        )
+    except Exception as e:
+        logger.error(f"DB save storage failed: {e}")
+        await update.message.reply_text(
+            "❌ خطا در ذخیره‌سازی.",
+            reply_markup=main_menu_kb(True),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     await update.message.reply_text(
-        t("storage_set", feature=feature_name, target=f"{target_title} (`{target_id}`)"),
+        f"✅ مسیر ذخیره‌سازی «{feature_name}» تنظیم شد:\n"
+        f"📂 {target_title}\n"
+        f"🆔 `{target_id}`",
         reply_markup=main_menu_kb(True),
         parse_mode="Markdown",
     )
-    context.user_data.pop("storage_feature", None)
+
+    context.user_data.clear()
     return ConversationHandler.END
 
 
@@ -603,6 +651,13 @@ async def handle_2fa_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     هندلر پیام متنی برای 2FA
     فقط وقتی فعاله که awaiting_2fa = True باشه
     """
+    # اگه در حال تنظیم مسیر ذخیره هستیم، دخالت نکن
+    if context.user_data.get("storage_feature"):
+        return
+    # اگه در حال اضافه کردن مسیر مانیتور هستیم، دخالت نکن
+    if context.user_data.get("mon_source_ref"):
+        return
+    # اگه 2FA فعال نیست، دخالت نکن
     if not context.user_data.get("awaiting_2fa"):
         return
 
@@ -742,12 +797,21 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """لغو هر عملیاتی"""
     user = await get_or_create_user(update)
-    await client_manager.cleanup_pending(user["id"])
+
+    # پاکسازی pending login
+    try:
+        await client_manager.cleanup_pending(user["id"])
+    except Exception:
+        pass
+
+    # پاکسازی همه state ها
     context.user_data.clear()
+
     session = await db.get_session(user["id"])
     await update.message.reply_text(
-        "❌ لغو شد.",
+        "❌ عملیات لغو شد.",
         reply_markup=main_menu_kb(session is not None),
     )
     return ConversationHandler.END
@@ -986,7 +1050,8 @@ async def handle_mon_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_handlers(app: Application):
-    # لاگین conversation (فقط شماره و 2FA از طریق متن)
+    # ── Conversations اول ──
+
     login_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_connect, pattern="^connect$"),
@@ -1000,10 +1065,10 @@ def register_handlers(app: Application):
             CommandHandler("cancel", cmd_cancel),
         ],
         per_user=True,
+        per_chat=True,
         conversation_timeout=LOGIN_TIMEOUT,
     )
 
-    # storage conversation
     storage_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"),
@@ -1017,8 +1082,10 @@ def register_handlers(app: Application):
             CommandHandler("cancel", cmd_cancel),
         ],
         per_user=True,
+        per_chat=True,
+        conversation_timeout=300,
     )
-    # مانیتور conversation
+
     monitor_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(cb_mon_add, pattern="^mon_add$"),
@@ -1035,47 +1102,42 @@ def register_handlers(app: Application):
             CommandHandler("cancel", cmd_cancel),
         ],
         per_user=True,
+        per_chat=True,
+        conversation_timeout=300,
     )
 
+    # ── ثبت به ترتیب اولویت ──
 
-    # مانیتور callbacks
-
-    # noop — برای دکمه‌های غیرقابل کلیک
-    async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        
-    app.add_handler(monitor_conv)
-    app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
-    app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
-    app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
-    app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
-
-    app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
+    # 1. Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("activate", cmd_activate))
     app.add_handler(CommandHandler("users", cmd_users))
 
+    # 2. Conversations (باید قبل از MessageHandler عمومی باشن)
     app.add_handler(login_conv)
     app.add_handler(storage_conv)
+    app.add_handler(monitor_conv)
 
-    # کیبورد مجازی — ارقام
+    # 3. Callback queries
     app.add_handler(CallbackQueryHandler(cb_code_digit, pattern=r"^code_[0-9]$"))
     app.add_handler(CallbackQueryHandler(cb_code_back, pattern="^code_back$"))
     app.add_handler(CallbackQueryHandler(cb_code_cancel, pattern="^code_cancel$"))
 
-    # 2FA از طریق پیام متنی
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_2fa_message,
-    ))
+    async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
 
-    # بقیه callbacks
+    app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
+
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))
     app.add_handler(CallbackQueryHandler(cb_panel, pattern="^panel$"))
     app.add_handler(CallbackQueryHandler(cb_features, pattern="^features$"))
     app.add_handler(CallbackQueryHandler(cb_toggle_feature, pattern=r"^toggle_"))
     app.add_handler(CallbackQueryHandler(cb_storage, pattern="^storage$"))
+    app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_mon_toggle, pattern=r"^mon_toggle_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_delete, pattern=r"^mon_delete_"))
+    app.add_handler(CallbackQueryHandler(cb_mon_confirm_del, pattern=r"^mon_confirm_del_"))
     app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
     app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
     app.add_handler(CallbackQueryHandler(cb_subscription, pattern="^subscription$"))
@@ -1083,5 +1145,11 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_disconnect, pattern="^disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_disconnect, pattern="^confirm_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_help, pattern="^help$"))
+
+    # 4. Message handler عمومی (فقط برای 2FA — آخرین اولویت)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_2fa_message,
+    ))
 
     logger.info("All handlers registered")
