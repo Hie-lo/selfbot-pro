@@ -8,6 +8,7 @@ from database import db
 
 from plugins.dice import DicePlugin
 from plugins.heart import HeartPlugin
+from plugins.panel import PanelPlugin
 from plugins.save_from_link import SaveFromLinkPlugin
 from plugins.sticker_convert import StickerConvertPlugin
 from plugins.banner import BannerPlugin
@@ -24,7 +25,9 @@ ALWAYS_ON_PLUGINS = {
     "heart_animation": HeartPlugin,
     "save_from_link": SaveFromLinkPlugin,
     "sticker_convert": StickerConvertPlugin,
+    "panel": PanelPlugin,
 }
+
 
 TOGGLEABLE_PLUGINS = {
     "banner": BannerPlugin,
