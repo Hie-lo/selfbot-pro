@@ -1,6 +1,5 @@
 """
 پلاگین ذخیره پیام‌های تایم‌دار
-خودکار کار میکنه، نیاز به کامند نداره
 """
 
 import os
@@ -13,7 +12,7 @@ from config import DOWNLOADS_DIR
 
 class TimedSaverPlugin(BasePlugin):
     name = "timed_saver"
-    description = "ذخیره پیام تایم‌دار"
+    description = "ذخیره تایم‌دار"
     always_on = False
 
     async def start(self):
@@ -33,7 +32,6 @@ class TimedSaverPlugin(BasePlugin):
             msg_id = event.message.id
             text = event.message.text or ""
 
-            # نام چت
             try:
                 entity = await self.client.get_entity(chat_id)
                 chat_title = getattr(entity, "first_name", str(chat_id))
@@ -42,7 +40,6 @@ class TimedSaverPlugin(BasePlugin):
             except Exception:
                 chat_title = str(chat_id)
 
-            # دانلود
             safe_title = "".join(c for c in chat_title if c.isalnum() or c in " -_")
             folder = os.path.join(DOWNLOADS_DIR, "timed", safe_title)
             os.makedirs(folder, exist_ok=True)
@@ -61,17 +58,16 @@ class TimedSaverPlugin(BasePlugin):
             except Exception as e:
                 self.logger.error(f"Download failed: {e}")
 
-            # ذخیره در DB
             await db.save_message_record(
                 self.user_id, "timed", chat_id, chat_title,
                 msg_id, text, media_type, media_path,
             )
 
-            # فوروارد به مقصد
+            # فیکس مسیر ذخیره‌سازی
             target = await db.get_storage_target(self.user_id, "timed_saver")
             dest_id = my_id
-            if target:
-                dest_id = target["target_id"] or my_id
+            if target and target.get("target_id"):
+                dest_id = target["target_id"]
 
             caption = f"⏳ تایم‌دار از {chat_title}"
             if text:
@@ -85,7 +81,7 @@ class TimedSaverPlugin(BasePlugin):
             except Exception as e:
                 self.logger.error(f"Forward failed: {e}")
 
-            self.logger.info(f"Timed message saved from {chat_title}")
+            self.logger.info(f"Timed saved from {chat_title}")
 
         self._add_handler(on_message, events.NewMessage)
         self.logger.info("loaded")

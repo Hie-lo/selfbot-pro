@@ -1,9 +1,10 @@
 """
-پلاگین ضد حذف پیام — فقط PV — همه پیام‌ها
+پلاگین ضد حذف پیام — فقط PV
 """
 
 from datetime import datetime, timezone
 from telethon import events
+from telethon.tl.types import UpdateDeleteMessages, UpdateDeleteChannelMessages
 from plugins.base import BasePlugin
 from database import db
 
@@ -24,7 +25,6 @@ class AntiDeletePlugin(BasePlugin):
         self._my_id = me.id
 
         async def cache_message(event):
-            """کش همه پیام‌های PV"""
             if not event.is_private:
                 return
             if not event.message:
@@ -40,7 +40,6 @@ class AntiDeletePlugin(BasePlugin):
                 oldest = min(self._cache[chat_id].keys())
                 del self._cache[chat_id][oldest]
 
-            # نام فرستنده
             sender_id = msg.sender_id
             is_me = (sender_id == self._my_id)
 
@@ -57,7 +56,6 @@ class AntiDeletePlugin(BasePlugin):
                 except Exception:
                     sender_name = str(sender_id) if sender_id else "نامشخص"
 
-            # نام چت (طرف مقابل)
             chat_name = "نامشخص"
             try:
                 chat_entity = await self.client.get_entity(chat_id)
@@ -80,29 +78,50 @@ class AntiDeletePlugin(BasePlugin):
                 "chat_name": chat_name,
                 "chat_id": chat_id,
                 "time_str": time_str,
+                "date": msg.date,
             }
 
         self._add_handler(cache_message, events.NewMessage)
 
         async def on_delete(event):
-            """وقتی پیام حذف شد"""
+            """فقط پیام‌های واقعاً حذف شده"""
+            if not event.is_private:
+                return
+
             for msg_id in event.deleted_ids:
-                for chat_id, msgs in self._cache.items():
-                    if msg_id in msgs:
-                        cached = msgs.pop(msg_id)
-                        await self._send_deleted(cached)
-                        break
+                chat_id = event.chat_id
+
+                # چک کن پیام واقعاً در کش ما هست
+                if chat_id not in self._cache:
+                    continue
+                if msg_id not in self._cache[chat_id]:
+                    continue
+
+                cached = self._cache[chat_id].pop(msg_id)
+
+                # فیلتر: پیام‌های خیلی قدیمی رو رد کن
+                # (اگه بیشتر از ۲۴ ساعت از تاریخ پیام گذشته، احتمالاً حذف واقعی نیست)
+                if cached.get("date"):
+                    now = datetime.now(timezone.utc)
+                    msg_date = cached["date"]
+                    if hasattr(msg_date, 'tzinfo') and msg_date.tzinfo is None:
+                        msg_date = msg_date.replace(tzinfo=timezone.utc)
+                    diff = (now - msg_date).total_seconds()
+                    if diff > 86400 * 7:  # بیشتر از ۷ روز
+                        self.logger.info(f"Skipped old msg {msg_id} ({diff:.0f}s old)")
+                        continue
+
+                await self._send_deleted(cached)
 
         self._add_handler(on_delete, events.MessageDeleted)
 
         self.logger.info("loaded")
 
     async def _send_deleted(self, cached):
-        """ارسال پیام حذف شده"""
         target = await db.get_storage_target(self.user_id, "anti_delete")
         dest_id = self._my_id
-        if target:
-            dest_id = target["target_id"] or self._my_id
+        if target and target.get("target_id"):
+            dest_id = target["target_id"]
 
         sender = cached.get("sender_name", "نامشخص")
         is_me = cached.get("is_me", False)
@@ -111,7 +130,6 @@ class AntiDeletePlugin(BasePlugin):
         time_str = cached.get("time_str", "")
         sender_id = cached.get("sender_id", "")
 
-        # مشخص کنیم کی حذف کرده
         if is_me:
             deleted_by = f"طرف مقابل ({chat_name}) پیام شما را حذف کرد"
         else:
@@ -121,11 +139,11 @@ class AntiDeletePlugin(BasePlugin):
             f"🗑 **پیام حذف شده**\n"
             f"💬 چت: {chat_name}\n"
             f"📌 {deleted_by}\n"
-            f"👤 فرستنده اصلی: {sender}"
+            f"👤 فرستنده: {sender}"
         )
         if sender_id and not is_me:
             header += f" (`{sender_id}`)"
-        header += f"\n📅 زمان ارسال: {time_str}\n"
+        header += f"\n📅 زمان: {time_str}\n"
 
         if text:
             header += f"\n📝 متن:\n{text}"
@@ -136,7 +154,7 @@ class AntiDeletePlugin(BasePlugin):
                 await self.client.send_file(dest_id, media, caption=header)
             else:
                 await self.client.send_message(dest_id, header)
-            self.logger.info(f"Deleted msg saved | sender={sender} | chat={chat_name}")
+            self.logger.info(f"Deleted msg saved | {sender} | {chat_name}")
         except Exception as e:
             self.logger.error(f"Send deleted failed: {e}")
 

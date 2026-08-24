@@ -340,22 +340,49 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
     if not feature_name:
         await update.message.reply_text(t("error_general"), reply_markup=back_kb())
         return ConversationHandler.END
+
     text = update.message.text.strip()
     target_id = 0
     target_title = text
-    if text.startswith("@"):
-        target_title = text
-    elif text.lstrip("-").isdigit():
-        target_id = int(text)
-        target_title = str(target_id)
+
+    if text.startswith("@") or text.lstrip("-").isdigit():
+        # تلاش برای resolve از طریق Telethon
+        from core.client_manager import get_client
+        client = await get_client(user["id"])
+
+        if client:
+            try:
+                entity = await client.get_entity(text)
+                target_id = entity.id
+                target_title = getattr(entity, "title", "") or getattr(entity, "first_name", text)
+                self_logger = __import__("logging").getLogger("bot.handlers")
+                self_logger.info(f"Resolved {text} -> {target_id}")
+            except Exception as e:
+                await update.message.reply_text(
+                    f"❌ نتونستم «{text}» رو پیدا کنم.\n"
+                    f"مطمئن شو اکانتت عضوش هست.\n"
+                    f"خطا: {str(e)[:100]}"
+                )
+                return STATE_STORAGE_TARGET
+        else:
+            # اگه کلاینت نبود، عددی ذخیره کن
+            if text.lstrip("-").isdigit():
+                target_id = int(text)
+                target_title = str(target_id)
     else:
-        await update.message.reply_text("❌ فرمت نامعتبر.")
+        await update.message.reply_text("❌ فرمت نامعتبر. @username یا آیدی عددی بفرستید.")
         return STATE_STORAGE_TARGET
+
+    if not target_id:
+        await update.message.reply_text("❌ آیدی مقصد پیدا نشد.")
+        return STATE_STORAGE_TARGET
+
     await db.set_storage_target(user["id"], feature_name, "custom", target_id, target_title)
-    await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title}")
+    await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title} ({target_id})")
     await update.message.reply_text(
-        t("storage_set", feature=feature_name, target=target_title),
+        t("storage_set", feature=feature_name, target=f"{target_title} (`{target_id}`)"),
         reply_markup=main_menu_kb(True),
+        parse_mode="Markdown",
     )
     context.user_data.pop("storage_feature", None)
     return ConversationHandler.END

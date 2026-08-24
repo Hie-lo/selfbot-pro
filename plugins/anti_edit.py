@@ -1,5 +1,5 @@
 """
-پلاگین ضد ویرایش — فقط PV — همه پیام‌ها
+پلاگین ضد ویرایش — فقط PV
 """
 
 from datetime import datetime, timezone
@@ -24,7 +24,6 @@ class AntiEditPlugin(BasePlugin):
         self._my_id = me.id
 
         async def cache_original(event):
-            """کش متن اصلی — فقط PV — همه پیام‌ها"""
             if not event.is_private:
                 return
             if not event.message or not event.message.text:
@@ -65,7 +64,6 @@ class AntiEditPlugin(BasePlugin):
         self._add_handler(cache_original, events.NewMessage)
 
         async def on_edit(event):
-            """وقتی پیام ویرایش شد — فقط PV"""
             if not event.is_private:
                 return
             if not event.message:
@@ -88,7 +86,6 @@ class AntiEditPlugin(BasePlugin):
             if original_text == new_text:
                 return
 
-            # نام چت
             chat_name = "نامشخص"
             try:
                 chat_entity = await self.client.get_entity(chat_id)
@@ -99,10 +96,11 @@ class AntiEditPlugin(BasePlugin):
             except Exception:
                 chat_name = str(chat_id)
 
+            # فیکس مسیر ذخیره‌سازی
             target = await db.get_storage_target(self.user_id, "anti_edit")
             dest_id = self._my_id
-            if target:
-                dest_id = target["target_id"] or self._my_id
+            if target and target.get("target_id"):
+                dest_id = target["target_id"]
 
             now = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
 
@@ -121,7 +119,7 @@ class AntiEditPlugin(BasePlugin):
 
             try:
                 await self.client.send_message(dest_id, text)
-                self.logger.info(f"Edited msg saved | {sender_name} in {chat_name}")
+                self.logger.info(f"Edited msg saved | {sender_name}")
             except Exception as e:
                 self.logger.error(f"Send edit failed: {e}")
 

@@ -34,25 +34,26 @@ class SaveFromLinkPlugin(BasePlugin):
             await event.delete()
 
             try:
-                # resolve کانال
+                # فیکس کانال خصوصی: t.me/c/1234567/890
+                # آیدی باید -1001234567 بشه
                 if channel_ref.isdigit():
-                    entity = await self.client.get_entity(int(channel_ref))
+                    # کانال خصوصی
+                    real_id = int(f"-100{channel_ref}")
+                    entity = await self.client.get_entity(real_id)
                 else:
+                    # کانال عمومی با username
                     entity = await self.client.get_entity(channel_ref)
 
-                # گرفتن پیام
                 msg = await self.client.get_messages(entity, ids=msg_id)
                 if not msg:
                     await self.client.send_message(event.chat_id, "❌ پیام پیدا نشد.")
                     return
 
-                # مقصد
                 target = await db.get_storage_target(self.user_id, "save_from_link")
                 dest_id = my_id
-                if target:
-                    dest_id = target["target_id"] or my_id
+                if target and target.get("target_id"):
+                    dest_id = target["target_id"]
 
-                # ارسال
                 caption = f"🔗 ذخیره از: {url}"
                 if msg.text:
                     caption += f"\n\n{msg.text}"
@@ -62,12 +63,11 @@ class SaveFromLinkPlugin(BasePlugin):
                 else:
                     await self.client.send_message(dest_id, caption)
 
-                # اگه آلبوم بود
+                # آلبوم
                 if msg.grouped_id:
                     around = list(range(max(1, msg_id - 10), msg_id + 11))
                     messages = await self.client.get_messages(entity, ids=around)
                     album = [m for m in messages if m and m.grouped_id == msg.grouped_id and m.id != msg_id]
-
                     for m in album:
                         if m.media:
                             await self.client.send_file(dest_id, m.media)
@@ -77,7 +77,7 @@ class SaveFromLinkPlugin(BasePlugin):
 
             except Exception as e:
                 self.logger.error(f"Save from link error: {e}")
-                await self.client.send_message(event.chat_id, f"❌ خطا: {str(e)[:100]}")
+                await self.client.send_message(event.chat_id, f"❌ خطا: {str(e)[:150]}")
 
         self._add_handler(
             save_cmd,
