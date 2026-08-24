@@ -1,12 +1,15 @@
 """
 پلاگین ذخیره از لینک پیام تلگرام
+پشتیبانی کامل از کانال‌های قفل شده (Protected Chats) با روش دانلود و آپلود خودکار
 کامند: .ذخیره https://t.me/channel/123
 """
 
+import os
 from telethon import events
 from plugins.base import BasePlugin
 from core.security import validate_telegram_link
 from database import db
+from config import DOWNLOADS_DIR
 
 
 class SaveFromLinkPlugin(BasePlugin):
@@ -34,14 +37,11 @@ class SaveFromLinkPlugin(BasePlugin):
             await event.delete()
 
             try:
-                # فیکس کانال خصوصی: t.me/c/1234567/890
-                # آیدی باید -1001234567 بشه
+                # تبدیل آیدی کانال‌های خصوصی
                 if channel_ref.isdigit():
-                    # کانال خصوصی
                     real_id = int(f"-100{channel_ref}")
                     entity = await self.client.get_entity(real_id)
                 else:
-                    # کانال عمومی با username
                     entity = await self.client.get_entity(channel_ref)
 
                 msg = await self.client.get_messages(entity, ids=msg_id)
@@ -58,19 +58,20 @@ class SaveFromLinkPlugin(BasePlugin):
                 if msg.text:
                     caption += f"\n\n{msg.text}"
 
+                # ارسال پیام اصلی
                 if msg.media:
-                    await self.client.send_file(dest_id, msg.media, caption=caption)
+                    await self._send_media_safely(dest_id, msg, caption)
                 else:
                     await self.client.send_message(dest_id, caption)
 
-                # آلبوم
+                # ارسال بخش‌های دیگر آلبوم (اگر آلبوم بود)
                 if msg.grouped_id:
                     around = list(range(max(1, msg_id - 10), msg_id + 11))
                     messages = await self.client.get_messages(entity, ids=around)
                     album = [m for m in messages if m and m.grouped_id == msg.grouped_id and m.id != msg_id]
                     for m in album:
                         if m.media:
-                            await self.client.send_file(dest_id, m.media)
+                            await self._send_media_safely(dest_id, m, None)
 
                 await self.client.send_message(event.chat_id, "✅ ذخیره شد.")
                 self.logger.info(f"Saved from link: {url}")
@@ -85,3 +86,41 @@ class SaveFromLinkPlugin(BasePlugin):
         )
 
         self.logger.info("loaded")
+
+    async def _send_media_safely(self, dest_id, msg, caption=None):
+        """
+        ارسال فایل با دور زدن محدودیت کپی/فوروارد کانال‌های محافظت شده.
+        اگر ارسال مستقیم خطا داد، فایل را دانلود و سپس آپلود می‌کند.
+        """
+        try:
+            # تلاش اول: ارسال مستقیم (سریع‌ترین حالت)
+            await self.client.send_file(dest_id, msg.media, caption=caption)
+        except Exception as e:
+            err_msg = str(e).lower()
+            # اگر خطای مربوط به چت‌های قفل شده یا کپی محدود شده رخ داد
+            if "protected" in err_msg or "forward" in err_msg or "restrict" in err_msg or "copy" in err_msg:
+                self.logger.info(f"Protected chat media detected for msg_id={msg.id}. Downloading...")
+                
+                temp_dir = os.path.join(DOWNLOADS_DIR, "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                
+                # دانلود فایل روی سرور
+                file_path = await msg.download_media(file=temp_dir)
+                if file_path:
+                    try:
+                        # آپلود به عنوان فایل جدید
+                        await self.client.send_file(
+                            dest_id, 
+                            file_path, 
+                            caption=caption,
+                            force_document=False,
+                            supports_streaming=True
+                        )
+                    finally:
+                        # حذف فایل از روی سرور بلافاصله پس از آپلود
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                else:
+                    raise ValueError("دانلود فایل محافظت‌شده ناموفق بود.")
+            else:
+                raise
