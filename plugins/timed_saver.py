@@ -1,5 +1,6 @@
 """
 پلاگین ذخیره پیام‌های تایم‌دار
+— فقط پیام‌های طرف مقابل ذخیره می‌شوند
 """
 
 import os
@@ -22,12 +23,20 @@ class TimedSaverPlugin(BasePlugin):
         self.logger.info(f"TimedSaver started for user {self.user_id}, my_id={my_id}")
 
         async def on_message(event):
+            # فقط PV
             if not event.is_private:
                 return
             if not event.message or not event.message.media:
                 return
+            
+            # چک TTL
             ttl = getattr(event.message.media, "ttl_seconds", None)
             if ttl is None:
+                return
+
+            # ❌ پیام‌های خودی رو ذخیره نکن
+            if event.message.sender_id == my_id:
+                self.logger.debug(f"Skipping self-sent timed msg {event.message.id}")
                 return
 
             chat_id = event.chat_id
@@ -36,14 +45,30 @@ class TimedSaverPlugin(BasePlugin):
 
             self.logger.info(f"Timed message detected: msg_id={msg_id}, chat_id={chat_id}")
 
+            # نام چت (طرف مقابل)
+            chat_title = "نامشخص"
             try:
-                entity = await self.client.get_entity(chat_id)
-                chat_title = getattr(entity, "first_name", str(chat_id))
-                if hasattr(entity, "last_name") and entity.last_name:
-                    chat_title += " " + entity.last_name
+                chat_entity = await self.client.get_entity(chat_id)
+                chat_title = getattr(chat_entity, "first_name", "") or ""
+                if hasattr(chat_entity, "last_name") and chat_entity.last_name:
+                    chat_title += " " + chat_entity.last_name
+                chat_title = chat_title.strip() or str(chat_id)
             except Exception as e:
                 self.logger.debug(f"Get chat entity failed: {e}")
                 chat_title = str(chat_id)
+
+            # نام فرستنده (طرف مقابل)
+            sender_name = "نامشخص"
+            sender_id = event.message.sender_id
+            try:
+                sender = await self.client.get_entity(sender_id)
+                sender_name = getattr(sender, "first_name", "") or ""
+                if hasattr(sender, "last_name") and sender.last_name:
+                    sender_name += " " + sender.last_name
+                sender_name = sender_name.strip() or str(sender_id)
+            except Exception as e:
+                self.logger.debug(f"Get sender entity failed: {e}")
+                sender_name = str(sender_id) if sender_id else "نامشخص"
 
             safe_title = "".join(c for c in chat_title if c.isalnum() or c in " -_")
             folder = os.path.join(DOWNLOADS_DIR, "timed", safe_title)
@@ -71,7 +96,8 @@ class TimedSaverPlugin(BasePlugin):
 
             dest_peer = await self._get_dest_peer(my_id)
 
-            caption = f"⏳ تایم‌دار از {chat_title}"
+            # کپشن با نام فرستنده واقعی
+            caption = f"⏳ تایم‌دار از {sender_name}"
             if text:
                 caption += f"\n{text}"
 
@@ -80,7 +106,7 @@ class TimedSaverPlugin(BasePlugin):
                     await self.client.send_file(dest_peer, media_path, caption=caption)
                 else:
                     await self.client.send_message(dest_peer, caption)
-                self.logger.info(f"✅ Timed saved from {chat_title}")
+                self.logger.info(f"✅ Timed saved from {sender_name}")
             except Exception as e:
                 self.logger.error(f"❌ Forward failed: {e}")
 
