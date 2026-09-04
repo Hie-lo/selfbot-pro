@@ -79,6 +79,22 @@ def validate_telegram_link(url: str):
     return None
 
 
+def validate_telegram_chat_link(url: str) -> str | None:
+    """اعتبارسنجی لینک کانال/گروه برای resolve کردن entity تلگرام."""
+    cleaned = url.strip().rstrip("/")
+
+    # https://t.me/channel یا https://t.me/c/123456
+    m = re.match(r"^https?://t\.me/([a-zA-Z]\w{3,})$", cleaned)
+    if m:
+        return m.group(1)
+
+    m = re.match(r"^https?://t\.me/c/(\d+)$", cleaned)
+    if m:
+        return m.group(1)
+
+    return None
+
+
 def validate_interval(
     value: int, min_val: int = 10, max_val: int = 86400
 ) -> bool:

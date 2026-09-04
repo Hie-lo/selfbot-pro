@@ -10,6 +10,7 @@ from plugins.dice import DicePlugin
 from plugins.heart import HeartPlugin
 from plugins.panel import PanelPlugin
 from plugins.save_from_link import SaveFromLinkPlugin
+from plugins.forward_channel import ForwardChannelPlugin
 from plugins.sticker_convert import StickerConvertPlugin
 from plugins.banner import BannerPlugin
 from plugins.timed_saver import TimedSaverPlugin
@@ -24,6 +25,7 @@ ALWAYS_ON_PLUGINS = {
     "dice": DicePlugin,
     "heart_animation": HeartPlugin,
     "save_from_link": SaveFromLinkPlugin,
+    "forward_channel": ForwardChannelPlugin,
     "sticker_convert": StickerConvertPlugin,
     "panel": PanelPlugin,
 }
