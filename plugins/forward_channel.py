@@ -89,6 +89,9 @@ class ForwardChannelPlugin(BasePlugin):
         batch = []
 
         async for message in self.client.iter_messages(source, reverse=True):
+            if getattr(message, "action", None) is not None:
+                continue
+
             batch.append(message)
             if len(batch) == 100:
                 await self.client.forward_messages(
