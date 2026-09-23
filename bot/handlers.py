@@ -61,6 +61,9 @@ from bot.forward import (
     cb_fwd_stop,
     cb_fwd_resume,
     cb_fwd_unlock,
+    cb_fwd_delete,
+    cb_fwd_delete_confirm,
+    cb_fwd_delete_cancel,
     handle_fwd_search_input,
     handle_fwd_manual_input,
 )
@@ -1492,6 +1495,9 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_fwd_stop, pattern=r"^fwd_stop_\d+$"))
     app.add_handler(CallbackQueryHandler(cb_fwd_resume, pattern="^fwd_resume$"))
     app.add_handler(CallbackQueryHandler(cb_fwd_unlock, pattern="^fwd_unlock$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete, pattern="^fwd_delete$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete_confirm, pattern="^fwd_delete_confirm$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete_cancel, pattern="^fwd_delete_cancel$"))
 
     # ── 6. عکس رسید پرداخت ──
     app.add_handler(MessageHandler(

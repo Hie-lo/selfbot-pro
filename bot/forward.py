@@ -23,6 +23,7 @@ from bot.keyboards import (
     fwd_confirm_kb,
     fwd_running_kb,
     fwd_done_kb,
+    fwd_delete_confirm_kb,
     back_kb,
 )
 from config import (
@@ -979,6 +980,89 @@ async def cb_fwd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer(
         "⏹ درخواست توقف ثبت شد..." if ok else "قبلاً تمام شده",
         show_alert=not ok,
+    )
+
+
+async def cb_fwd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🗑 درخواست حذف کامل — نمایش تایید"""
+    query = update.callback_query
+    await query.answer()
+    from bot.keyboards import fwd_delete_confirm_kb
+    # اگر جاب در حال اجراست هم می‌توان حذف کرد — اول متوقف می‌شود
+    await query.edit_message_text(
+        "🗑 <b>حذف کامل فوروارد</b>\n\n"
+        "این فوروارد برای همیشه حذف می‌شود و دیگر قابل ادامه نیست.\n"
+        "کشِ آن هم پاک می‌شود.\n\n"
+        "مطمئنی؟",
+        reply_markup=fwd_delete_confirm_kb(),
+        parse_mode="HTML",
+    )
+
+
+async def cb_fwd_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید حذف کامل"""
+    query = update.callback_query
+    from bot.handlers import get_or_create_user
+    user = await get_or_create_user(update)
+    # اگر جاب فعال دارد، اول متوقفش کن
+    active = forwarder.get_active_job(user["id"]) or cache_forward.get_active_job(user["id"])
+    if active:
+        try:
+            await forwarder.stop_job(active.id)
+        except Exception:
+            pass
+        try:
+            await cache_forward.stop_job(active.id)
+        except Exception:
+            pass
+        # کمی صبر تا state به paused برود
+        import asyncio
+        await asyncio.sleep(0.5)
+    try:
+        closed = await db.release_unfinished_jobs(
+            user["id"], note="کاربر فوروارد را برای همیشه حذف کرد (🗑)", status="cancelled"
+        )
+    except Exception as e:
+        logger.error(f"release_unfinished_jobs failed: {e}")
+        closed = []
+    await _free_cache_files(closed)
+    # همچنین هر جابِ paused/error باقی‌مانده را هم ببند
+    # (release_unfinished_jobs فقط running/paused را می‌بندد؛ errorها می‌مانند)
+    # برای حذف کامل، errorها را هم به cancelled تبدیل کن
+    try:
+        # مستقیم تمام ردیف‌های نیمه‌کاره را پاک کن
+        pool = db.get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE forward_jobs SET status='cancelled', error='حذف کامل توسط کاربر', updated_at=NOW()
+                       WHERE user_id=$1 AND status IN ('error','paused','running')""",
+                    user["id"],
+                )
+    except Exception as e:
+        logger.debug(f"extra cancel error jobs failed: {e}")
+    await db.audit_log(user["id"], "forward_delete", f"closed={[r['id'] for r in closed]}")
+    await query.answer("🗑 فوروارد برای همیشه حذف شد")
+    await query.edit_message_text(
+        "🗑 <b>فوروارد برای همیشه حذف شد</b>\n"
+        "دیگر قابل ادامه نیست و کش آن پاک شد.\n"
+        "برای شروعِ فوروارد جدید از دکمه‌ی زیر استفاده کن.",
+        reply_markup=back_kb("fwd_start"),
+        parse_mode="HTML",
+    )
+
+
+async def cb_fwd_delete_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    from bot.keyboards import fwd_done_kb
+    from bot.handlers import get_or_create_user
+    user = await get_or_create_user(update)
+    row = await db.get_user_forward_job(user["id"])
+    paused = bool(row and row["status"] in ("paused", "error", "running"))
+    await query.edit_message_text(
+        "❌ انصراف داده شد.",
+        reply_markup=fwd_done_kb(paused=paused),
     )
 
 

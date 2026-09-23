@@ -253,6 +253,60 @@ class ForwardChannelPlugin(BasePlugin):
                 outgoing=True,
             ),
         )
+
+        async def delete_cmd(event):
+            """🗑 حذف کامل فوروارد — برای همیشه"""
+            # اول هر جابِ فعال را متوقف کن
+            try:
+                from core import forwarder as fw, cache_forward as cf
+                active = fw.get_active_job(self.user_id) or cf.get_active_job(self.user_id)
+                if active:
+                    try:
+                        await fw.stop_job(active.id)
+                    except Exception:
+                        pass
+                    try:
+                        await cf.stop_job(active.id)
+                    except Exception:
+                        pass
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(0.5)
+            except Exception:
+                pass
+            try:
+                closed = await db.release_unfinished_jobs(
+                    self.user_id, note="کاربر با «.فوروارد حذف» برای همیشه حذف کرد", status="cancelled"
+                )
+            except Exception as e:
+                self.logger.error(f"delete failed: {e}")
+                await self._report(f"❌ حذف ناموفق: {e}")
+                return
+            for row in closed:
+                await forwarder.free_job_cache(row["id"])
+            # errorها را هم ببند
+            try:
+                pool = db.get_pool()
+                if pool:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """UPDATE forward_jobs SET status='cancelled', error='حذف کامل توسط کاربر (.فوروارد حذف)', updated_at=NOW()
+                               WHERE user_id=$1 AND status IN ('error','paused','running')""", self.user_id)
+            except Exception as e:
+                self.logger.debug(f"extra cancel failed: {e}")
+            if closed:
+                lines = "\n".join(f"• 🆔 {r['id']} | {r.get('src_name')} → {r.get('dst_name')}" for r in closed)
+                await self._report(f"🗑 {len(closed)} فوروارد برای همیشه حذف شد:\n{lines}\n\nکش هم پاک شد.")
+            else:
+                # حتی اگر running نبود ولی paused/error بود، حالا پاک شد
+                await self._report("🗑 فوروارد برای همیشه حذف شد — دیگر قابل ادامه نیست. کش پاک شد.")
+
+        self._add_handler(
+            delete_cmd,
+            events.NewMessage(
+                pattern=r"^\.فوروارد\s+حذف\s*$",
+                outgoing=True,
+            ),
+        )
         self.logger.info("loaded")
 
     async def _report(self, text: str):

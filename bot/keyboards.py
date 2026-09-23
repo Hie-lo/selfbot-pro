@@ -586,11 +586,21 @@ def fwd_done_kb(paused: bool = False) -> InlineKeyboardMarkup:
         rows.append([
             InlineKeyboardButton("▶️ ادامه فوروارد", callback_data="fwd_resume"),
         ])
+        rows.append([
+            InlineKeyboardButton("🗑 حذف کامل", callback_data="fwd_delete"),
+        ])
     rows.append([
         InlineKeyboardButton("📥 فوروارد جدید", callback_data="fwd_start"),
         InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_main"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def fwd_delete_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ بله، برای همیشه حذف کن", callback_data="fwd_delete_confirm")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="fwd_delete_cancel")],
+    ])
 
 
 def fwd_blocked_kb() -> InlineKeyboardMarkup:
@@ -599,6 +609,7 @@ def fwd_blocked_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("▶️ ادامه‌ی همان فوروارد", callback_data="fwd_resume")],
         [InlineKeyboardButton("🔓 بستن آن و شروع فوروارد جدید",
                               callback_data="fwd_unlock")],
+        [InlineKeyboardButton("🗑 حذف کامل", callback_data="fwd_delete")],
         [InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_main")],
     ])
 
