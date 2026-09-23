@@ -8,6 +8,7 @@ import time
 import hashlib
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("security")
 
@@ -79,16 +80,49 @@ def validate_telegram_link(url: str):
     return None
 
 
-def validate_telegram_chat_link(url: str) -> str | None:
-    """اعتبارسنجی لینک کانال/گروه برای resolve کردن entity تلگرام."""
-    cleaned = url.strip().rstrip("/")
+def extract_invite_hash(text: str) -> str | None:
+    """
+    هش لینک دعوت گروه/کانال خصوصی.
 
-    # https://t.me/channel یا https://t.me/c/123456
-    m = re.match(r"^https?://t\.me/([a-zA-Z]\w{3,})$", cleaned)
+    پشتیبانی: t.me/+AbCdEf، t.me/joinchat/AbCdEf و خودِ هش خام.
+    """
+    cleaned = (text or "").strip().rstrip("/")
+
+    m = re.match(r"^(?:https?://)?t\.me/(?:\+|joinchat/)([A-Za-z0-9_-]{8,})$", cleaned)
     if m:
         return m.group(1)
 
-    m = re.match(r"^https?://t\.me/c/(\d+)$", cleaned)
+    # اگر خود هش را فرستاده باشد (+AbCdEf)
+    m = re.match(r"^\+([A-Za-z0-9_-]{8,})$", cleaned)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def validate_telegram_chat_link(url: str) -> str | None:
+    """
+    اعتبارسنجی لینک کانال/گروه/دعوت برای resolve کردن entity تلگرام.
+
+    خروجی چیزی است که `client.get_entity()` می‌فهمد:
+      `name` (یوزرنیم) | `1234567890` (فرم c/) | `+AbCdEf` (لینک دعوت)
+
+    پشتیبانی: t.me/name · t.me/name/123 · t.me/c/123/456 ·
+              t.me/+hash · t.me/joinchat/hash
+    """
+    cleaned = (url or "").strip().rstrip("/")
+
+    invite = extract_invite_hash(cleaned)
+    if invite:
+        return f"+{invite}"
+
+    # https://t.me/channel  یا  https://t.me/channel/123
+    m = re.match(r"^https?://t\.me/([a-zA-Z]\w{3,})(?:/\d+)?$", cleaned)
+    if m:
+        return m.group(1)
+
+    # https://t.me/c/123456  یا  https://t.me/c/123456/789
+    m = re.match(r"^https?://t\.me/c/(\d+)(?:/\d+)?$", cleaned)
     if m:
         return m.group(1)
 
@@ -99,6 +133,21 @@ def validate_interval(
     value: int, min_val: int = 10, max_val: int = 86400
 ) -> bool:
     return min_val <= value <= max_val
+
+
+def calc_plan_expiry(days: int, current_expiry=None):
+    """
+    محاسبه انقضای پلن.
+    اگر اشتراک فعلی هنوز تمام نشده باشد، روزها به آن اضافه می‌شود.
+    """
+    now = datetime.now(timezone.utc)
+    base = now
+    if current_expiry is not None:
+        if hasattr(current_expiry, "tzinfo") and current_expiry.tzinfo is None:
+            current_expiry = current_expiry.replace(tzinfo=timezone.utc)
+        if current_expiry > now:
+            base = current_expiry
+    return base + timedelta(days=days)
 
 
 # ── Sanitizers ──

@@ -5,6 +5,7 @@
 from datetime import datetime, timezone
 from telethon import events
 from plugins.base import BasePlugin
+from core.media import send_media_clean
 from database import db
 
 
@@ -17,6 +18,7 @@ class AntiDeletePlugin(BasePlugin):
         super().__init__(client, user_id)
         self._cache: dict[int, dict[int, dict]] = {}
         self._max_cache_per_chat = 500
+        self._max_chats = 50
         self._my_id = None
 
     async def start(self):
@@ -36,6 +38,10 @@ class AntiDeletePlugin(BasePlugin):
             msg = event.message
 
             if chat_id not in self._cache:
+                # سقف تعداد چت‌های کش‌شده (جلوگیری از رشد بی‌نهایت حافظه)
+                if len(self._cache) >= self._max_chats:
+                    oldest_chat = next(iter(self._cache))
+                    self._cache.pop(oldest_chat, None)
                 self._cache[chat_id] = {}
 
             if len(self._cache[chat_id]) >= self._max_cache_per_chat:
@@ -189,7 +195,10 @@ class AntiDeletePlugin(BasePlugin):
         try:
             media = cached.get("media")
             if media:
-                await self.client.send_file(dest_peer, media, caption=header)
+                # ارسال امن: استیکر/گیف به Recents اضافه نشود
+                await send_media_clean(
+                    self.client, dest_peer, media, caption=header
+                )
             else:
                 await self.client.send_message(dest_peer, header)
             self.logger.info(f"✅ Deleted msg saved | {sender} | {chat_name}")

@@ -3,11 +3,34 @@
 کامند: .استیکر (ریپلای روی استیکر)
 """
 
+import asyncio
 import os
-import subprocess
 from telethon import events
 from plugins.base import BasePlugin
 from config import DOWNLOADS_DIR
+
+
+async def _run_ffmpeg(args: list, timeout: int = 30) -> bool:
+    """اجرای ffmpeg بدون بلاک کردن event loop"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return False
+
+    return proc.returncode == 0
 
 
 class StickerConvertPlugin(BasePlugin):
@@ -65,49 +88,40 @@ class StickerConvertPlugin(BasePlugin):
                     # استیکر ویدیویی -> GIF
                     gif_path = fp.replace(".webm", ".gif")
 
-                    # تلاش با ffmpeg
-                    try:
-                        subprocess.run(
-                            [
-                                "ffmpeg", "-y",
-                                "-i", fp,
-                                "-vf", "fps=15,scale=256:-1:flags=lanczos",
-                                "-loop", "0",
-                                gif_path,
-                            ],
-                            capture_output=True,
-                            timeout=30,
-                        )
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                    # تلاش با ffmpeg (غیرمسدودکننده)
+                    ok = await _run_ffmpeg([
+                        "ffmpeg", "-y",
+                        "-i", fp,
+                        "-vf", "fps=15,scale=256:-1:flags=lanczos",
+                        "-loop", "0",
+                        gif_path,
+                    ])
+                    if not ok:
                         gif_path = None
 
                     if gif_path and os.path.exists(gif_path) and os.path.getsize(gif_path) > 0:
-                        # ارسال به عنوان GIF
+                        # ارسال به‌صورت ویدیوی inline — نه GIF
+                        # (گیف واقعی به لیست «گیف‌های ذخیره‌شده» اضافه می‌شود)
                         await self.client.send_file(
                             event.chat_id, gif_path,
                             caption="🎬 تبدیل شد",
                             force_document=False,
+                            supports_streaming=True,
                             reply_to=reply.id,
-                            attributes=[],
                         )
                         os.remove(gif_path)
                     else:
                         # fallback: ارسال mp4 به عنوان ویدیو گرد (GIF تلگرامی)
                         mp4_path = fp.replace(".webm", ".mp4")
-                        try:
-                            subprocess.run(
-                                [
-                                    "ffmpeg", "-y",
-                                    "-i", fp,
-                                    "-c:v", "libx264",
-                                    "-pix_fmt", "yuv420p",
-                                    "-an",
-                                    mp4_path,
-                                ],
-                                capture_output=True,
-                                timeout=30,
-                            )
-                        except (FileNotFoundError, subprocess.TimeoutExpired):
+                        ok = await _run_ffmpeg([
+                            "ffmpeg", "-y",
+                            "-i", fp,
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-an",
+                            mp4_path,
+                        ])
+                        if not ok:
                             mp4_path = None
 
                         if mp4_path and os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 0:
@@ -129,6 +143,7 @@ class StickerConvertPlugin(BasePlugin):
                             )
 
                 elif is_animated:
+                    # TGS هیچ‌وقت استیکر واقعی نمی‌شود، ولی برای اطمینان فایل می‌فرستیم
                     await self.client.send_file(
                         event.chat_id, fp,
                         caption="📦 استیکر متحرک TGS",

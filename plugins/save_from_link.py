@@ -7,6 +7,7 @@
 import os
 from telethon import events
 from plugins.base import BasePlugin
+from core.media import send_media_clean
 from core.security import validate_telegram_link
 from config import DOWNLOADS_DIR
 
@@ -86,7 +87,7 @@ class SaveFromLinkPlugin(BasePlugin):
     async def _send_media_safely(self, dest_id, msg, caption=None):
         """ارسال با دور زدن محدودیت کانال‌های محافظت شده"""
         try:
-            await self.client.send_file(dest_id, msg.media, caption=caption)
+            await send_media_clean(self.client, dest_id, msg.media, caption=caption)
         except Exception as e:
             err_msg = str(e).lower()
             if any(kw in err_msg for kw in ("protected", "forward", "restrict", "copy")):

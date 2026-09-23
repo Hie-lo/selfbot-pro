@@ -5,6 +5,7 @@
 """
 
 import logging
+import time
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
@@ -13,7 +14,12 @@ from telethon.errors import (
     PhoneCodeInvalidError,
     FloodWaitError,
 )
-from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
+from config import (
+    TELEGRAM_API_ID,
+    TELEGRAM_API_HASH,
+    LOGIN_TIMEOUT,
+    MAX_CLIENTS,
+)
 
 logger = logging.getLogger("client_manager")
 
@@ -34,7 +40,19 @@ _CLIENT_KWARGS = {
     "system_version": "iOS 16.5",
     "lang_code": "en",
     "system_lang_code": "en",
+    # خودمان FloodWait را مدیریت می‌کنیم (خواب با نمایش پیشرفت + قابل توقف)
+    "flood_sleep_threshold": 0,
 }
+
+
+def _check_pending(info: dict | None) -> dict:
+    """اطمینان از وجود و منقضی نشدن درخواست لاگین"""
+    if not info:
+        raise ValueError("درخواست لاگین منقضی شده. دوباره تلاش کنید.")
+    created = info.get("created_at", 0)
+    if created and (time.time() - created) > LOGIN_TIMEOUT:
+        raise ValueError("زمان ورود کد تمام شد. دوباره تلاش کنید.")
+    return info
 
 
 def _make_client(session_string: str = "") -> TelegramClient:
@@ -91,6 +109,7 @@ async def request_login_code(user_db_id: int, phone: str) -> str:
         "client": client,
         "phone": phone,
         "phone_code_hash": result.phone_code_hash,
+        "created_at": time.time(),
     }
 
     logger.info(f"Code sent for user_db_id={user_db_id}")
@@ -103,8 +122,11 @@ async def complete_login(user_db_id: int, code: str) -> str:
     خروجی: "success" یا "2fa_required"
     """
     info = _pending.get(user_db_id)
-    if not info:
-        raise ValueError("درخواست لاگین منقضی شده. دوباره تلاش کنید.")
+    try:
+        _check_pending(info)
+    except ValueError:
+        await cleanup_pending(user_db_id)
+        raise
 
     client = info["client"]
 
@@ -139,8 +161,11 @@ async def complete_2fa(user_db_id: int, password: str) -> str:
     خروجی: "success"
     """
     info = _pending.get(user_db_id)
-    if not info:
-        raise ValueError("درخواست لاگین منقضی شده.")
+    try:
+        _check_pending(info)
+    except ValueError:
+        await cleanup_pending(user_db_id)
+        raise
 
     client = info["client"]
 
@@ -159,8 +184,14 @@ async def finalize_login(user_db_id: int) -> str:
     خروجی: session_string
     """
     info = _pending.get(user_db_id)
-    if not info:
-        raise ValueError("درخواست لاگین منقضی شده.")
+    _check_pending(info)
+
+    # سقف کلاینت‌های همزمان سرور
+    if len(active_clients) >= MAX_CLIENTS:
+        await cleanup_pending(user_db_id)
+        raise ValueError(
+            f"ظرفیت سرور تکمیل است ({MAX_CLIENTS} اکانت). بعداً تلاش کنید."
+        )
 
     client = info["client"]
     session_string = client.session.save()
