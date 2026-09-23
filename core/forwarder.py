@@ -369,6 +369,29 @@ def filter_dialogs(
     return out
 
 
+def is_owner(entity) -> bool:
+    """آیا کاربر مالک این چت است؟ (فقط کانال/گروه — یوزر هرگز مالک نیست)"""
+    # Channel شامل کانال و سوپرگروه است؛ creator=True یعنی مالک اصلی
+    if isinstance(entity, types.Channel):
+        return bool(getattr(entity, "creator", False))
+    # Chat = گروه قدیمی
+    if isinstance(entity, types.Chat):
+        return bool(getattr(entity, "creator", False))
+    return False
+
+
+def filter_owned_dialogs(items: list[dict]) -> list[tuple[int, dict]]:
+    """فقط کانال‌ها/گروه‌هایی که کاربر مالک آنهاست (creator) — با دسترسی تضمین‌شده"""
+    out = []
+    for idx, item in enumerate(items):
+        if item.get("kind") == "user":
+            continue
+        ent = item.get("entity")
+        if ent is not None and is_owner(ent):
+            out.append((idx, item))
+    return out
+
+
 def get_dialog(user_db_id: int, idx: int) -> dict | None:
     cached = _dialog_cache.get(user_db_id)
     if not cached:

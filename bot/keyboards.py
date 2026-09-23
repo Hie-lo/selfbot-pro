@@ -204,8 +204,39 @@ def storage_target_kb(feature_name: str) -> InlineKeyboardMarkup:
             "📢 چنل/گروه (ارسال آیدی)",
             callback_data=f"starget_{feature_name}_custom",
         )],
+        [InlineKeyboardButton(
+            "👑 کانال‌ها و گروه‌های من (فقط مالکم)",
+            callback_data=f"starget_{feature_name}_own",
+        )],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="storage")],
     ])
+
+
+def storage_owned_kb(items: list, page: int, pages: int, feature_name: str) -> InlineKeyboardMarkup:
+    """لیست فقط کانال/گروه‌های مالک برای انتخاب مسیر ذخیره‌سازی"""
+    from core.forwarder import dialog_icon
+    buttons = []
+    if not items:
+        buttons.append([
+            InlineKeyboardButton("📭 کانال/گروهی که مالکش باشی پیدا نشد", callback_data="noop")
+        ])
+    else:
+        for idx, item in items:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{dialog_icon(item['kind'])} {_short(item['name'])}",
+                    callback_data=f"starget_{feature_name}_own_i{idx}",
+                )
+            ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"starget_{feature_name}_own_p{page-1}"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"starget_{feature_name}_own_p{page+1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"storage_{feature_name}")])
+    return InlineKeyboardMarkup(buttons)
 
 
 # ═══════ تایید و بازگشت ═══════

@@ -27,6 +27,7 @@ from bot.keyboards import (
     features_kb,
     storage_menu_kb,
     storage_target_kb,
+    storage_owned_kb,
     confirm_kb,
     back_kb,
     numpad_kb,
@@ -424,6 +425,123 @@ async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT
         text,
         reply_markup=back_kb("storage"),
         parse_mode="HTML"
+    )
+
+
+# ============================================================
+# انتخاب مسیر از کانال/گروه‌های مالک (فقط creator)
+# ============================================================
+STORAGE_OWN_PER_PAGE = 8
+
+async def cb_storage_target_owned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # starget_{feature}_own
+    feature_name = data[len("starget_"):-len("_own")]
+    if feature_name not in [k for k,_ in __import__("bot.keyboards", fromlist=["STORAGE_FEATURES"]).STORAGE_FEATURES]:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    try:
+        items = await fw.load_dialogs(user["id"])
+    except ValueError as e:
+        msg = "❌ اکانت متصل نیست." if str(e) == "account_not_connected" else "❌ خواندن لیست چت‌ها ناموفق بود."
+        await query.edit_message_text(msg, reply_markup=back_kb("storage"))
+        return
+    owned = fw.filter_owned_dialogs(items)
+    pages = max(1, (len(owned) + STORAGE_OWN_PER_PAGE - 1) // STORAGE_OWN_PER_PAGE)
+    chunk = owned[0:STORAGE_OWN_PER_PAGE]
+    fname = ALL_FEATURES.get(feature_name, feature_name)
+    text = (
+        f"👑 <b>کانال‌ها و گروه‌های شما (فقط مالک)</b>\n\n"
+        f"برای «{html.escape(str(fname))}» یک مقصد انتخاب کنید:\n"
+        f"تعداد مالک: {len(owned)} — صفحه 1 از {pages}\n\n"
+        f"فقط چت‌هایی که شما مالک (creator) آن هستید نمایش داده می‌شود؛ با دسترسی تضمین‌شده."
+
+    )
+    if not owned:
+        text += "\n📭 هیچ کانال/گروهی که مالکش باشید پیدا نشد."
+    await query.edit_message_text(text, reply_markup=storage_owned_kb(chunk, 0, pages, feature_name), parse_mode="HTML")
+
+
+async def cb_storage_owned_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    import re
+    m = re.match(r"^starget_(.+)_own_p(\d+)$", query.data)
+    if not m:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    feature_name, page_str = m.group(1), m.group(2)
+    page = int(page_str)
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    try:
+        items = await fw.load_dialogs(user["id"])
+    except ValueError as e:
+        msg = "❌ اکانت متصل نیست." if str(e) == "account_not_connected" else "❌ خواندن لیست چت‌ها ناموفق بود."
+        await query.edit_message_text(msg, reply_markup=back_kb("storage"))
+        return
+    owned = fw.filter_owned_dialogs(items)
+    pages = max(1, (len(owned) + STORAGE_OWN_PER_PAGE - 1) // STORAGE_OWN_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = owned[page * STORAGE_OWN_PER_PAGE:(page + 1) * STORAGE_OWN_PER_PAGE]
+    fname = ALL_FEATURES.get(feature_name, feature_name)
+    text = (
+        f"👑 <b>کانال‌ها و گروه‌های شما (فقط مالک)</b>\n\n"
+        f"برای «{html.escape(str(fname))}» یک مقصد انتخاب کنید:\n"
+        f"تعداد مالک: {len(owned)} — صفحه {page+1} از {pages}\n\n"
+        f"فقط چت‌هایی که شما مالک (creator) آن هستید نمایش داده می‌شود؛ با دسترسی تضمین‌شده."
+
+    )
+    await query.edit_message_text(text, reply_markup=storage_owned_kb(chunk, page, pages, feature_name), parse_mode="HTML")
+
+
+async def cb_storage_owned_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    import re
+    m = re.match(r"^starget_(.+)_own_i(\d+)$", query.data)
+    if not m:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    feature_name, idx_str = m.group(1), m.group(2)
+    idx = int(idx_str)
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    from telethon import utils
+    item = fw.get_dialog(user["id"], idx)
+    if not item:
+        await query.answer("لیست قدیمی شده؛ دوباره باز کنید", show_alert=True)
+        return
+    # اطمینان: فقط مالک اجازه دارد
+    ent = item.get("entity")
+    if not fw.is_owner(ent):
+        await query.answer("❌ فقط کانال/گروهی که مالکش هستید قابل انتخاب است", show_alert=True)
+        return
+    try:
+        target_id = utils.get_peer_id(ent)
+    except Exception:
+        await query.edit_message_text("❌ آیدی مقصد نامعتبر است.", reply_markup=back_kb("storage"))
+        return
+    target_title = item.get("name") or str(target_id)
+    safe_title = html.escape(str(target_title))
+    safe_feature = html.escape(str(ALL_FEATURES.get(feature_name, feature_name)))
+    try:
+        await db.set_storage_target(user["id"], feature_name, "custom", target_id, target_title)
+        await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title} ({target_id}) [owned]")
+    except Exception as e:
+        logger.error(f"DB storage save failed (owned): {e}")
+        await query.edit_message_text("❌ خطا در ذخیره اطلاعات در دیتابیس.", reply_markup=back_kb("storage"))
+        return
+    await query.edit_message_text(
+        f"✅ مسیر ذخیره‌سازی «<b>{safe_feature}</b>» با موفقیت تنظیم شد:\n\n"
+        f"📂 نام مقصد: <b>{safe_title}</b>\n"
+        f"🆔 آیدی عددی: <code>{target_id}</code>\n"
+        f"👑 مالک: شما",
+        reply_markup=back_kb("storage"),
+        parse_mode="HTML",
     )
 
 
@@ -1320,6 +1438,9 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_recents_clear_ok, pattern="^recents_clear_ok$"))
     app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
     app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_owned, pattern=r"^starget_.+_own$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_owned_page, pattern=r"^starget_.+_own_p\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_owned_pick, pattern=r"^starget_.+_own_i\d+$"))
     app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
 
     # مانیتور
