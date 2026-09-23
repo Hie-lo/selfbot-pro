@@ -51,27 +51,56 @@ class AntiDeletePlugin(BasePlugin):
             sender_id = msg.sender_id
             is_me = (sender_id == self._my_id)
 
-            if is_me:
-                sender_name = "شما"
-            else:
-                sender_name = "نامشخص"
+            # — اطلاعات فرستنده با جزئیات مثل فوروارد —
+            sender_name = "شما" if is_me else "نامشخص"
+            sender_username = None
+            sender_label = str(sender_id) if sender_id else ""
+            if not is_me and sender_id:
                 try:
                     sender = await self.client.get_entity(sender_id)
-                    sender_name = getattr(sender, "first_name", "") or ""
-                    if hasattr(sender, "last_name") and sender.last_name:
-                        sender_name += " " + sender.last_name
-                    sender_name = sender_name.strip() or str(sender_id)
+                    parts = [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""]
+                    sender_name = " ".join(p for p in parts if p).strip() or str(sender_id)
+                    sender_username = getattr(sender, "username", None)
+                    if sender_username:
+                        sender_label = f"@{sender_username} ({sender_id})"
+                    else:
+                        sender_label = str(sender_id)
                 except Exception as e:
                     self.logger.debug(f"Get sender entity failed: {e}")
                     sender_name = str(sender_id) if sender_id else "نامشخص"
+                    sender_label = str(sender_id) if sender_id else ""
+            elif is_me:
+                try:
+                    me = await self.client.get_me()
+                    sender_username = getattr(me, "username", None)
+                    if sender_username:
+                        sender_label = f"@{sender_username} ({self._my_id})"
+                    else:
+                        sender_label = str(self._my_id)
+                except Exception:
+                    sender_label = str(self._my_id)
 
+            # — اطلاعات چت با جزئیات —
             chat_name = "نامشخص"
+            chat_username = None
+            chat_label = str(chat_id)
             try:
                 chat_entity = await self.client.get_entity(chat_id)
-                chat_name = getattr(chat_entity, "first_name", "") or ""
-                if hasattr(chat_entity, "last_name") and chat_entity.last_name:
-                    chat_name += " " + chat_entity.last_name
-                chat_name = chat_name.strip() or str(chat_id)
+                if hasattr(chat_entity, "title") and chat_entity.title:
+                    chat_name = chat_entity.title.strip() or str(chat_id)
+                else:
+                    parts = [getattr(chat_entity, "first_name", "") or "", getattr(chat_entity, "last_name", "") or ""]
+                    chat_name = " ".join(p for p in parts if p).strip() or str(chat_id)
+                chat_username = getattr(chat_entity, "username", None)
+                if chat_username:
+                    chat_label = f"@{chat_username}"
+                else:
+                    # سعی کن peer_id را بگیری
+                    try:
+                        from telethon import utils as _utils
+                        chat_label = str(_utils.get_peer_id(chat_entity))
+                    except Exception:
+                        chat_label = str(chat_id)
             except Exception as e:
                 self.logger.debug(f"Get chat entity failed: {e}")
                 chat_name = str(chat_id)
@@ -83,12 +112,17 @@ class AntiDeletePlugin(BasePlugin):
                 "text": msg.text or "",
                 "media": msg.media,
                 "sender_name": sender_name,
+                "sender_username": sender_username,
+                "sender_label": sender_label,
                 "sender_id": sender_id,
                 "is_me": is_me,
                 "chat_name": chat_name,
+                "chat_username": chat_username,
+                "chat_label": chat_label,
                 "chat_id": chat_id,
                 "time_str": time_str,
                 "date": msg.date,
+                "msg_id": msg.id,
             }
 
             self.logger.debug(f"Cached msg {msg.id} in chat {chat_id} ({chat_name})")
@@ -105,26 +139,19 @@ class AntiDeletePlugin(BasePlugin):
             # Telethon گاهی chat_id رو None می‌فرسته برای PV
             # پس به جای تکیه بر event.chat_id، در تمام کش‌ها جستجو می‌کنیم
 
+            # — جمع‌آوری همه پیام‌های حذف‌شده برای حفظ ترتیب —
+            batch = []  # list of (msg_id, cached, found_chat_id)
             for msg_id in event.deleted_ids:
                 cached = None
                 found_chat_id = None
-
-                # جستجو در تمام چت‌های کش‌شده
                 for chat_id, msgs in self._cache.items():
                     if msg_id in msgs:
                         cached = msgs.pop(msg_id)
                         found_chat_id = chat_id
                         break
-
                 if not cached:
                     self.logger.debug(f"Msg {msg_id} not found in any cache")
                     continue
-
-                self.logger.info(
-                    f"Found cached deleted msg {msg_id} from "
-                    f"{cached.get('sender_name')} in chat {found_chat_id}"
-                )
-
                 # فیلتر پیام‌های قدیمی
                 if cached.get("date"):
                     now = datetime.now(timezone.utc)
@@ -135,7 +162,20 @@ class AntiDeletePlugin(BasePlugin):
                     if diff > 86400 * 7:
                         self.logger.info(f"Skipped old msg {msg_id} ({diff:.0f}s)")
                         continue
+                batch.append((msg_id, cached, found_chat_id))
 
+            if not batch:
+                return
+
+            # مرتب‌سازی بر اساس آیدی پیام (ترتیب زمانی اصلی) — مثل فوروارد
+            batch.sort(key=lambda x: x[0])
+            self.logger.info(f"Delete batch: {len(batch)} پیام مرتب شد (مرتب‌سازی بر اساس ID)")
+
+            for _, cached, found_chat_id in batch:
+                self.logger.info(
+                    f"Found cached deleted msg {cached.get('msg_id')} from "
+                    f"{cached.get('sender_name')} in chat {found_chat_id}"
+                )
                 await self._send_deleted(cached)
 
         self._add_handler(on_delete, events.MessageDeleted)
@@ -176,32 +216,100 @@ class AntiDeletePlugin(BasePlugin):
         self.logger.debug(f"Dest peer: {dest_peer}")
 
         sender = cached.get("sender_name", "نامشخص")
+        sender_label = cached.get("sender_label") or str(cached.get("sender_id") or "")
+        sender_id = cached.get("sender_id")
         is_me = cached.get("is_me", False)
         chat_name = cached.get("chat_name", "نامشخص")
+        chat_label = cached.get("chat_label") or str(cached.get("chat_id") or "")
+        chat_username = cached.get("chat_username")
         text = cached.get("text", "")
         time_str = cached.get("time_str", "")
+        orig_date = cached.get("date")
+        msg_id = cached.get("msg_id")
 
-        header = (
-            f"🗑 **پیام حذف شده**\n"
-            f"💬 چت: {chat_name}\n"
-            f"📌 {'طرف مقابل حذف کرد' if is_me else f'{sender} حذف کرد'}\n"
-            f"👤 فرستنده: {sender}\n"
-            f"📅 زمان: {time_str}\n"
-        )
+        # تاریخ اصلی پیام
+        if orig_date:
+            try:
+                date_str = orig_date.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                date_str = str(orig_date)
+        else:
+            date_str = time_str
+
+        # لینک پیام (برای PV)
+        link_line = ""
+        try:
+            if msg_id and cached.get("chat_id"):
+                # برای PV: tg://openmessage?user_id=...
+                try:
+                    from telethon import utils as _utils
+                    # سعی کن لینک بسازی — برای گروه/کانال هم کار می‌کند
+                    # برای سادگی: اگر یوزرنیم دارد از t.me استفاده کن
+                    if chat_username:
+                        link_line = f"🔗 https://t.me/{chat_username}/{msg_id}"
+                    else:
+                        # برای PV
+                        link_line = f"tg://openmessage?user_id={cached.get('chat_id')}&message_id={msg_id}"
+                except Exception:
+                    link_line = f"🆔 پیام: {msg_id}"
+            elif msg_id:
+                link_line = f"🆔 پیام: {msg_id}"
+        except Exception:
+            pass
+        if not link_line and msg_id:
+            link_line = f"🆔 پیام: {msg_id}"
+
+        # هدر با جزئیات مثل فوروارد
+        header_parts = []
+        header_parts.append("🗑 **پیام حذف شده (ضدحذف)**")
+        # چت مبدأ
+        if chat_username:
+            header_parts.append(f"📥 از: {chat_name} (@{chat_username})")
+        else:
+            header_parts.append(f"📥 از: {chat_name} ({chat_label})")
+        # فرستنده با آیدی/یوزرنیم
+        if sender_label and sender_label != sender:
+            header_parts.append(f"👤 فرستنده: {sender} — {sender_label}")
+        elif sender_id:
+            header_parts.append(f"👤 فرستنده: {sender} ({sender_id})")
+        else:
+            header_parts.append(f"👤 فرستنده: {sender}")
+        header_parts.append(f"🕒 {date_str} (UTC)")
+        if link_line:
+            header_parts.append(link_line)
+        header_parts.append(f"📌 {'طرف مقابل حذف کرد' if is_me else 'حذف شد'}")
+        header_parts.append("──────────────")
+        header = "\n".join(header_parts)
 
         if text:
-            header += f"\n📝 متن:\n{text}"
+            # clip برای جلوگیری از محدودیت تلگرام
+            from core.forwarder import clip as _clip, TEXT_LIMIT, CAPTION_LIMIT
+            # متن جدا از هدر است؛ برای مدیا کپشن جدا می‌شود
+            pass
 
         try:
             media = cached.get("media")
             if media:
+                from core.forwarder import clip as _clip, CAPTION_LIMIT
+                # کپشن = هدر + متن (اگر جا شد)
+                body = header
+                if text:
+                    # فاصله + متن
+                    candidate = header + "\n\n📝 متن:\n" + text
+                    # clip تا سقف کپشن
+                    body = _clip(candidate, CAPTION_LIMIT)
                 # ارسال امن: استیکر/گیف به Recents اضافه نشود
                 await send_media_clean(
-                    self.client, dest_peer, media, caption=header
+                    self.client, dest_peer, media, caption=body
                 )
             else:
-                await self.client.send_message(dest_peer, header)
-            self.logger.info(f"✅ Deleted msg saved | {sender} | {chat_name}")
+                from core.forwarder import clip as _clip, TEXT_LIMIT
+                body = header
+                if text:
+                    body = header + "\n\n📝 متن:\n" + text
+                    body = _clip(body, TEXT_LIMIT)
+                await self.client.send_message(dest_peer, body)
+            self.logger.info(f"✅ Deleted msg saved | {sender} | {chat_name} | id={msg_id}")
         except Exception as e:
             self.logger.error(f"❌ Send failed: {type(e).__name__}: {e}")
             import traceback
