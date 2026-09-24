@@ -143,7 +143,13 @@ class PanelPlugin(BasePlugin):
                 "❤️ **قلب:**\n"
                 "`.قلب` — قلب متحرک (روی ریپلای هم میشه)\n"
                 "  بعد از **سین زدنِ طرف مقابل** انیمیشن شروع می‌شه (تا 120ث صبر می‌کنه، بعد خودش شروع می‌کنه)\n"
-                "  ۱۲ قلب رنگی × ۳ دور، در گروه بدون انتظار سین"
+                "  ❤️ **قلب — چند انیمیشن خفن:**\n"
+                "`.قلب` — اصلی (۱۲ قلب با حرکت)\n"
+                "`.قلب2` / `.قلب 2` — زنجیره‌ای: ‌🖤 → 🖤💜 → 🖤💜💙 → … تا کامل (با نیم‌فاصله، تک‌اموجی کوچیک)\n"
+                "`.قلب3` — ضربان رنگی (تک‌قلب با تغییر رنگ)\n"
+                "`.قلب4` — نفس (تپش با فاصله)\n"
+                "`.قلب5` — جرقه‌ای ✨\n"
+                "  همه بعد از **سین زدنِ طرف مقابل** شروع می‌شن (پی‌وی تا 120ث، گروه فوری) + ریپلای"
             ),
             "protect": (
                 "🛡️ **ضد حذف / ضد ویرایش / Recents**\n\n"
@@ -210,12 +216,32 @@ class PanelPlugin(BasePlugin):
         async def help_cmd(event):
             if not event.out:
                 return
-            # پیام راهنما با دکمه — اول کامند رو پاک کن و پنل بفرست
             try:
                 await event.delete()
             except Exception:
                 pass
-            await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+            # سعی کن با لوگو بفرستی (عکس + کپشن دکمه‌ای) — بعداً می‌تونی ویدیو جایگزین کنی
+            logo_path = "assets/logo.jpg"
+            # اگر فایل نبود، همون متن بفرست
+            import os
+            use_logo = os.path.exists(logo_path)
+            try:
+                if use_logo:
+                    await self.client.send_file(
+                        event.chat_id,
+                        logo_path,
+                        caption=HELP_MAIN,
+                        buttons=help_kb("main"),
+                        parse_mode="md",
+                    )
+                else:
+                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+            except Exception as e:
+                # فالبک به متن ساده
+                try:
+                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+                except Exception:
+                    self.logger.warning(f"help send failed: {e}")
 
         self._add_handler(
             help_cmd,
@@ -251,8 +277,25 @@ class PanelPlugin(BasePlugin):
             key = data.replace("help_", "", 1)
             text = HELP_TEXTS.get(key)
             if text:
-                # تلگرام سقف 4096 کاراکتر دارد — متن‌ها کوتاه نگه داشته شدند
-                await event.edit(text, buttons=help_kb(key), parse_mode="md")
+                # اگر کپشن عکس باشه سقف 1024 ـه، برای "همه" متن طولانیه — جداگانه بفرست
+                try:
+                    # تشخیص اینکه پیام عکس داره
+                    is_media = bool(getattr(event.message, "media", None) or getattr(event.message, "photo", None))
+                except Exception:
+                    is_media = False
+                if is_media and len(text) > 1000:
+                    # برای متن طولانی، پیام جدید بفرست و قبلی رو پاک کن
+                    try:
+                        await self.client.send_message(event.chat_id, text, buttons=help_kb(key), parse_mode="md")
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        # فالبک: همون ادیت با برش
+                        await event.edit(text[:1000] + "\n…", buttons=help_kb(key), parse_mode="md")
+                else:
+                    await event.edit(text, buttons=help_kb(key), parse_mode="md")
                 await event.answer()
             else:
                 await event.answer("پیدا نشد", alert=True)
