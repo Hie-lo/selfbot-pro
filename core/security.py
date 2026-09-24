@@ -62,6 +62,10 @@ def is_subscription_active(user: dict | None) -> bool:
         return False
     if user.get("is_banned"):
         return False
+    # مالک ربات برای استفاده از سلف‌بات خودش نیازی به خرید اشتراک ندارد
+    from config import ADMIN_TELEGRAM_ID
+    if ADMIN_TELEGRAM_ID and user.get("telegram_id") == ADMIN_TELEGRAM_ID:
+        return True
     if (user.get("plan") or "free") == "free":
         return False
     expires = user.get("plan_expires_at")

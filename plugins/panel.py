@@ -9,6 +9,7 @@
   .وضعیت          — وضعیت اکانت و سرور
   .recents        — پاکسازی استیکرهای اخیر
 """
+import asyncio
 
 import os
 import re
@@ -125,7 +126,8 @@ class PanelPlugin(BasePlugin):
                     )
                     return
 
-            if await self._send_inline_help(event, key):
+            reason = await self._send_inline_help(event, key)
+            if reason is None:
                 return
 
             # حالت متنی (inline mode ربات خاموش است یا در دسترس نیست)
@@ -136,6 +138,7 @@ class PanelPlugin(BasePlugin):
                     H.section_text(key)
                     + "\n\n──────────────\n📖 فهرست بخش‌ها: <code>.راهنما</code>"
                 )
+            text += f"\n\n<i>⚠️ نسخه‌ی دکمه‌ای در دسترس نبود: {reason}</i>"
             await event.edit(text, parse_mode="html", link_preview=False)
 
         self._add_handler(
@@ -266,34 +269,53 @@ class PanelPlugin(BasePlugin):
 
         self.logger.info("loaded")
 
-    async def _send_inline_help(self, event, key: str) -> bool:
+    async def _send_inline_help(self, event, key: str) -> str | None:
         """
         ارسال راهنمای دکمه‌ای از طریق inline mode ربات کنترلی.
         (اکانت کاربر خودش نمی‌تواند دکمه‌ی شیشه‌ای بفرستد.)
+        خروجی: None یعنی موفق؛ در غیر این صورت علتِ خوانای شکست.
         """
         bot_username = runtime.bot_username
         if not bot_username:
-            return False
+            return "یوزرنیم ربات کنترلی مشخص نیست"
 
         query = "help" if key == "main" else f"help {key}"
         try:
-            results = await self.client.inline_query(bot_username, query)
-            if not results:
-                return False
-            reply_to = event.reply_to_msg_id
-            try:
-                await results[0].click(event.chat_id, reply_to=reply_to, hide_via=True)
-            except Exception:
-                await results[0].click(event.chat_id, reply_to=reply_to)
+            # entity یکبار resolve و نگه داشته می‌شود (ResolveUsername محدودیت شدید دارد)
+            if getattr(self, "_bot_peer", None) is None:
+                self._bot_peer = await self.client.get_input_entity(bot_username)
+            results = await asyncio.wait_for(
+                self.client.inline_query(self._bot_peer, query, entity=event.chat_id),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            return "ربات کنترلی به موقع پاسخ نداد"
         except Exception as e:
-            self.logger.info(f"inline help unavailable ({type(e).__name__}: {e})")
-            return False
+            name = type(e).__name__
+            self.logger.warning(f"inline help query failed ({name}: {e})")
+            if "BotInlineDisabled" in name:
+                return "inline mode ربات خاموش است (BotFather ← /setinline)"
+            if "FloodWait" in name:
+                return f"محدودیت موقت تلگرام ({getattr(e, 'seconds', '?')} ثانیه)"
+            return name
+        if not results:
+            return "ربات نتیجه‌ای برنگرداند (اکانت برای ربات شناخته‌شده نیست)"
+
+        reply_to = event.reply_to_msg_id
+        try:
+            await results[0].click(event.chat_id, reply_to=reply_to)
+        except Exception as e:
+            name = type(e).__name__
+            self.logger.warning(f"inline help send failed ({name}: {e})")
+            if "Forbidden" in name or "Inline" in name:
+                return "ارسال پیام inline در این چت مجاز نیست"
+            return name
 
         try:
             await event.delete()
         except Exception:
             pass
-        return True
+        return None
 
     async def stop(self):
         if getattr(self, "_account_id", None):
