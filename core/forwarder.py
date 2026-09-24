@@ -520,8 +520,18 @@ def progress_bar(sent: int, total: int, width: int = 12) -> str:
     return "▓" * filled + "░" * (width - filled) + f"  {ratio * 100:.0f}%"
 
 
+def queued_text(job) -> str | None:
+    """متن «در صف» (سقف سراسری فوروارد سرور پر است)"""
+    if not getattr(job, "queued", False):
+        return None
+    pos = getattr(job, "queue_pos", 0) or 0
+    return "🕒 در صف اجرا — ظرفیت فوروارد سرور پر است" + (
+        f" (نفر {pos})" if pos else ""
+    ) + "؛ خودکار شروع می‌شود"
+
+
 def job_summary(job: ForwardJob) -> str:
-    state_text = {
+    state_text = queued_text(job) or {
         "running": "⏳ در حال فوروارد...",
         "waiting": f"⏸ محدودیت تلگرام — ادامه خودکار پس از {job.wait_seconds} ثانیه",
         "done": "✅ فوروارد تمام شد",
@@ -658,7 +668,7 @@ async def start_job(
     _active_jobs[user_db_id] = job
 
     job.task = asyncio.create_task(
-        _run(job, client, source, dest, on_progress)
+        _run_governed(job, client, source, dest, on_progress)
     )
     logger.info(
         f"Job {job.id} started: user={user_db_id} "
@@ -673,8 +683,30 @@ async def start_job(
 # ═══════════════════════════════════
 
 
+async def _run_governed(job: ForwardJob, client, source, dest, on_progress):
+    """
+    اجرای job داخل سقف سراسری فوروارد (core.governor).
+    اگر ظرفیت پر باشد job «در صف» می‌ماند و جایگاهش در پیام پیشرفت دیده می‌شود.
+    """
+    from core import governor
+    async with governor.job_slot("forward", job, on_progress):
+        await _run(job, client, source, dest, on_progress)
+
+
 async def _flood_sleep(job: ForwardJob, seconds: int):
     """خواب FloodWait + عقب‌نشینی خودکار سرعت"""
+    from core import governor, metrics
+    metrics.inc("floodwait")
+    # انتظار طولانی → ظرفیت فوروارد سرور را موقتاً به بقیه بده
+    yielded = governor.yield_for_flood(job, int(seconds or 0))
+    try:
+        await _flood_sleep_inner(job, seconds)
+    finally:
+        if yielded and not job.cancel_requested:
+            await governor.reclaim_after_flood(job)
+
+
+async def _flood_sleep_inner(job: ForwardJob, seconds: int):
     try:
         job.pacer.flood(seconds)
     except Exception:

@@ -61,10 +61,12 @@ def _check_pending(info: dict | None) -> dict:
     return info
 
 
-def _make_client(session_string: str = "") -> TelegramClient:
+def _make_client(session_string: str = "", user_db_id: int | None = None) -> TelegramClient:
     """ساخت کلاینت با StringSession"""
     session = StringSession(session_string)
-    return TelegramClient(session, **_CLIENT_KWARGS)
+    client = TelegramClient(session, **_CLIENT_KWARGS)
+    client._sb_user = user_db_id
+    return client
 
 
 # ═══════ Login Flow ═══════
@@ -77,7 +79,13 @@ async def request_login_code(user_db_id: int, phone: str) -> str:
     """
     await cleanup_pending(user_db_id)
 
-    client = _make_client()
+    # قبل از فرستادن کد: اگر سرور جا ندارد وقت کاربر را نگیر
+    from core import metrics
+    ok, reason = metrics.admission(len(active_clients), new_login=True)
+    if not ok:
+        raise ValueError(metrics.admission_message(reason))
+
+    client = _make_client(user_db_id=user_db_id)
 
     try:
         await client.connect()
@@ -192,12 +200,12 @@ async def finalize_login(user_db_id: int) -> str:
     info = _pending.get(user_db_id)
     _check_pending(info)
 
-    # سقف کلاینت‌های همزمان سرور
-    if len(active_clients) >= MAX_CLIENTS:
+    # ظرفیت سرور (تعداد + RAM آزاد + بار فعلی)
+    from core import metrics
+    ok, reason = metrics.admission(len(active_clients), new_login=True)
+    if not ok:
         await cleanup_pending(user_db_id)
-        raise ValueError(
-            f"ظرفیت سرور تکمیل است ({MAX_CLIENTS} اکانت). بعداً تلاش کنید."
-        )
+        raise ValueError(metrics.admission_message(reason))
 
     client = info["client"]
     session_string = client.session.save()
@@ -227,7 +235,7 @@ async def reconnect_client(
     خطای شبکه/موقت → exception بالا می‌رود تا صدازننده session را
     (به‌اشتباه) باطل‌شده علامت نزند و بعداً دوباره تلاش شود.
     """
-    client = _make_client(session_string)
+    client = _make_client(session_string, user_db_id)
 
     try:
         await client.connect()

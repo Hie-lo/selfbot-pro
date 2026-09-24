@@ -7,10 +7,17 @@ import asyncio
 import os
 from telethon import events
 from plugins.base import BasePlugin
+from core import governor
 from config import DOWNLOADS_DIR
 
 
 async def _run_ffmpeg(args: list, timeout: int = 30) -> bool:
+    """اجرای ffmpeg با سقف سراسری همزمانی (به اندازه‌ی هسته‌های CPU)"""
+    async with governor.slot("ffmpeg"):
+        return await _run_ffmpeg_raw(args, timeout)
+
+
+async def _run_ffmpeg_raw(args: list, timeout: int = 30) -> bool:
     """اجرای ffmpeg بدون بلاک کردن event loop"""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -60,7 +67,8 @@ class StickerConvertPlugin(BasePlugin):
             os.makedirs(folder, exist_ok=True)
 
             try:
-                fp = await reply.download_media(file=folder)
+                async with governor.slot("download"):
+                    fp = await reply.download_media(file=folder)
                 if not fp:
                     await self.client.send_message(event.chat_id, "❌ دانلود ناموفق.")
                     return

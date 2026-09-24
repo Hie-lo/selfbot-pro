@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 from telethon import events
 from plugins.base import BasePlugin
+from core import governor, peers
 from database import db
 from config import DOWNLOADS_DIR
 
@@ -47,24 +48,18 @@ class TimedSaverPlugin(BasePlugin):
             media_type = type(event.message.media).__name__
 
             # نام چت (طرف مقابل)
-            try:
-                chat_entity = await self.client.get_entity(chat_id)
-                chat_title = getattr(chat_entity, "first_name", "") or ""
-                if getattr(chat_entity, "last_name", None):
-                    chat_title += " " + chat_entity.last_name
-                chat_title = chat_title.strip() or str(chat_id)
-            except Exception:
-                chat_title = str(chat_id)
+            # (از دفترچه‌ی نام‌ها — بدون درخواست تکراری برای هر پیام)
+            directory = peers.for_client(self.client)
+            directory.learn_from_message(event.message)
+            cinfo = await directory.get(chat_id)
+            chat_title = (cinfo.full_name if cinfo else "") or str(chat_id)
 
             # نام فرستنده
             sender_id = event.message.sender_id
-            try:
-                sender = await self.client.get_entity(sender_id)
-                sender_name = getattr(sender, "first_name", "") or ""
-                if getattr(sender, "last_name", None):
-                    sender_name += " " + sender.last_name
-                sender_name = sender_name.strip() or str(sender_id)
-            except Exception:
+            sinfo = await directory.get(sender_id) if sender_id else None
+            if sinfo is not None:
+                sender_name = sinfo.full_name or str(sender_id)
+            else:
                 sender_name = str(sender_id) if sender_id else "نامشخص"
 
             safe_title = "".join(c for c in chat_title if c.isalnum() or c in " -_")
@@ -75,7 +70,8 @@ class TimedSaverPlugin(BasePlugin):
             media_path = None
             try:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                fp = await event.message.download_media(file=folder)
+                async with governor.slot("capture"):
+                    fp = await event.message.download_media(file=folder)
                 if fp:
                     ext = os.path.splitext(fp)[1]
                     new_path = os.path.join(folder, f"{ts}_{msg_id}{ext}")

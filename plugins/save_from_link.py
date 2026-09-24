@@ -7,6 +7,7 @@
 import os
 from telethon import events
 from plugins.base import BasePlugin
+from core import governor
 from core.media import send_media_clean
 from core.security import validate_telegram_link
 from config import DOWNLOADS_DIR
@@ -96,7 +97,8 @@ class SaveFromLinkPlugin(BasePlugin):
                 temp_dir = os.path.join(DOWNLOADS_DIR, "temp")
                 os.makedirs(temp_dir, exist_ok=True)
 
-                file_path = await msg.download_media(file=temp_dir)
+                async with governor.slot("download"):
+                    file_path = await msg.download_media(file=temp_dir)
                 if file_path:
                     try:
                         await self.client.send_file(

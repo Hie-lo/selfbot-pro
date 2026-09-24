@@ -223,7 +223,8 @@ async def resume_user(user_db_id: int, notify: bool = True) -> bool:
         if not session or session.get("status") in DEAD_STATUSES:
             return False
 
-        if len(client_manager.active_clients) >= MAX_CLIENTS:
+        from core import metrics
+        if not metrics.admission(len(client_manager.active_clients))[0]:
             await db.update_session_status(user_db_id, ST_SUSPENDED, R_CAPACITY)
             logger.warning(f"User {user_db_id} resume deferred: server at capacity")
             return False

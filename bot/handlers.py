@@ -1131,6 +1131,14 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "👥 <b>کاربران</b> ({}):\n\n".format(len(users)) + "\n".join(lines)
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/stats — وضعیت منابع سرور (فقط ادمین)"""
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        return
+    from core import metrics
+    await update.message.reply_text(metrics.stats_text(), parse_mode="HTML")
+
+
 # ═══════════════════════════════════
 # مانیتور کانال — پنل
 # ═══════════════════════════════════
@@ -1488,6 +1496,7 @@ def register_handlers(app: Application):
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("activate", cmd_activate))
     app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("stats", cmd_stats))
 
     # ── 2. Callback queries ──
     # کیبورد لاگین
