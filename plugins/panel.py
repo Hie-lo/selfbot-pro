@@ -302,7 +302,7 @@ class PanelPlugin(BasePlugin):
 
         self._add_handler(
             help_callback,
-            events.CallbackQuery(pattern=re.compile(b"help_")),
+            events.CallbackQuery(data=re.compile(b"help_")),
         )
 
         # ── .روشن ──
