@@ -6,11 +6,13 @@
 • .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
 • .قلب4  : نفس — قلب با فاصله تپنده
 • .قلب5  : قلب‌های صورتیِ خاص دونه‌دونه عوض میشن (💕💞💓💗💘💝)
+• .قلب بساز : یک قلب بزرگ از قلب‌ها — دور قرمز، داخل حلقه‌های رنگی متقارن
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
 اگه ریپلای باشه، روی همون پیام ریپلای میشه
 ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی، تا 120ث)
 """
 import asyncio
+from collections import deque
 from telethon import events
 from telethon.errors import MessageNotModifiedError, FloodWaitError
 from plugins.base import BasePlugin
@@ -39,6 +41,80 @@ def slide_frames(hearts, width=3, rounds=3):
     frames = ["".join(hearts[:i]) for i in range(1, width)]
     for start in range(n * rounds):
         frames.append("".join(hearts[(start + k) % n] for k in range(width)))
+    return frames
+
+
+# ── .قلب بساز ──
+# O = دور (قرمز) · i = داخل (رنگی) · . = پس‌زمینه
+BIG_HEART_SHAPE = [
+    "..OOO.OOO..",
+    ".OiiiOiiiO.",
+    "OiiiiiiiiiO",
+    "OiiiiiiiiiO",
+    "OiiiiiiiiiO",
+    ".OiiiiiiiO.",
+    "..OiiiiiO..",
+    "...OiiiO...",
+    "....OiO....",
+    ".....O.....",
+]
+BIG_HEART_EDGE = "❤️"
+BIG_HEART_BG = "🤍"
+# رنگ حلقه‌های داخلی از بیرون به مرکز (متقارن، چون بر اساس فاصله از دور است)
+BIG_HEART_RINGS = ["🩷", "🧡", "💛", "💚"]
+
+
+def _ring_depth(shape) -> dict:
+    """فاصله‌ی هر خانه‌ی داخلی از دور قلب (۱ = کنار دور)"""
+    h, w = len(shape), len(shape[0])
+    depth, q = {}, deque()
+    for r in range(h):
+        for c in range(w):
+            if shape[r][c] == "O":
+                depth[(r, c)] = 0
+                q.append((r, c))
+    while q:
+        r, c = q.popleft()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (r + dr, c + dc)
+            if (0 <= n[0] < h and 0 <= n[1] < w and shape[n[0]][n[1]] == "i"
+                    and n not in depth):
+                depth[n] = depth[(r, c)] + 1
+                q.append(n)
+    return depth
+
+
+_BIG_DEPTH = _ring_depth(BIG_HEART_SHAPE)
+
+
+def big_heart(filled: int = 99, shift: int = 0) -> str:
+    """
+    رسم قلب بزرگ.
+    filled: چند حلقه‌ی داخلی (از بیرون) رنگ شده باشند؛ بقیه پس‌زمینه
+    shift : چرخش رنگ حلقه‌ها (برای موج رنگی)
+    """
+    rings = BIG_HEART_RINGS
+    lines = []
+    for r, row in enumerate(BIG_HEART_SHAPE):
+        out = []
+        for c, ch in enumerate(row):
+            if ch == ".":
+                out.append(BIG_HEART_BG)
+            elif ch == "O":
+                out.append(BIG_HEART_EDGE)
+            else:
+                d = min(_BIG_DEPTH[(r, c)], len(rings))
+                out.append(rings[(d - 1 + shift) % len(rings)] if d <= filled else BIG_HEART_BG)
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+def big_heart_frames() -> list:
+    """دور قرمز → پر شدن حلقه‌به‌حلقه → موج رنگی → قلب نهایی"""
+    n = len(BIG_HEART_RINGS)
+    frames = [big_heart(filled=k) for k in range(0, n + 1)]
+    frames += [big_heart(shift=k) for k in range(1, n)]
+    frames.append(big_heart())
     return frames
 
 
@@ -268,6 +344,36 @@ class HeartPlugin(BasePlugin):
 
             await wait_for_seen(msg, event)
             await anim(msg)
+
+        async def build_cmd(event):
+            # .قلب بساز — قلب بزرگ از قلب‌ها
+            if not event.out:
+                return
+            reply_to = None
+            if event.is_reply:
+                try:
+                    reply_to = (await event.get_reply_message()).id
+                except Exception:
+                    reply_to = None
+            await event.delete()
+            frames = big_heart_frames()
+            msg = await self.client.send_message(event.chat_id, frames[0], reply_to=reply_to)
+            await wait_for_seen(msg, event)
+            for fr in frames[1:]:
+                try:
+                    await msg.edit(fr)
+                    await asyncio.sleep(0.7)
+                except MessageNotModifiedError:
+                    continue
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds + 1)
+                except Exception:
+                    return
+
+        self._add_handler(
+            build_cmd,
+            events.NewMessage(pattern=r"^\.قلب\s+بساز$", outgoing=True),
+        )
 
         self._add_handler(
             heart_cmd,
