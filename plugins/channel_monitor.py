@@ -45,7 +45,7 @@ class ChannelMonitorPlugin(BasePlugin):
         )
 
         async def monitor_listener(event):
-            if event.out or not self._routes:
+            if event.out:
                 return
 
             source_id = event.chat_id
@@ -60,7 +60,8 @@ class ChannelMonitorPlugin(BasePlugin):
 
             normalized_id = self._normalize_channel_id(source_id)
 
-            # (مسیر داغ: برای هر پیام در هر چت اجرا می‌شود → اول فیلتر، بعد لاگ)
+            self.logger.debug(f"Monitor: raw_id={source_id}, normalized={normalized_id}, routes={list(self._routes.keys())}")
+
             if normalized_id not in self._routes:
                 return
 

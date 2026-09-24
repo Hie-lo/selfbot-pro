@@ -160,10 +160,7 @@ def cache_job_summary(job: CacheForwardJob, stats: dict = None) -> str:
         "done": "✅ تمام شد",
     }.get(job.phase, job.phase)
 
-    queued = F.queued_text(job)
-    if queued:
-        head = queued
-    elif job.state == "waiting":
+    if job.state == "waiting":
         head = (
             f"⏸ محدودیت تلگرام — ادامه خودکار پس از "
             f"{job.wait_seconds} ثانیه"
@@ -367,7 +364,7 @@ async def start_job(
         except Exception:
             job.source_label = ""
 
-    job.task = asyncio.create_task(_run_governed(job, client, source, dest, on_progress))
+    job.task = asyncio.create_task(_run(job, client, source, dest, on_progress))
     logger.info(
         f"Cache job {job.id} started: {source_name} -> {dest_name} "
         f"phase={job.phase} capture_media={job.capture_media}"
@@ -378,13 +375,6 @@ async def start_job(
 # ═══════════════════════════════════
 # حلقه اصلی
 # ═══════════════════════════════════
-
-
-async def _run_governed(job: CacheForwardJob, client, source, dest, on_progress):
-    """اجرا داخل سقف سراسری فوروارد (مشترک با موتور زنده)"""
-    from core import governor
-    async with governor.job_slot("forward", job, on_progress):
-        await _run(job, client, source, dest, on_progress)
 
 
 async def _run(job: CacheForwardJob, client, source, dest, on_progress):

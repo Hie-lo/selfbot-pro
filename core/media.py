@@ -108,8 +108,6 @@ async def send_media_clean(
     reply_to=None,
     mode: str = None,
     guard: "RecentsGuard" = None,
-    kind: str = None,
-    **extra,
 ):
     """
     ارسال مدیا با محافظت از Recents.
@@ -118,11 +116,9 @@ async def send_media_clean(
     media می‌تواند Message / MessageMediaDocument / Document / مسیر فایل باشد.
     """
     mode = (mode or CLEAN_RECENTS_MODE or "document").lower()
-    # kind صریح برای وقتی مدیا «ارجاع فشرده» است (InputDocument بدون attributes)
-    explicit_kind = kind if kind in ("استیکر", "گیف") else None
-    protect = mode != "off" and (explicit_kind is not None or needs_recents_protection(media))
+    protect = mode != "off" and needs_recents_protection(media)
 
-    kwargs = dict(extra)
+    kwargs = {}
     if caption:
         kwargs["caption"] = caption
     if reply_to:
@@ -139,7 +135,7 @@ async def send_media_clean(
         # مرجع‌ها با force_document هم استیکر/گیف فرستاده می‌شوند → پاکسازی
         # sent ممکن است فایلِ generic باشد (force_document)، پس kind را از مدیای اصلی می‌گیریم
         sent_media = getattr(sent, "media", None)
-        orig_kind = explicit_kind or media_kind(media)
+        orig_kind = media_kind(media)
         if guard is not None:
             # اگر sent قابل تشخیص نیست، با kindِ اصلی و با mediaِ اصلی fallback کن
             guard.submit(sent_media, kind=orig_kind, row=None)
@@ -151,10 +147,6 @@ async def send_media_clean(
                 guard.submit(media, kind=orig_kind)
         else:
             cleaned = await cleanup_recents(client, sent_media) if sent_media is not None else False
-            if not cleaned and explicit_kind and isinstance(media, types.InputDocument):
-                cleaned = await unsave_by_reference(
-                    client, media.id, media.access_hash, media.file_reference, explicit_kind,
-                )
             if not cleaned:
                 await cleanup_recents(client, media)
 

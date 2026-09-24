@@ -61,15 +61,10 @@ def _check_pending(info: dict | None) -> dict:
     return info
 
 
-def _make_client(session_string: str = "", user_db_id: int | None = None) -> TelegramClient:
+def _make_client(session_string: str = "") -> TelegramClient:
     """ساخت کلاینت با StringSession"""
     session = StringSession(session_string)
-    client = TelegramClient(session, **_CLIENT_KWARGS)
-    client._sb_user = user_db_id
-    # ثبت حذف/ویرایش‌های خود سلف‌بات (جلوگیری از گزارش کاذب ضدحذف/ضدویرایش)
-    from core import self_actions
-    self_actions.install(client)
-    return client
+    return TelegramClient(session, **_CLIENT_KWARGS)
 
 
 # ═══════ Login Flow ═══════
@@ -82,13 +77,7 @@ async def request_login_code(user_db_id: int, phone: str) -> str:
     """
     await cleanup_pending(user_db_id)
 
-    # قبل از فرستادن کد: اگر سرور جا ندارد وقت کاربر را نگیر
-    from core import metrics
-    ok, reason = metrics.admission(len(active_clients), new_login=True)
-    if not ok:
-        raise ValueError(metrics.admission_message(reason))
-
-    client = _make_client(user_db_id=user_db_id)
+    client = _make_client()
 
     try:
         await client.connect()
@@ -203,12 +192,12 @@ async def finalize_login(user_db_id: int) -> str:
     info = _pending.get(user_db_id)
     _check_pending(info)
 
-    # ظرفیت سرور (تعداد + RAM آزاد + بار فعلی)
-    from core import metrics
-    ok, reason = metrics.admission(len(active_clients), new_login=True)
-    if not ok:
+    # سقف کلاینت‌های همزمان سرور
+    if len(active_clients) >= MAX_CLIENTS:
         await cleanup_pending(user_db_id)
-        raise ValueError(metrics.admission_message(reason))
+        raise ValueError(
+            f"ظرفیت سرور تکمیل است ({MAX_CLIENTS} اکانت). بعداً تلاش کنید."
+        )
 
     client = info["client"]
     session_string = client.session.save()
@@ -238,7 +227,7 @@ async def reconnect_client(
     خطای شبکه/موقت → exception بالا می‌رود تا صدازننده session را
     (به‌اشتباه) باطل‌شده علامت نزند و بعداً دوباره تلاش شود.
     """
-    client = _make_client(session_string, user_db_id)
+    client = _make_client(session_string)
 
     try:
         await client.connect()

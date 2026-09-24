@@ -138,16 +138,6 @@ async def unload_all_for_user(user_db_id: int):
         except Exception as e:
             logger.error(f"Error stopping {name} for user {user_db_id}: {e}")
 
-    # صف گزارش‌ها و کش‌های وابسته به کلاینت آزاد شوند
-    client = next((getattr(p, "client", None) for p in plugins.values()), None)
-    if client is not None:
-        ob = getattr(client, "_sb_outbox", None)
-        if ob is not None:
-            ob.close()
-        cache = getattr(client, "_sb_pvcache", None)
-        if cache is not None:
-            cache.vault.wipe()
-
     if plugins:
         logger.info(f"User {user_db_id}: unloaded all ({len(plugins)} plugins)")
 

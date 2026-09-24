@@ -9,25 +9,20 @@ import sys
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
-from logging.handlers import RotatingFileHandler
-
-from config import BOT_TOKEN, LOGS_DIR, LOG_MAX_MB, LOG_BACKUPS, USE_UVLOOP
+from config import BOT_TOKEN, LOGS_DIR
 from database.db import init_db
 from core.engine import startup, shutdown
 from bot.handlers import register_handlers
 
-# ── Logging ── (چرخشی: قبلاً bot.log بی‌انتها بزرگ می‌شد و دیسک را پر می‌کرد)
+# ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(name)-25s | %(levelname)-7s | %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        RotatingFileHandler(
-            os.path.join(LOGS_DIR, "bot.log"),
-            maxBytes=LOG_MAX_MB * 1024 * 1024,
-            backupCount=LOG_BACKUPS,
-            encoding="utf-8",
+        logging.FileHandler(
+            os.path.join(LOGS_DIR, "bot.log"), encoding="utf-8"
         ),
     ],
 )
@@ -54,39 +49,13 @@ async def post_init(app: Application):
         logger.warning(f"get_me failed: {e}")
 
     await init_db()
-
-    # فقط یک نمونه: قبل از وصل شدن حتی یک session (جلوگیری از AUTH_KEY_DUPLICATED)
-    from core import instance_lock, metrics
-    await instance_lock.acquire()
-
-    metrics.start()
-    logger.info(
-        f"Runtime: crypto={metrics.crypto_backend()} loop={metrics.loop_backend()}"
-    )
     await startup()
     logger.info("Bot is running!")
 
 
 async def post_shutdown(app: Application):
-    from core import instance_lock
-    try:
-        await shutdown()
-    finally:
-        # آخر از همه: بعد از قطع همه‌ی sessionها
-        await instance_lock.release()
+    await shutdown()
     logger.info("Bot stopped cleanly")
-
-
-def _install_uvloop():
-    """حلقه‌ی سریع‌تر asyncio (اختیاری — اگر نصب نباشد همان asyncio عادی)"""
-    if not USE_UVLOOP or sys.platform == "win32":
-        return
-    try:
-        import asyncio
-        import uvloop
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except ImportError:
-        logger.info("uvloop نصب نیست — asyncio عادی استفاده می‌شود")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +74,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logger.info("Starting SelfBot Pro...")
-    _install_uvloop()
 
     app = (
         Application.builder()
