@@ -6,7 +6,7 @@
 • .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
 • .قلب4  : نفس — قلب با فاصله تپنده
 • .قلب5  : قلب‌های صورتیِ خاص دونه‌دونه عوض میشن (💕💞💓💗💘💝)
-• .قلب بساز : یک قلب بزرگ از قلب‌ها — دور قرمز، داخل حلقه‌های رنگی متقارن
+• .قلب بساز : قلب بزرگ از قلب‌ها — ردیف‌به‌ردیف از بالا ساخته میشه، دور قرمز، داخل حلقه‌های رنگی متقارن، بیرون خالی
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
 اگه ریپلای باشه، روی همون پیام ریپلای میشه
 ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی، تا 120ث)
@@ -59,7 +59,13 @@ BIG_HEART_SHAPE = [
     ".....O.....",
 ]
 BIG_HEART_EDGE = "❤️"
-BIG_HEART_BG = "🤍"
+# بیرون قلب خالی است. فقط خانه‌های خالیِ «سمت چپ» لازم‌اند (سمت راست حذف می‌شود).
+# هیچ کاراکتر نامرئی دقیقاً هم‌عرض اموجی نیست؛ فاصله‌های تایپوگرافی عرض ثابت
+# دارند: em space (1em) + six-per-em (≈0.17em) ≈ عرض اموجی در تلگرام (~1.17em)
+BIG_HEART_PAD = "\u2003\u2006"
+# اول هر خط: بریل خالی (فاصله نیست) تا تلگرام فاصله‌های اول پیام را حذف نکند
+# و همه‌ی خط‌ها به یک اندازه جابه‌جا شوند
+BIG_HEART_LEAD = "\u2800"
 # رنگ حلقه‌های داخلی از بیرون به مرکز (متقارن، چون بر اساس فاصله از دور است)
 BIG_HEART_RINGS = ["🩷", "🧡", "💛", "💚"]
 
@@ -87,33 +93,35 @@ def _ring_depth(shape) -> dict:
 _BIG_DEPTH = _ring_depth(BIG_HEART_SHAPE)
 
 
-def big_heart(filled: int = 99, shift: int = 0) -> str:
+def _big_row(r: int, shift: int = 0) -> str:
+    row = BIG_HEART_SHAPE[r].rstrip(".")      # بیرونِ سمت راست لازم نیست
+    rings = BIG_HEART_RINGS
+    out = [BIG_HEART_LEAD]
+    for c, ch in enumerate(row):
+        if ch == ".":
+            out.append(BIG_HEART_PAD)            # بیرونِ سمت چپ و گودی وسط بالا
+        elif ch == "O":
+            out.append(BIG_HEART_EDGE)
+        else:
+            d = min(_BIG_DEPTH[(r, c)], len(rings))
+            out.append(rings[(d - 1 + shift) % len(rings)])
+    return "".join(out)
+
+
+def big_heart(rows: int | None = None, shift: int = 0) -> str:
     """
     رسم قلب بزرگ.
-    filled: چند حلقه‌ی داخلی (از بیرون) رنگ شده باشند؛ بقیه پس‌زمینه
-    shift : چرخش رنگ حلقه‌ها (برای موج رنگی)
+    rows : چند ردیف از بالا ساخته شده باشد (None = کامل)
+    shift: چرخش رنگ حلقه‌های داخلی (موج رنگی)
     """
-    rings = BIG_HEART_RINGS
-    lines = []
-    for r, row in enumerate(BIG_HEART_SHAPE):
-        out = []
-        for c, ch in enumerate(row):
-            if ch == ".":
-                out.append(BIG_HEART_BG)
-            elif ch == "O":
-                out.append(BIG_HEART_EDGE)
-            else:
-                d = min(_BIG_DEPTH[(r, c)], len(rings))
-                out.append(rings[(d - 1 + shift) % len(rings)] if d <= filled else BIG_HEART_BG)
-        lines.append("".join(out))
-    return "\n".join(lines)
+    n = len(BIG_HEART_SHAPE) if rows is None else rows
+    return "\n".join(_big_row(r, shift) for r in range(n))
 
 
 def big_heart_frames() -> list:
-    """دور قرمز → پر شدن حلقه‌به‌حلقه → موج رنگی → قلب نهایی"""
-    n = len(BIG_HEART_RINGS)
-    frames = [big_heart(filled=k) for k in range(0, n + 1)]
-    frames += [big_heart(shift=k) for k in range(1, n)]
+    """ساخته شدن ردیف‌به‌ردیف از بالا → موج رنگی داخل → قلب نهایی"""
+    frames = [big_heart(rows=k) for k in range(1, len(BIG_HEART_SHAPE) + 1)]
+    frames += [big_heart(shift=k) for k in range(1, len(BIG_HEART_RINGS))]
     frames.append(big_heart())
     return frames
 
@@ -362,7 +370,7 @@ class HeartPlugin(BasePlugin):
             for fr in frames[1:]:
                 try:
                     await msg.edit(fr)
-                    await asyncio.sleep(0.7)
+                    await asyncio.sleep(0.6)
                 except MessageNotModifiedError:
                     continue
                 except FloodWaitError as e:
