@@ -27,7 +27,11 @@ def _plugin_commands() -> set[str]:
     for fn in sorted(os.listdir(pdir)):
         if not fn.endswith(".py"):
             continue
-        src = open(os.path.join(pdir, fn), encoding="utf-8").read()
+        # خطوط کامنت‌شده (دستورهای غیرفعال) حساب نمی‌شوند
+        src = "\n".join(
+            line for line in open(os.path.join(pdir, fn), encoding="utf-8").read().splitlines()
+            if not line.lstrip().startswith("#")
+        )
         for body in PATTERN_RE.findall(src):
             if body.startswith("("):
                 # ^\.(دشمن|لیست دشمن)
