@@ -15,6 +15,7 @@
 ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی، تا 120ث)
 """
 import asyncio
+import time
 from collections import deque
 from telethon import events
 from telethon.errors import MessageNotModifiedError, FloodWaitError
@@ -65,9 +66,10 @@ BIG_HEART_EDGE = "❤️"
 # بیرون قلب خالی است؛ فقط جای خالیِ «سمت چپ» لازم است (سمت راست حذف می‌شود).
 # فاصله‌ها را تلگرام ادغام می‌کند → «بریل خالی» (U+2800) که فاصله حساب
 # نمی‌شود. عرض اموجی در تلگرام ≈ ۱.۱۷em و بریل کمی کمتر از نصف آن است:
-# با ۲ بریل برای هر خانه، ردیف‌های پایین کمی به چپ می‌رفتند → ۲.۲۵
+# با ۲ و بعد ۲.۲۵ بریل برای هر خانه، ردیف‌های پایین هنوز کمی به چپ می‌رفتند
+# (اسکرین‌شات تلگرام دسکتاپ: اموجی ≈۲۰px، نوک پایین ≈۵–۸px چپ) → ۲.۴۵
 BLANK = "\u2800"
-BLANK_PER_CELL = 2.25
+BLANK_PER_CELL = 2.45
 # رنگ حلقه‌های داخلی از بیرون به مرکز (متقارن، چون بر اساس فاصله از دور است)
 BIG_HEART_RINGS = ["🩷", "🧡", "💛", "💚"]
 # همه‌ی رنگ‌ها (برای .قلب بساز 2 و .قلب بساز ‹رنگ›)
@@ -166,16 +168,29 @@ def solid_heart(color: str, rows: int | None = None) -> str:
 
 
 # سرعت‌ها (ثانیه)
-BUILD_DELAY = 0.5        # ساخته شدن هر ردیف (حالت اصلی)
-FAST_BUILD_DELAY = 0.25  # ساخته شدن سریع
-WAVE_DELAY = 0.2         # موج رنگی داخل
-WAVE_CYCLES = 3
-COLOR_DELAY = 0.3        # عوض شدن رنگِ کلِ قلب
-FILL_DELAY = 0.2         # پر شدن دونه‌دونه
+# محدودیت ویرایش تلگرام (FloodWait) سمت سرور است و دور زدنی نیست؛ پس تعداد
+# ویرایش‌ها کم نگه داشته می‌شود (هر انیمیشن ≈۱۳ تا ۱۷ ویرایش) و در صورت
+# FloodWait سرعت همان اکانت موقتاً کم می‌شود (EditPacer).
+BUILD_DELAY = 0.45       # ساخته شدن هر ردیف (حالت اصلی)
+FAST_BUILD_DELAY = 0.35  # ساخته شدن سریع (۲ ردیف در هر ویرایش)
+FAST_BUILD_ROWS = 2
+WAVE_DELAY = 0.3         # موج رنگی داخل
+WAVE_CYCLES = 2
+COLOR_DELAY = 0.4        # عوض شدن رنگِ کلِ قلب
+FILL_DELAY = 0.35        # پر شدن دونه‌دونه
+FILL_PAIRS_PER_EDIT = 3  # چند جفتِ قرینه در هر ویرایش
+
+
+def _fast_rows():
+    n = len(BIG_HEART_SHAPE)
+    ks = list(range(FAST_BUILD_ROWS, n + 1, FAST_BUILD_ROWS))
+    if ks[-1] != n:
+        ks.append(n)
+    return ks
 
 
 def big_heart_frames() -> list:
-    """.قلب بساز — ردیف‌به‌ردیف از بالا → موج رنگی سریع داخل → قلب نهایی"""
+    """.قلب بساز — ردیف‌به‌ردیف از بالا → موج رنگی داخل → قلب نهایی"""
     frames = [(big_heart(rows=k), BUILD_DELAY) for k in range(1, len(BIG_HEART_SHAPE) + 1)]
     n = len(BIG_HEART_RINGS)
     for k in range(1, n * WAVE_CYCLES):
@@ -186,8 +201,7 @@ def big_heart_frames() -> list:
 
 def solid_frames() -> list:
     """.قلب بساز 2 — قلب یک‌رنگ قرمز سریع ساخته میشه، بعد کلش با هم همه‌ی رنگ‌ها رو می‌گیره"""
-    frames = [(solid_heart("❤️", rows=k), FAST_BUILD_DELAY)
-              for k in range(1, len(BIG_HEART_SHAPE) + 1)]
+    frames = [(solid_heart("❤️", rows=k), FAST_BUILD_DELAY) for k in _fast_rows()]
     for color in COLOR_CYCLE[1:] + ["❤️"]:
         frames.append((solid_heart(color), COLOR_DELAY))
     return frames
@@ -206,12 +220,61 @@ def fill_frames(color: str) -> list:
             return BIG_HEART_EDGE
         return color if (r, c) in filled else base
 
-    frames = [(render_heart(cell, rows=k), FAST_BUILD_DELAY)
-              for k in range(1, len(BIG_HEART_SHAPE) + 1)]
-    for pair in _FILL_ORDER:
-        filled.update(pair)
+    frames = [(render_heart(cell, rows=k), FAST_BUILD_DELAY) for k in _fast_rows()]
+    for i in range(0, len(_FILL_ORDER), FILL_PAIRS_PER_EDIT):
+        for pair in _FILL_ORDER[i:i + FILL_PAIRS_PER_EDIT]:
+            filled.update(pair)
         frames.append((render_heart(cell), FILL_DELAY))
     return frames
+
+
+class EditPacer:
+    """
+    تنظیم خودکار سرعت با محدودیت واقعی تلگرام (که عددش منتشر نشده):
+    بعد از هر FloodWait، مکث بین ویرایش‌های همین اکانت دو برابر می‌شود
+    (حداکثر ×۴) و بعد از ۱۰ دقیقه بدون FloodWait به حالت عادی برمی‌گردد.
+    """
+    COOLDOWN = 600
+    MAX_FACTOR = 4.0
+
+    def __init__(self):
+        self.factor = 1.0
+        self.until = 0.0
+
+    def delay(self, base: float) -> float:
+        if self.factor > 1 and time.monotonic() > self.until:
+            self.factor = 1.0
+        return base * self.factor
+
+    def flood(self):
+        self.factor = min(self.MAX_FACTOR, self.factor * 2)
+        self.until = time.monotonic() + self.COOLDOWN
+
+
+async def play_frames(msg, frames, pacer: EditPacer) -> None:
+    """
+    پخش فریم‌ها. با FloodWait: صبر، بعد مستقیم «قلب نهایی» (نه گیر کردن
+    وسط انیمیشن) و کند شدن انیمیشن‌های بعدی همین اکانت.
+    """
+    last = frames[-1][0]
+    for fr, delay in frames[1:]:
+        try:
+            await msg.edit(fr)
+        except MessageNotModifiedError:
+            pass
+        except FloodWaitError as e:
+            pacer.flood()
+            await asyncio.sleep(e.seconds + 1)
+            if fr != last:
+                try:
+                    await msg.edit(last)
+                except Exception:
+                    pass
+            return
+        except Exception:
+            return
+        if delay:
+            await asyncio.sleep(pacer.delay(delay))
 
 
 def build_frames(arg: str) -> list | None:
@@ -454,6 +517,8 @@ class HeartPlugin(BasePlugin):
             await wait_for_seen(msg, event)
             await anim(msg)
 
+        pacer = EditPacer()   # یکی برای هر اکانت
+
         async def build_cmd(event):
             # .قلب بساز / .قلب بساز 2 / .قلب بساز 3 / .قلب بساز ‹رنگ›
             if not event.out:
@@ -477,17 +542,7 @@ class HeartPlugin(BasePlugin):
             await event.delete()
             msg = await self.client.send_message(event.chat_id, frames[0][0], reply_to=reply_to)
             await wait_for_seen(msg, event)
-            for fr, delay in frames[1:]:
-                try:
-                    await msg.edit(fr)
-                    if delay:
-                        await asyncio.sleep(delay)
-                except MessageNotModifiedError:
-                    continue
-                except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds + 1)
-                except Exception:
-                    return
+            await play_frames(msg, frames, pacer)
 
         self._add_handler(
             build_cmd,
