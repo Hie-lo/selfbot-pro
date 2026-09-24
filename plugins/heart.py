@@ -6,7 +6,10 @@
 • .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
 • .قلب4  : نفس — قلب با فاصله تپنده
 • .قلب5  : قلب‌های صورتیِ خاص دونه‌دونه عوض میشن (💕💞💓💗💘💝)
-• .قلب بساز : قلب بزرگ از قلب‌ها — ردیف‌به‌ردیف از بالا ساخته میشه، دور قرمز، داخل حلقه‌های رنگی متقارن، بیرون خالی
+• .قلب بساز        : قلب بزرگ — ردیف‌به‌ردیف از بالا، دور قرمز، داخل حلقه‌های رنگی متقارن (موج سریع)
+• .قلب بساز 2      : قلب یک‌رنگ؛ سریع ساخته میشه و کلش با هم همه‌ی رنگ‌ها رو می‌گیره
+• .قلب بساز 3      : دور قرمز، داخل سفید که دونه‌دونه صورتی میشه
+• .قلب بساز ‹رنگ›  : مثل 3 با رنگ دلخواه (قرمز، آبی، سبز، ...)
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
 اگه ریپلای باشه، روی همون پیام ریپلای میشه
 ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی، تا 120ث)
@@ -59,18 +62,31 @@ BIG_HEART_SHAPE = [
     ".....O.....",
 ]
 BIG_HEART_EDGE = "❤️"
-# بیرون قلب خالی است. فقط خانه‌های خالیِ «سمت چپ» لازم‌اند (سمت راست حذف می‌شود).
-# فاصله‌ها (space / em space) را تلگرام به یک فاصله تبدیل می‌کند → شکل خراب
-# می‌شد. «بریل خالی» (U+2800) فاصله حساب نمی‌شود و دست نمی‌خورد، ولی عرضش
-# از اموجی کمتر است؛ پس برای n خانه‌ی خالی round(n × نسبت) بریل می‌گذاریم.
-# نسبت عرض اموجی به بریل بین دستگاه‌ها فرق دارد → چند حالت قابل انتخاب:
-#   .قلب بساز      → حالت پیش‌فرض
-#   .قلب بساز 1..4 → حالت‌های دیگر (اگر روی گوشی کج بود)
+# بیرون قلب خالی است؛ فقط جای خالیِ «سمت چپ» لازم است (سمت راست حذف می‌شود).
+# فاصله‌ها را تلگرام ادغام می‌کند → «بریل خالی» (U+2800) که فاصله حساب
+# نمی‌شود. عرض اموجی در تلگرام ≈ ۱.۱۷em و بریل کمی کمتر از نصف آن است:
+# با ۲ بریل برای هر خانه، ردیف‌های پایین کمی به چپ می‌رفتند → ۲.۲۵
 BLANK = "\u2800"
-BIG_HEART_RATIOS = {1: 2.0, 2: 2.25, 3: 1.75, 4: 2.5}
-BIG_HEART_DEFAULT = 1
+BLANK_PER_CELL = 2.25
 # رنگ حلقه‌های داخلی از بیرون به مرکز (متقارن، چون بر اساس فاصله از دور است)
 BIG_HEART_RINGS = ["🩷", "🧡", "💛", "💚"]
+# همه‌ی رنگ‌ها (برای .قلب بساز 2 و .قلب بساز ‹رنگ›)
+HEART_COLORS = {
+    "قرمز": "❤️", "صورتی": "🩷", "نارنجی": "🧡", "زرد": "💛", "سبز": "💚",
+    "آبی روشن": "🩵", "فیروزه ای": "🩵", "آبی": "💙", "بنفش": "💜",
+    "قهوه ای": "🤎", "مشکی": "🖤", "سیاه": "🖤", "طوسی": "🩶", "خاکستری": "🩶",
+    "سفید": "🤍",
+}
+COLOR_CYCLE = ["❤️", "🧡", "💛", "💚", "🩵", "💙", "💜", "🩷", "🤎", "🖤", "🩶", "🤍"]
+# رنگ داخل قبل از پر شدن (برای سفید، خاکستری تا پر شدن دیده شود)
+FILL_BASE = "🤍"
+FILL_BASE_FOR_WHITE = "🩶"
+
+
+def normalize_color(text: str) -> str:
+    t = (text or "").strip().replace("ي", "ی").replace("ك", "ک")
+    t = t.replace("\u200c", " ").replace("ابی", "آبی")
+    return " ".join(t.split())
 
 
 def _ring_depth(shape) -> dict:
@@ -94,59 +110,121 @@ def _ring_depth(shape) -> dict:
 
 
 _BIG_DEPTH = _ring_depth(BIG_HEART_SHAPE)
+_W = len(BIG_HEART_SHAPE[0])
+# خانه‌های داخلی به ترتیب پر شدن: از بالا به پایین، هر بار یک جفتِ قرینه
+_FILL_ORDER = []
+for _r, _row in enumerate(BIG_HEART_SHAPE):
+    for _c in range((_W + 1) // 2):
+        if _row[_c] == "i":
+            _FILL_ORDER.append(((_r, _c), (_r, _W - 1 - _c)))
 
 
-def _blanks(cells: int, ratio: float) -> str:
-    return BLANK * int(cells * ratio + 0.5)
-
-
-def _big_row(r: int, shift: int = 0, ratio: float = 2.0) -> str:
-    row = BIG_HEART_SHAPE[r].rstrip(".")      # بیرونِ سمت راست لازم نیست
-    rings = BIG_HEART_RINGS
-    # اول هر خط یک بریل ثابت: تلگرام اول پیام را trim نکند و همه‌ی خط‌ها یکسان
-    out = [BLANK]
-    run = 0                                   # خانه‌های خالیِ پشت‌سرهم
-    for c, ch in enumerate(row):
-        if ch == ".":
-            run += 1                          # بیرونِ سمت چپ و گودی وسط بالا
-            continue
-        if run:
-            out.append(_blanks(run, ratio))
-            run = 0
-        if ch == "O":
-            out.append(BIG_HEART_EDGE)
-        else:
-            d = min(_BIG_DEPTH[(r, c)], len(rings))
-            out.append(rings[(d - 1 + shift) % len(rings)])
-    return "".join(out)
-
-
-def big_heart(rows: int | None = None, shift: int = 0, style: int = BIG_HEART_DEFAULT) -> str:
+def render_heart(cell, rows: int | None = None) -> str:
     """
-    رسم قلب بزرگ.
-    rows : چند ردیف از بالا ساخته شده باشد (None = کامل)
-    shift: چرخش رنگ حلقه‌های داخلی (موج رنگی)
-    style: حالت عرض جای خالی (BIG_HEART_RATIOS)
+    رسم قلب بزرگ؛ cell(r, c, kind) اموجی هر خانه را می‌دهد (kind: 'O' دور / 'i' داخل).
+    عرض جای خالی از «ستون واقعی» حساب می‌شود (نه جمع گردشده‌ی تکه‌ها)
+    تا خطای گرد کردن روی هم جمع نشود.
     """
-    ratio = BIG_HEART_RATIOS.get(style, BIG_HEART_RATIOS[BIG_HEART_DEFAULT])
     n = len(BIG_HEART_SHAPE) if rows is None else rows
-    return "\n".join(_big_row(r, shift, ratio) for r in range(n))
+    lines = []
+    for r in range(n):
+        row = BIG_HEART_SHAPE[r].rstrip(".")      # بیرونِ سمت راست لازم نیست
+        out = [BLANK]                             # اول خط: تلگرام trim نکند
+        x = 0.0                                   # مکان فعلی (به واحد عرض بریل)
+        for c, ch in enumerate(row):
+            if ch == ".":
+                continue
+            target = c * BLANK_PER_CELL           # جای درست این ستون
+            need = int(target - x + 0.5)
+            if need > 0:
+                out.append(BLANK * need)
+                x += need
+            out.append(cell(r, c, ch))
+            x += BLANK_PER_CELL                   # عرض یک اموجی
+        lines.append("".join(out))
+    return "\n".join(lines)
 
 
-BUILD_DELAY = 0.6    # ساخته شدن هر ردیف
-WAVE_DELAY = 0.35    # موج رنگی داخل (سریع‌تر)
-WAVE_CYCLES = 2
+def _rings(shift: int = 0):
+    rings = BIG_HEART_RINGS
+
+    def cell(r, c, kind):
+        if kind == "O":
+            return BIG_HEART_EDGE
+        d = min(_BIG_DEPTH[(r, c)], len(rings))
+        return rings[(d - 1 + shift) % len(rings)]
+    return cell
 
 
-def big_heart_frames(style: int = BIG_HEART_DEFAULT) -> list:
-    """[(متن، مکث بعدش)] — ردیف‌به‌ردیف از بالا → موج رنگی داخل → قلب نهایی"""
-    frames = [(big_heart(rows=k, style=style), BUILD_DELAY)
-              for k in range(1, len(BIG_HEART_SHAPE) + 1)]
+def big_heart(rows: int | None = None, shift: int = 0) -> str:
+    """قلب اصلی: دور قرمز، داخل حلقه‌های رنگی (shift = چرخش رنگ‌ها)"""
+    return render_heart(_rings(shift), rows)
+
+
+def solid_heart(color: str, rows: int | None = None) -> str:
+    return render_heart(lambda r, c, k: color, rows)
+
+
+# سرعت‌ها (ثانیه)
+BUILD_DELAY = 0.5        # ساخته شدن هر ردیف (حالت اصلی)
+FAST_BUILD_DELAY = 0.25  # ساخته شدن سریع
+WAVE_DELAY = 0.2         # موج رنگی داخل
+WAVE_CYCLES = 3
+COLOR_DELAY = 0.3        # عوض شدن رنگِ کلِ قلب
+FILL_DELAY = 0.2         # پر شدن دونه‌دونه
+
+
+def big_heart_frames() -> list:
+    """.قلب بساز — ردیف‌به‌ردیف از بالا → موج رنگی سریع داخل → قلب نهایی"""
+    frames = [(big_heart(rows=k), BUILD_DELAY) for k in range(1, len(BIG_HEART_SHAPE) + 1)]
     n = len(BIG_HEART_RINGS)
     for k in range(1, n * WAVE_CYCLES):
-        frames.append((big_heart(shift=k % n, style=style), WAVE_DELAY))
-    frames.append((big_heart(style=style), 0))
+        frames.append((big_heart(shift=k % n), WAVE_DELAY))
+    frames.append((big_heart(), 0))
     return frames
+
+
+def solid_frames() -> list:
+    """.قلب بساز 2 — قلب یک‌رنگ قرمز سریع ساخته میشه، بعد کلش با هم همه‌ی رنگ‌ها رو می‌گیره"""
+    frames = [(solid_heart("❤️", rows=k), FAST_BUILD_DELAY)
+              for k in range(1, len(BIG_HEART_SHAPE) + 1)]
+    for color in COLOR_CYCLE[1:] + ["❤️"]:
+        frames.append((solid_heart(color), COLOR_DELAY))
+    return frames
+
+
+def fill_frames(color: str) -> list:
+    """
+    .قلب بساز 3 / .قلب بساز ‹رنگ› — دور قرمز، داخل سفید سریع ساخته میشه،
+    بعد داخل دونه‌دونه (جفت‌های قرینه، از بالا) به رنگ انتخابی پر میشه
+    """
+    base = FILL_BASE_FOR_WHITE if color == FILL_BASE else FILL_BASE
+    filled: set = set()
+
+    def cell(r, c, kind):
+        if kind == "O":
+            return BIG_HEART_EDGE
+        return color if (r, c) in filled else base
+
+    frames = [(render_heart(cell, rows=k), FAST_BUILD_DELAY)
+              for k in range(1, len(BIG_HEART_SHAPE) + 1)]
+    for pair in _FILL_ORDER:
+        filled.update(pair)
+        frames.append((render_heart(cell), FILL_DELAY))
+    return frames
+
+
+def build_frames(arg: str) -> list | None:
+    """انتخاب انیمیشن از روی آرگومان؛ None = رنگ ناشناخته"""
+    arg = normalize_color(arg)
+    if arg in ("", "1"):
+        return big_heart_frames()
+    if arg == "2":
+        return solid_frames()
+    if arg == "3":
+        return fill_frames("🩷")
+    color = HEART_COLORS.get(arg)
+    return fill_frames(color) if color else None
 
 
 def _split(frame: str):
@@ -377,8 +455,18 @@ class HeartPlugin(BasePlugin):
             await anim(msg)
 
         async def build_cmd(event):
-            # .قلب بساز — قلب بزرگ از قلب‌ها
+            # .قلب بساز / .قلب بساز 2 / .قلب بساز 3 / .قلب بساز ‹رنگ›
             if not event.out:
+                return
+            text = (event.raw_text or "").strip()
+            arg = text.split("بساز", 1)[1] if "بساز" in text else ""
+            frames = build_frames(arg)
+            if frames is None:
+                names = "، ".join(dict.fromkeys(HEART_COLORS))
+                try:
+                    await event.edit(f"رنگ ناشناخته. رنگ‌ها: {names}")
+                except Exception:
+                    pass
                 return
             reply_to = None
             if event.is_reply:
@@ -386,16 +474,14 @@ class HeartPlugin(BasePlugin):
                     reply_to = (await event.get_reply_message()).id
                 except Exception:
                     reply_to = None
-            parts = (event.raw_text or "").split()
-            style = int(parts[-1]) if parts and parts[-1].isdigit() else BIG_HEART_DEFAULT
             await event.delete()
-            frames = big_heart_frames(style)
             msg = await self.client.send_message(event.chat_id, frames[0][0], reply_to=reply_to)
             await wait_for_seen(msg, event)
             for fr, delay in frames[1:]:
                 try:
                     await msg.edit(fr)
-                    await asyncio.sleep(delay)
+                    if delay:
+                        await asyncio.sleep(delay)
                 except MessageNotModifiedError:
                     continue
                 except FloodWaitError as e:
@@ -405,7 +491,7 @@ class HeartPlugin(BasePlugin):
 
         self._add_handler(
             build_cmd,
-            events.NewMessage(pattern=r"^\.قلب\s+بساز(?:\s*[1-4])?$", outgoing=True),
+            events.NewMessage(pattern=r"^\.قلب\s+بساز(?:\s*[1-3]|\s+[^\d\s][^\n]{0,20})?$", outgoing=True),
         )
 
         self._add_handler(
