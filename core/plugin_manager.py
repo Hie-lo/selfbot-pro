@@ -90,6 +90,14 @@ async def enable_plugin(user_db_id: int, feature_name: str, client: TelegramClie
     if not PluginClass:
         return False
 
+    # قابلیت‌های پولی فقط با اشتراک معتبر (دفاع در عمق — هر مسیری که
+    # پلاگین را روشن کند، از جمله `.روشن` داخل چت، از اینجا رد می‌شود)
+    from core.access import eligible
+    user = await db.get_user_by_db_id(user_db_id)
+    if not eligible(user)[0]:
+        logger.warning(f"User {user_db_id}: enable {feature_name} denied (no subscription)")
+        return False
+
     if user_db_id not in _active_plugins:
         _active_plugins[user_db_id] = {}
 

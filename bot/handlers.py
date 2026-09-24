@@ -13,6 +13,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    TypeHandler,
+    InlineQueryHandler,
+    ApplicationHandlerStop,
     filters,
 )
 
@@ -86,8 +89,9 @@ from core.security import (
     check_rate_limit,
     hash_phone,
 )
-from core.crypto import encrypt
-from core import client_manager
+from bot.help_panel import cb_help, cmd_help, cb_help_nav, inline_help
+from core.crypto import encrypt, decrypt
+from core import client_manager, access
 
 logger = logging.getLogger("bot.handlers")
 
@@ -180,13 +184,7 @@ async def cb_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = await get_or_create_user(update)
     session = await db.get_session(user["id"])
-    if session:
-        status = t("status_connected")
-        status += f"\n📌 وضعیت: {session['status']}"
-        if session.get("error_message"):
-            status += f"\n⚠️ {session['error_message']}"
-    else:
-        status = t("status_disconnected")
+    status = access.status_label(session)
     has_sub = await check_subscription(user)
     plan_text = "✅ فعال" if has_sub else "❌ ندارید"
     await query.edit_message_text(
@@ -203,7 +201,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not session:
         await query.edit_message_text(t("error_no_account"), reply_markup=back_kb())
         return
-    status = t("status_connected") if session["is_connected"] else t("status_disconnected")
+    status = access.status_label(session)
     has_sub = await check_subscription(user)
     plan_text = "✅ فعال" if has_sub else "❌ ندارید"
     await query.edit_message_text(
@@ -667,8 +665,16 @@ async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     session = await db.get_session(user["id"])
+    if session and session.get("status") in access.DEAD_STATUSES:
+        # session باطل/منقضی‌شده نباید جلوی اتصال دوباره را بگیرد
+        # (قبلاً کاربر برای همیشه «قبلاً متصل شده» می‌دید)
+        await db.delete_session(user["id"])
+        session = None
     if session:
-        await query.edit_message_text(t("login_already"), reply_markup=back_kb())
+        await query.edit_message_text(
+            t("login_already") + f"\n📌 {access.status_label(session)}",
+            reply_markup=back_kb(),
+        )
         return
 
     if not check_rate_limit(
@@ -958,8 +964,6 @@ async def handle_2fa_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
-    from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
-
     session_string = await client_manager.finalize_login(user["id"])
 
     try:
@@ -967,8 +971,10 @@ async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
             user_id=user["id"],
             phone_hash=context.user_data.get("login_phone_hash", ""),
             session_data_enc=encrypt(session_string),
-            api_id_enc=encrypt(str(TELEGRAM_API_ID)),
-            api_hash_enc=encrypt(TELEGRAM_API_HASH),
+            # api_id/api_hash سراسری‌اند (config)؛ نگه‌داشتن نسخه‌ی تکراری برای
+            # هر session فقط سطح نشت را بزرگ می‌کرد
+            api_id_enc="",
+            api_hash_enc="",
         )
         await db.update_session_status(user["id"], "connected")
         await db.audit_log(user["id"], "login_success", "")
@@ -1010,16 +1016,30 @@ async def cb_confirm_disconnect(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user = await get_or_create_user(update)
+
+    session = await db.get_session(user["id"])
+    session_string = None
+    if session and session.get("session_data_enc"):
+        try:
+            session_string = decrypt(session["session_data_enc"])
+        except Exception:
+            session_string = None
+
+    # توقف فوروارد/پلاگین‌ها، سپس خروج واقعی از تلگرام تا session
+    # روی سرور تلگرام هم باطل شود (نه فقط قطع اتصال محلی)
     try:
-        await client_manager.disconnect_client(user["id"])
+        await access.stop_forward_jobs(user["id"])
+        from core.plugin_manager import unload_all_for_user
+        await unload_all_for_user(user["id"])
+        await client_manager.logout_session(user["id"], session_string)
     except Exception as e:
         logger.error(f"Disconnect error: {e}")
-    from core.plugin_manager import unload_all_for_user
-    await unload_all_for_user(user["id"])
+    await client_manager.disconnect_client(user["id"])
+
     await db.delete_session(user["id"])
-    await db.audit_log(user["id"], "disconnect", "")
+    await db.audit_log(user["id"], "disconnect", "logout")
     await query.edit_message_text(
-        "✅ اکانت قطع شد.",
+        "✅ اکانت قطع شد و session سلف‌بات از تلگرام هم خارج شد.",
         reply_markup=main_kb(update.effective_user.id, False),
     )
 
@@ -1029,22 +1049,7 @@ async def cb_confirm_disconnect(update: Update, context: ContextTypes.DEFAULT_TY
 # ═══════════════════════════════════
 
 
-async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    help_text = """📖 **راهنما**
-
-**شروع:**
-۱. اشتراک تهیه کنید
-۲. اکانت متصل کنید
-۳. از پنل قابلیت‌ها را مدیریت کنید
-
-**قابلیت‌ها:**
-🎲 تاس · 📢 بنر · ⏳ تایم‌دار
-📥 دانلود · 🗑 ضد حذف · ✏️ ضد ویرایش
-🔗 ذخیره لینک · 🖼 استیکر · ❤️ قلب
-📡 مانیتور · 💬 پاسخ خودکار · 📤 آپلود"""
-    await query.edit_message_text(help_text, reply_markup=back_kb(), parse_mode="Markdown")
+# پیاده‌سازی در bot/help_panel.py (محتوا: bot/help_content.py)
 
 
 # ═══════════════════════════════════
@@ -1086,6 +1091,8 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(args[0])
         days = int(args[1])
+        if not 1 <= days <= 3650:
+            raise ValueError
     except ValueError:
         await update.message.reply_text("Invalid args")
         return
@@ -1098,8 +1105,10 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     expires = calc_plan_expiry(days, user.get("plan_expires_at"))
     await db.update_user(target_id, plan="premium", plan_expires_at=expires)
     await db.audit_log(user["id"], "subscription_activated", f"days={days}")
+    state = await access.sync_user(user["id"])
     await update.message.reply_text(
-        f"✅ اشتراک فعال شد\nکاربر: {target_id}\nروز: {days}\nانقضا: {expires.strftime('%Y-%m-%d')}"
+        f"✅ اشتراک فعال شد\nکاربر: {target_id}\nروز: {days}\n"
+        f"انقضا: {expires.strftime('%Y-%m-%d')}\nسلف‌بات: {state}"
     )
 
 
@@ -1227,6 +1236,10 @@ async def cb_mon_confirm_del(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cb_mon_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """شروع اضافه کردن مسیر جدید"""
     query = update.callback_query
+    user = await get_or_create_user(update)
+    if not await check_subscription(user):
+        await query.answer("❌ اشتراک فعال ندارید", show_alert=True)
+        return
     await query.answer()
 
     context.user_data["awaiting_mon_source"] = True
@@ -1407,12 +1420,72 @@ async def notify_job_progress(user_db_id: int, job, row: dict = None):
             pass
 
 
+# ═══════════════════════════════════
+# دروازه‌ی مسدودی — قبل از همه‌ی هندلرها
+# ═══════════════════════════════════
+
+_BAN_CACHE: dict[int, tuple[float, bool]] = {}
+_BAN_TTL = 20.0
+
+
+def invalidate_ban_cache(telegram_id: int) -> None:
+    _BAN_CACHE.pop(telegram_id, None)
+
+
+async def _is_banned(telegram_id: int) -> bool:
+    import time as _time
+    now = _time.monotonic()
+    hit = _BAN_CACHE.get(telegram_id)
+    if hit and now - hit[0] < _BAN_TTL:
+        return hit[1]
+    user = await db.get_user(telegram_id)
+    banned = bool(user and user.get("is_banned"))
+    if len(_BAN_CACHE) > 5000:
+        _BAN_CACHE.clear()
+    _BAN_CACHE[telegram_id] = (now, banned)
+    return banned
+
+
+async def ban_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    کاربر مسدود هیچ هندلری را اجرا نمی‌کند (قبلاً مسدودی فقط یک فلگ در
+    DB بود و کاربر همچنان منوها، خرید و فوروارد را داشت).
+    """
+    tg_user = update.effective_user
+    if not tg_user or is_admin_id(tg_user.id):
+        return
+    try:
+        banned = await _is_banned(tg_user.id)
+    except Exception as e:
+        logger.debug(f"ban gate skipped: {e}")
+        return
+    if not banned:
+        return
+
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("⛔ حساب شما مسدود است.", show_alert=True)
+        elif update.inline_query:
+            await update.inline_query.answer([], cache_time=0, is_personal=True)
+        elif update.effective_message and update.effective_chat and \
+                update.effective_chat.type == "private" and \
+                check_rate_limit(tg_user.id, "ban_notice", 1, 3600):
+            await update.effective_message.reply_text("⛔ حساب شما مسدود است.")
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
+
+
 def register_handlers(app: Application):
     """ثبت همه هندلرها با اولویت درست"""
+
+    # ── 0. مسدودی (group=-1 → قبل از همه) ──
+    app.add_handler(TypeHandler(Update, ban_gate), group=-1)
 
     # ── 1. Commands ──
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("activate", cmd_activate))
     app.add_handler(CommandHandler("users", cmd_users))
 
@@ -1458,6 +1531,10 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_disconnect, pattern="^disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_disconnect, pattern="^confirm_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_help, pattern="^help$"))
+    app.add_handler(CallbackQueryHandler(cb_help_nav, pattern=r"^hlp:"))
+
+    # راهنمای inline (پشتوانه‌ی `.راهنما` در همه‌ی چت‌ها)
+    app.add_handler(InlineQueryHandler(inline_help, pattern=r"^help"))
 
     # ── 3. خرید اشتراک ──
     app.add_handler(CallbackQueryHandler(cb_buy_plan, pattern=r"^buyplan_"))

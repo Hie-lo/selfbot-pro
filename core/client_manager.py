@@ -13,6 +13,12 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     FloodWaitError,
+    AuthKeyUnregisteredError,
+    AuthKeyDuplicatedError,
+    SessionRevokedError,
+    SessionExpiredError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
 )
 from config import (
     TELEGRAM_API_ID,
@@ -214,7 +220,13 @@ async def finalize_login(user_db_id: int) -> str:
 async def reconnect_client(
     user_db_id: int, session_string: str
 ) -> TelegramClient | None:
-    """اتصال مجدد از session string ذخیره شده"""
+    """
+    اتصال مجدد از session string ذخیره شده.
+
+    خروجی None فقط یعنی «session واقعاً نامعتبر است».
+    خطای شبکه/موقت → exception بالا می‌رود تا صدازننده session را
+    (به‌اشتباه) باطل‌شده علامت نزند و بعداً دوباره تلاش شود.
+    """
     client = _make_client(session_string)
 
     try:
@@ -229,13 +241,21 @@ async def reconnect_client(
         logger.info(f"Reconnected user_db_id={user_db_id}")
         return client
 
+    except SESSION_DEAD_ERRORS as e:
+        logger.warning(f"Session dead user_db_id={user_db_id}: {type(e).__name__}")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
+
     except Exception as e:
         logger.error(f"Reconnect failed user_db_id={user_db_id}: {e}")
         try:
             await client.disconnect()
         except Exception:
             pass
-        return None
+        raise
 
 
 # ═══════ Disconnect ═══════
@@ -255,6 +275,100 @@ async def disconnect_client(user_db_id: int):
 async def get_client(user_db_id: int) -> TelegramClient | None:
     """دریافت کلاینت فعال"""
     return active_clients.get(user_db_id)
+
+
+# ═══════ Health / Logout ═══════
+
+# خطاهایی که یعنی session دیگر معتبر نیست (کاربر از تنظیمات تلگرام
+# «Terminate session» زده، اکانت حذف/بن شده، یا کلید تکراری شده)
+SESSION_DEAD_ERRORS = (
+    AuthKeyUnregisteredError,
+    AuthKeyDuplicatedError,
+    SessionRevokedError,
+    SessionExpiredError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
+)
+
+
+async def check_client_health(user_db_id: int, deep: bool = False) -> str:
+    """
+    بررسی سلامت کلاینت فعال.
+
+    خروجی: "ok" | "revoked" | "offline" | "missing"
+      - اتصال افتاده باشد، یک بار تلاش به اتصال مجدد می‌شود
+      - deep=True → از خود تلگرام می‌پرسد session هنوز معتبر است یا نه
+    """
+    client = active_clients.get(user_db_id)
+    if client is None:
+        return "missing"
+
+    try:
+        if not client.is_connected():
+            await client.connect()
+        if deep or not client.is_connected():
+            if not await client.is_user_authorized():
+                return "revoked"
+        return "ok" if client.is_connected() else "offline"
+    except SESSION_DEAD_ERRORS:
+        return "revoked"
+    except Exception as e:
+        logger.warning(f"Health check user_db_id={user_db_id}: {type(e).__name__}: {e}")
+        return "offline"
+
+
+async def logout_session(user_db_id: int, session_string: str | None = None) -> bool:
+    """
+    خروج واقعی از تلگرام (باطل کردن session روی سرور تلگرام).
+
+    قبلاً «قطع اکانت» فقط اتصال را می‌بست و session روی تلگرام معتبر
+    می‌ماند؛ اگر رشته‌ی session جایی لو می‌رفت، هنوز قابل استفاده بود.
+    """
+    client = active_clients.pop(user_db_id, None)
+    temp = False
+    if client is None and session_string:
+        client = _make_client(session_string)
+        temp = True
+
+    if client is None:
+        return False
+
+    ok = False
+    try:
+        if not client.is_connected():
+            await client.connect()
+        ok = bool(await client.log_out())
+    except SESSION_DEAD_ERRORS:
+        ok = True   # همین حالا هم باطل است
+    except Exception as e:
+        logger.warning(f"log_out failed user_db_id={user_db_id}: {type(e).__name__}: {e}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    logger.info(
+        f"Logout user_db_id={user_db_id} ok={ok}{' (temp client)' if temp else ''}"
+    )
+    return ok
+
+
+async def cleanup_stale_pending() -> int:
+    """
+    بستن لاگین‌های نیمه‌کاره‌ای که مهلتشان تمام شده.
+
+    بدون این، هر «ارسال کد» که کاربر ادامه‌اش نمی‌داد یک اتصال باز
+    Telethon را برای همیشه در حافظه نگه می‌داشت (نشت منابع / DoS).
+    """
+    now = time.time()
+    stale = [
+        uid for uid, info in _pending.items()
+        if now - (info.get("created_at") or 0) > LOGIN_TIMEOUT + 30
+    ]
+    for uid in stale:
+        await cleanup_pending(uid)
+    return len(stale)
 
 
 # ═══════ Cleanup ═══════

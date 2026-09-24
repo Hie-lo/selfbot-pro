@@ -7,7 +7,7 @@ TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id              SERIAL PRIMARY KEY,
     telegram_id     BIGINT UNIQUE NOT NULL,
-    phone_enc       TEXT,
+    phone_enc       TEXT,           -- (رزرو، استفاده نمی‌شود — فقط phone_hash)
     phone_hash      VARCHAR(64),
     first_name      VARCHAR(255) DEFAULT '',
     username        VARCHAR(255) DEFAULT '',
@@ -31,14 +31,18 @@ CREATE TABLE IF NOT EXISTS account_sessions (
     user_id             INT REFERENCES users(id) ON DELETE CASCADE,
     phone_hash          VARCHAR(64) NOT NULL,
     session_data_enc    TEXT,
-    api_id_enc          TEXT,
-    api_hash_enc        TEXT,
+    api_id_enc          TEXT,       -- (منسوخ — api سراسری از .env)
+    api_hash_enc        TEXT,       -- (منسوخ)
     is_connected        BOOLEAN DEFAULT FALSE,
     last_connected_at   TIMESTAMPTZ,
     status              VARCHAR(20) DEFAULT 'inactive',
     error_message       TEXT,
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- پاکسازی نسخه‌های تکراری api_id/api_hash در دیتابیس‌های قدیمی
+UPDATE account_sessions SET api_id_enc = '', api_hash_enc = ''
+ WHERE COALESCE(api_id_enc, '') <> '' OR COALESCE(api_hash_enc, '') <> '';
 
 CREATE INDEX IF NOT EXISTS idx_sess_user
     ON account_sessions(user_id);
@@ -126,6 +130,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_auto_response
     ON auto_response_rules(user_id, target_user_id);
 
 
+-- (منسوخ — جایگزین: channel_monitor_routes؛ برای سازگاری دیتابیس‌های قدیمی مانده)
 CREATE TABLE IF NOT EXISTS channel_monitors (
     id                      SERIAL PRIMARY KEY,
     user_id                 INT REFERENCES users(id) ON DELETE CASCADE,
@@ -153,8 +158,8 @@ CREATE TABLE IF NOT EXISTS saved_messages (
     original_text       TEXT,
     edited_text         TEXT,
     media_type          VARCHAR(50),
-    media_path_enc      TEXT,
-    forwarded_to        BIGINT,
+    media_path_enc      TEXT,       -- مسیر فایل (رمزنگاری نمی‌شود؛ فایل بعد از ارسال حذف می‌شود)
+    forwarded_to        BIGINT,     -- (رزرو)
     timestamp           TIMESTAMPTZ,
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );

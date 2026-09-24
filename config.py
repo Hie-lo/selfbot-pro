@@ -123,3 +123,11 @@ FORWARD_CACHE_CAPTURE_MEDIA: bool = os.getenv(
 ).strip().lower() in ("1", "true", "yes", "on")
 FORWARD_CACHE_MAX_GB: float = float(os.getenv("FORWARD_CACHE_MAX_GB", "5"))
 FORWARD_CACHE_MEDIA_MAX_MB: int = int(os.getenv("FORWARD_CACHE_MEDIA_MAX_MB", "100"))
+
+# ── کنترل دسترسی زنده (watchdog) ──
+# هر چند ثانیه وضعیت اشتراک/مسدودی/سلامت session کاربران متصل بررسی شود
+ACCESS_CHECK_INTERVAL: int = max(15, int(os.getenv("ACCESS_CHECK_INTERVAL", "60")))
+# هر چند دور، اعتبار session از خود تلگرام پرسیده شود (سبک ولی یک درخواست API)
+AUTH_CHECK_EVERY: int = max(1, int(os.getenv("AUTH_CHECK_EVERY", "5")))
+# چند روز قبل از انقضا به کاربر هشدار داده شود (0 = خاموش)
+EXPIRY_WARN_DAYS: int = int(os.getenv("EXPIRY_WARN_DAYS", "3"))

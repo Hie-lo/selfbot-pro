@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import PLANS
+from config import PLANS, ADMIN_TELEGRAM_ID
 from bot.texts import t
 from bot.keyboards import (
     admin_menu_kb,
@@ -20,6 +20,7 @@ from bot.keyboards import (
 )
 from bot.subscription import is_admin, check_subscription
 from core.security import calc_plan_expiry
+from core import access
 from database import db
 
 logger = logging.getLogger("bot.admin")
@@ -180,13 +181,21 @@ async def cb_admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer(t("admin_req_approved", req_id=req_id), show_alert=True)
 
     days_left = (expires - datetime.now(timezone.utc)).days
-    await query.edit_message_caption(
-        caption=(
-            (query.message.caption or "")
-            + f"\n\n✅ <b>تایید شد</b> — انقضا: {expires.strftime('%Y-%m-%d')}"
-        ),
-        parse_mode="HTML",
-    )
+    note = f"\n\n✅ <b>تایید شد</b> — انقضا: {expires.strftime('%Y-%m-%d')}"
+    try:
+        if query.message and query.message.caption is not None:
+            await query.edit_message_caption(
+                caption=query.message.caption_html + note, parse_mode="HTML",
+            )
+        elif query.message:
+            await query.edit_message_text(
+                query.message.text_html + note, parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.debug(f"approve message edit skipped: {e}")
+
+    # اگر سلف‌بات به‌خاطر انقضا معلق بود، همین حالا برمی‌گردد
+    await access.sync_user(user["id"])
 
     # اطلاع به مشتری
     try:
@@ -328,9 +337,7 @@ async def render_admin_user(query, db_user_id: int):
     enabled = sum(1 for f in features if f["is_enabled"])
     session = await db.get_session(db_user_id)
 
-    status = "🚫 مسدود" if user.get("is_banned") else (
-        "🟢 متصل" if session else "🔴 قطع"
-    )
+    status = "🚫 مسدود" if user.get("is_banned") else access.status_label(session)
 
     await query.edit_message_text(
         t(
@@ -374,6 +381,7 @@ async def cb_admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["id"], "admin_grant_subscription",
         f"{plan_key} {plan['days']}d by {update.effective_user.id}",
     )
+    await access.sync_user(user["id"])
 
     await query.answer(
         t("admin_user_granted", plan=plan["title"], tg_id=tg_id_str,
@@ -420,6 +428,10 @@ async def cb_admin_cancel_sub(update: Update, context: ContextTypes.DEFAULT_TYPE
         user["id"], "admin_cancel_subscription",
         f"by {update.effective_user.id}",
     )
+    # همین حالا پلاگین‌ها و اتصال متوقف شوند (نه بعد از ری‌استارت)
+    session = await db.get_session(user["id"])
+    if session:
+        await access.suspend_user(user["id"], access.R_SUB_CANCELLED)
     await query.answer(t("admin_user_cancelled"), show_alert=True)
     await render_admin_user(query, user["id"])
 
@@ -437,8 +449,16 @@ async def cb_admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ کاربر پیدا نشد", show_alert=True)
         return
 
+    if tg_id == ADMIN_TELEGRAM_ID:
+        await query.answer("❌ ادمین را نمی‌توان مسدود کرد", show_alert=True)
+        return
+
     new_state = not bool(user.get("is_banned"))
     await db.set_user_banned(tg_id, new_state)
+    from bot.handlers import invalidate_ban_cache
+    invalidate_ban_cache(tg_id)
+    # قطع/وصل فوری سلف‌بات
+    await access.sync_user(user["id"])
     await db.audit_log(
         user["id"], "admin_ban" if new_state else "admin_unban",
         f"by {update.effective_user.id}",

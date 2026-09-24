@@ -104,7 +104,7 @@ TOGGLEABLE_FEATURES = [
     ("timed_saver", "⏳ ذخیره تایم‌دار", None),
     ("anti_delete", "🗑 ضد حذف", ".ضدحذف"),
     ("anti_edit", "✏️ ضد ویرایش", ".ضدویرایش"),
-    # ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
+    ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
     ("auto_response", "💬 پاسخ خودکار", ".دشمن"),
 ]
 
@@ -155,7 +155,6 @@ STORAGE_FEATURES = [
     ("anti_delete", "🗑 ضد حذف"),
     ("anti_edit", "✏️ ضد ویرایش"),
     ("timed_saver", "⏳ تایم‌دار"),
-    ("auto_download", "📥 دانلود خودکار"),
     ("save_from_link", "🔗 ذخیره از لینک"),
 ]
 

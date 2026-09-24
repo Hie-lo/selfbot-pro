@@ -1,5 +1,8 @@
 """
 کلاس پایه پلاگین
+
+⚠️ هر دستور/قابلیت جدید یا تغییرکرده → bot/help_content.py را هم به‌روز کنید
+(tests/test_help_coverage.py دستورات جاافتاده را پیدا می‌کند).
 """
 
 import logging

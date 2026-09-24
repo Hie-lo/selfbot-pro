@@ -145,6 +145,15 @@ class TimedSaverPlugin(BasePlugin):
                     await self.client.send_message(dest_peer, caption)
             except Exception as e:
                 self.logger.error(f"Timed forward failed: {e}")
+                return  # فایل می‌ماند تا از دست نرود
+
+            # حریم خصوصی: بعد از ارسال موفق، مدیای خصوصی طرف مقابل نباید
+            # رمزنگاری‌نشده و برای همیشه روی دیسک سرور بماند
+            if media_path and os.path.exists(media_path):
+                try:
+                    os.remove(media_path)
+                except Exception as e:
+                    self.logger.debug(f"Timed temp cleanup failed: {e}")
 
         self._add_handler(on_message, events.NewMessage)
         self.logger.info("TimedSaver loaded")

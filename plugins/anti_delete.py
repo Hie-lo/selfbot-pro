@@ -277,7 +277,11 @@ class AntiDeletePlugin(BasePlugin):
         header_parts.append(f"🕒 {date_str} (UTC)")
         if link_line:
             header_parts.append(link_line)
-        header_parts.append(f"📌 {'طرف مقابل حذف کرد' if is_me else 'حذف شد'}")
+        # در پی‌وی هر دو طرف می‌توانند پیام را برای هر دو حذف کنند و تلگرام
+        # نمی‌گوید چه کسی حذف کرده؛ پس فقط صاحب پیام را اعلام می‌کنیم
+        header_parts.append(
+            "📌 پیامِ خودت حذف شد" if is_me else "📌 پیامِ طرف مقابل حذف شد"
+        )
         header_parts.append("──────────────")
         header = "\n".join(header_parts)
 

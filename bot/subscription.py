@@ -20,7 +20,7 @@ from config import (
 )
 from bot.texts import t
 from bot.keyboards import plans_kb, plan_confirm_kb, back_kb, admin_review_kb
-from core.security import check_rate_limit
+from core.security import check_rate_limit, is_subscription_active
 from database import db
 
 logger = logging.getLogger("bot.subscription")
@@ -36,18 +36,8 @@ def is_admin(tg_id: int) -> bool:
 
 
 async def check_subscription(user: dict) -> bool:
-    """آیا کاربر اشتراک فعال دارد؟"""
-    if not user:
-        return False
-    if user.get("plan") == "free":
-        return False
-    expires = user.get("plan_expires_at")
-    if not expires:
-        return False
-    now = datetime.now(timezone.utc)
-    if hasattr(expires, "tzinfo") and expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    return expires > now
+    """آیا کاربر اشتراک فعال دارد؟ (کاربر مسدود = بدون اشتراک)"""
+    return is_subscription_active(user)
 
 
 def plans_summary() -> str:

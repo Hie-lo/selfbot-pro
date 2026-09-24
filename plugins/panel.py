@@ -1,20 +1,25 @@
 """
 پلاگین پنل و راهنما از داخل selfbot
 کامندها:
-  .پنل        — نمایش وضعیت و قابلیت‌ها
-  .راهنما     — لیست کامندها
-  .روشن نام   — روشن کردن قابلیت
-  .خاموش نام  — خاموش کردن قابلیت
-  .وضعیت      — وضعیت اکانت و سرور
+  .پنل            — نمایش وضعیت و قابلیت‌ها
+  .راهنما         — راهنمای دکمه‌ای (از طریق inline mode ربات کنترلی)
+  .راهنما ‹بخش›   — مستقیم یک بخش (مثل: .راهنما فوروارد)
+  .روشن نام       — روشن کردن قابلیت (فقط با اشتراک فعال)
+  .خاموش نام      — خاموش کردن قابلیت
+  .وضعیت          — وضعیت اکانت و سرور
+  .recents        — پاکسازی استیکرهای اخیر
 """
 
 import os
 import re
-import psutil
-from telethon import Button, events
-from plugins.base import BasePlugin
-from database import db
 
+import psutil
+from telethon import events
+
+from bot import help_content as H
+from core import runtime
+from database import db
+from plugins.base import BasePlugin
 
 # نام‌های فارسی قابلیت‌ها
 FEATURE_NAMES = {
@@ -22,6 +27,7 @@ FEATURE_NAMES = {
     "heart_animation": "❤️ قلب متحرک",
     "save_from_link": "🔗 ذخیره از لینک",
     "sticker_convert": "🖼 تبدیل استیکر",
+    "forward_channel": "📥 فوروارد",
     "banner": "📢 بنر",
     "timed_saver": "⏳ تایم‌دار",
     "anti_delete": "🗑 ضد حذف",
@@ -30,8 +36,30 @@ FEATURE_NAMES = {
     "channel_monitor": "📡 مانیتور",
 }
 
-# قابلیت‌هایی که همیشه روشنن
-ALWAYS_ON = {"dice", "heart_animation", "save_from_link", "sticker_convert"}
+# قابلیت‌های همیشه روشن که به کاربر نمایش داده می‌شوند.
+# باید با core.plugin_manager.ALWAYS_ON_PLUGINS یکی باشد (پنل خودش نمایش
+# داده نمی‌شود) — تست tests/test_help_coverage.py این را چک می‌کند.
+ALWAYS_ON = {"dice", "heart_animation", "save_from_link", "sticker_convert", "forward_channel"}
+
+# نام‌های دستی برای .روشن / .خاموش
+_MANUAL_NAMES = {
+    "تاس": "dice",
+    "قلب": "heart_animation",
+    "ذخیره": "save_from_link",
+    "استیکر": "sticker_convert",
+    "فوروارد": "forward_channel",
+    "بنر": "banner",
+    "تایم‌دار": "timed_saver",
+    "تایمدار": "timed_saver",
+    "تایم دار": "timed_saver",
+    "ضدحذف": "anti_delete",
+    "ضد حذف": "anti_delete",
+    "ضدویرایش": "anti_edit",
+    "ضد ویرایش": "anti_edit",
+    "دشمن": "auto_response",
+    "پاسخ خودکار": "auto_response",
+    "مانیتور": "channel_monitor",
+}
 
 
 class PanelPlugin(BasePlugin):
@@ -40,6 +68,13 @@ class PanelPlugin(BasePlugin):
     always_on = True
 
     async def start(self):
+        # ثبت آیدی اکانت برای مجاز بودن inline query راهنما
+        try:
+            me = await self.client.get_me()
+            self._account_id = me.id
+            runtime.selfbot_accounts[me.id] = self.user_id
+        except Exception:
+            self._account_id = None
 
         # ── .پنل ──
         async def panel_cmd(event):
@@ -49,28 +84,25 @@ class PanelPlugin(BasePlugin):
             features = await db.get_features(self.user_id)
             enabled = {f["feature_name"] for f in features if f["is_enabled"]}
 
-            text = "⚙️ **پنل مدیریت**\n\n"
-
-            text += "── همیشه فعال ──\n"
-            for key in ALWAYS_ON:
-                name = FEATURE_NAMES.get(key, key)
-                text += f"  ✅ {name}\n"
+            text = "⚙️ **پنل مدیریت**\n\n── همیشه فعال ──\n"
+            for key in FEATURE_NAMES:
+                if key in ALWAYS_ON:
+                    text += f"  ✅ {FEATURE_NAMES[key]}\n"
 
             text += "\n── قابل تنظیم ──\n"
-            for key, name in FEATURE_NAMES.items():
+            for key, fname in FEATURE_NAMES.items():
                 if key in ALWAYS_ON:
                     continue
                 status = "✅" if key in enabled else "❌"
-                text += f"  {status} {name}\n"
+                text += f"  {status} {fname}\n"
 
             text += (
                 "\n── دستورات ──\n"
                 "  `.روشن ضد حذف` — روشن کردن\n"
                 "  `.خاموش ضد حذف` — خاموش کردن\n"
-                "  `.راهنما` — لیست کامل دستورات\n"
+                "  `.راهنما` — راهنمای کامل دکمه‌ای\n"
                 "  `.وضعیت` — وضعیت سرور\n"
             )
-
             await event.edit(text)
 
         self._add_handler(
@@ -78,231 +110,37 @@ class PanelPlugin(BasePlugin):
             events.NewMessage(pattern=r"^\.پنل$", outgoing=True),
         )
 
-        # ── .راهنما — پنل دکمه‌ای ──
-        from telethon import Button
-
-        HELP_MAIN = (
-            "📖 **راهنما — پنل اصلی**\n\n"
-            "یک دسته رو انتخاب کن:\n"
-            "⚙️ مدیریت · 💎 اشتراک · 📥 فوروارد · 📂 ذخیره‌سازی\n"
-            "🎲 سرگرمی · 🛡️ ضدحذف/ویرایش · 💬 دشمن · 📢 بنر/مانیتور\n\n"
-            "💡 نکته: همه‌ی دستورات با `.` شروع می‌شن و فقط برای خودت کار می‌کنن."
-        )
-
-        HELP_TEXTS = {
-            "mgmt": (
-                "⚙️ **مدیریت**\n\n"
-                "`.پنل` — پنل مدیریت و وضعیت قابلیت‌ها\n"
-                "`.راهنما` — همین پنل\n"
-                "`.وضعیت` — وضعیت سرور (RAM/CPU/کلاینت‌ها)\n"
-                "`.روشن نام` — روشن کردن قابلیت\n"
-                "`.خاموش نام` — خاموش کردن\n\n"
-                "نام‌های قابل استفاده: ضد حذف، ضد ویرایش، تایم‌دار، بنر، دشمن، مانیتور و…\n"
-                "همیشه فعال: 🎲 تاس، ❤️ قلب، 🔗 ذخیره از لینک، 🖼 استیکر"
-            ),
-            "sub": (
-                "💎 **اشتراک**\n\n"
-                "از ربات → «💎 اشتراک»: پلن رو انتخاب کن → کارت به کارت → عکس رسید رو بفرست → ادمین تایید می‌کنه.\n\n"
-                "بعد از تایید، همه‌ی قابلیت‌های پولی باز می‌شه و `.پنل` وضعیت رو نشون می‌ده."
-            ),
-            "forward": (
-                "📥 **فوروارد محتوا**\n\n"
-                "`.فوروارد <مبدأ> به <مقصد>` — فوروارد واقعی با نام منبع\n"
-                "`.فوروارد با آیدی <مبدأ> به <مقصد>` — کپی + هدر مشخصات\n\n"
-                "نمونه هدر:\n"
-                "  📥 از: گروه خانواده (-100...)\n"
-                "  👤 فرستنده: علی — @ali (123456789)\n"
-                "  🕒 2026-09-22 14:22 (UTC)\n"
-                "  🔗 https://t.me/c/.../55\n"
-                "  ──────────────\n\n"
-                "📋 **ربات → 📥 فوروارد محتوا:**\n"
-                "  لیست چت‌های اکانت (حتی بدون لینک)، فیلتر «فقط کانال/گروه»، جستجو، ورود دستی لینک دعوت،\n"
-                "  ۳ حالت: 🏷 کپی با مشخصات / ↪️ فوروارد / 🔁 کپی بدون نام\n"
-                "  ⚡ سرعت: محتاط/متعادل/سریع/حداکثری (خودکار با FloodWait)\n"
-                "  🖼 استیکر/گیف خودکار از Recents پاک می‌شه\n"
-                "  🗄 کش روی سرور: اول همه روی سرور کش، بعد ارسال — قطع دسترسی هم ادامه می‌ده\n"
-                "  🔓 گیر کرد؟ ▶️ ادامه یا 🔓 بستن / `.فوروارد بستن` — ردیف مرده خودکار آزاد می‌شه\n"
-                "  🗑 حذف کامل: دکمه‌ی «حذف کامل» یا `.فوروارد حذف`\n"
-                "  ♻️ بدون سقف، FloodWait خودکار، پیشرفت ذخیره، ⏹/▶️ توقف/ادامه"
-            ),
-            "storage": (
-                "📂 **ذخیره‌سازی (مسیرها)**\n\n"
-                "هر قابلیت مقصدش جدا تنظیم می‌شه: Saved Messages یا کانال/گروه دلخواه\n\n"
-                "📍 تنظیم: ربات → 📂 ذخیره‌سازی → انتخاب قابلیت →\n"
-                "  • 💾 Saved Messages\n"
-                "  • 📢 چنل/گروه (ارسال آیدی @ یا -100...)\n"
-                "  • 👑 کانال‌ها/گروه‌های من (فقط مالکم) — لیست صفحه‌بندی\n\n"
-                "قابلیت‌ها: ضد حذف، ضد ویرایش، تایم‌دار، دانلود خودکار، ذخیره از لینک، مانیتور\n"
-                "مانیتور: `.مانیتور @src @dst` / `.مانیتور حذف @src` / `.لیست مانیتور`"
-            ),
-            "fun": (
-                "🎲 **سرگرمی**\n\n"
-                "`.تاس 6` — تاس معمولی\n"
-                "`.تاس 🎲 5` — با ایموجی\n"
-                "`.تاس 🎰 32` — اسلات\n\n"
-                "❤️ **قلب:**\n"
-                "`.قلب` — قلب متحرک (روی ریپلای هم میشه)\n"
-                "  بعد از **سین زدنِ طرف مقابل** انیمیشن شروع می‌شه (تا 120ث صبر می‌کنه، بعد خودش شروع می‌کنه)\n"
-                "  ❤️ **قلب — چند انیمیشن خفن:**\n"
-                "`.قلب` — اصلی (۱۲ قلب با حرکت)\n"
-                "`.قلب2` / `.قلب 2` — زنجیره‌ای: ‌🖤 → 🖤💜 → 🖤💜💙 → … تا کامل (با نیم‌فاصله، تک‌اموجی کوچیک)\n"
-                "`.قلب3` — ضربان رنگی (تک‌قلب با تغییر رنگ)\n"
-                "`.قلب4` — نفس (تپش با فاصله)\n"
-                "`.قلب5` — جرقه‌ای ✨\n"
-                "  همه بعد از **سین زدنِ طرف مقابل** شروع می‌شن (پی‌وی تا 120ث، گروه فوری) + ریپلای"
-            ),
-            "protect": (
-                "🛡️ **ضد حذف / ضد ویرایش / Recents**\n\n"
-                "🗑 ضد حذف (فقط پی‌وی): پیامِ حذف‌شده با ترتیب اصلی ذخیره می‌شه\n"
-                "  هدر مثل فوروارد: 📥 از، 👤 فرستنده — @user (id)، 🕒 تاریخ، 🔗 لینک/ID\n"
-                "  مدیا با Recents پاک\n"
-                "✏️ ضد ویرایش: متنِ قبل و بعد ذخیره می‌شه\n\n"
-                "🧹 **Recents:**\n"
-                "`.recents` یا ربات → 📂 ذخیره‌سازی → 🧹 پاکسازی\n"
-                "  پیش‌فرض هیچ استیکر/گیفی به Recents اضافه نمی‌شه (فایل + پاکسازی خودکار)\n"
-                "  حالت‌ها: CLEAN_RECENTS_MODE=document/cleanup/off"
-            ),
-            "spam": (
-                "💬 **دشمن / اسپم**\n\n"
-                "`.دشمن` (ریپلای) — اضافه\n"
-                "`.دشمن @user` — با یوزرنیم\n"
-                "`.دشمن حذف` (ریپلای) — حذف\n"
-                "`.لیست دشمن` — لیست\n"
-                "`.بکنش` (ریپلای) — شروع اسپم\n"
-                "`.بس` — توقف\n\n"
-                "📢 **بنر:**\n"
-                "`.تنظیم بنر 300` (ریپلای) — هر 300ث\n"
-                "`.لیست بنر` — لیست\n"
-                "`.پاکسازی بنر` — حذف همه"
-            ),
-            "save": (
-                "🔗 **ذخیره**\n\n"
-                "`.ذخیره لینک` — ذخیره پیام از لینک (حتی خصوصی اگر عضو باشی)\n"
-                "`.استیکر` (ریپلای) — تبدیل عکس/گیف به استیکر\n\n"
-                "📡 **مانیتور:**\n"
-                "`.مانیتور @src @dst` — ست\n"
-                "`.مانیتور حذف @src` — حذف\n"
-                "`.لیست مانیتور` — لیست"
-            ),
-            "all": None,  # پر می‌شود پایین
-        }
-        # متن کامل برای دکمه همه
-        HELP_TEXTS["all"] = (
-            "📖 **راهنمای کامل — همه دستورات**\n\n"
-            + HELP_TEXTS["mgmt"] + "\n\n"
-            + HELP_TEXTS["sub"] + "\n\n"
-            + HELP_TEXTS["forward"] + "\n\n"
-            + HELP_TEXTS["protect"] + "\n\n"
-            + HELP_TEXTS["fun"] + "\n\n"
-            + HELP_TEXTS["save"] + "\n\n"
-            + HELP_TEXTS["spam"] + "\n\n"
-            + HELP_TEXTS["storage"]
-        )
-
-        def help_kb(page="main"):
-            if page == "main":
-                return [
-                    [Button.inline("⚙️ مدیریت", b"help_mgmt"), Button.inline("💎 اشتراک", b"help_sub")],
-                    [Button.inline("📥 فوروارد", b"help_forward"), Button.inline("📂 ذخیره‌سازی", b"help_storage")],
-                    [Button.inline("🎲/❤️ سرگرمی", b"help_fun"), Button.inline("🛡️ ضدحذف", b"help_protect")],
-                    [Button.inline("💬 دشمن", b"help_spam"), Button.inline("🔗 ذخیره/بنر", b"help_save")],
-                    [Button.inline("📖 همه", b"help_all"), Button.inline("❌ بستن", b"help_close")],
-                ]
-            else:
-                return [
-                    [Button.inline("🔙 بازگشت", b"help_main"), Button.inline("❌ بستن", b"help_close")],
-                ]
-
+        # ── .راهنما [بخش] ──
         async def help_cmd(event):
             if not event.out:
                 return
-            try:
-                await event.delete()
-            except Exception:
-                pass
-            # سعی کن با لوگو بفرستی (عکس + کپشن دکمه‌ای) — بعداً می‌تونی ویدیو جایگزین کنی
-            logo_path = "assets/logo.jpg"
-            # اگر فایل نبود، همون متن بفرست
-            import os
-            use_logo = os.path.exists(logo_path)
-            try:
-                if use_logo:
-                    await self.client.send_file(
-                        event.chat_id,
-                        logo_path,
-                        caption=HELP_MAIN,
-                        buttons=help_kb("main"),
-                        parse_mode="md",
+            arg = (event.pattern_match.group(1) or "").strip()
+            key = "main"
+            if arg:
+                key = H.resolve_section(arg)
+                if not key:
+                    await event.edit(
+                        f"❓ بخش «{arg[:40]}» پیدا نشد.\n\n" + H.text_index(),
+                        parse_mode="html",
                     )
-                else:
-                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
-            except Exception as e:
-                # فالبک به متن ساده
-                try:
-                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
-                except Exception:
-                    self.logger.warning(f"help send failed: {e}")
+                    return
+
+            if await self._send_inline_help(event, key):
+                return
+
+            # حالت متنی (inline mode ربات خاموش است یا در دسترس نیست)
+            if key == "main":
+                text = H.text_index()
+            else:
+                text = (
+                    H.section_text(key)
+                    + "\n\n──────────────\n📖 فهرست بخش‌ها: <code>.راهنما</code>"
+                )
+            await event.edit(text, parse_mode="html", link_preview=False)
 
         self._add_handler(
             help_cmd,
-            events.NewMessage(pattern=r"^\.راهنما$", outgoing=True),
-        )
-
-        async def help_callback(event):
-            # فقط برای صاحب اکانت
-            if not event.is_private and event.sender_id != self.user_id:
-                # در گروه، فقط صاحب سلف اجازه دارد — بقیه نادیده
-                try:
-                    me = await self.client.get_me()
-                    if event.sender_id != me.id:
-                        await event.answer("فقط صاحب اکانت", alert=True)
-                        return
-                except Exception:
-                    pass
-            data = event.data.decode() if isinstance(event.data, bytes) else str(event.data)
-            if data == "help_close":
-                try:
-                    await event.delete()
-                except Exception:
-                    try:
-                        await self.client.delete_messages(event.chat_id, event.message_id)
-                    except Exception:
-                        pass
-                await event.answer()
-                return
-            if data == "help_main":
-                await event.edit(HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
-                await event.answer()
-                return
-            key = data.replace("help_", "", 1)
-            text = HELP_TEXTS.get(key)
-            if text:
-                # اگر کپشن عکس باشه سقف 1024 ـه، برای "همه" متن طولانیه — جداگانه بفرست
-                try:
-                    # تشخیص اینکه پیام عکس داره
-                    is_media = bool(getattr(event.message, "media", None) or getattr(event.message, "photo", None))
-                except Exception:
-                    is_media = False
-                if is_media and len(text) > 1000:
-                    # برای متن طولانی، پیام جدید بفرست و قبلی رو پاک کن
-                    try:
-                        await self.client.send_message(event.chat_id, text, buttons=help_kb(key), parse_mode="md")
-                        try:
-                            await event.delete()
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        # فالبک: همون ادیت با برش
-                        await event.edit(text[:1000] + "\n…", buttons=help_kb(key), parse_mode="md")
-                else:
-                    await event.edit(text, buttons=help_kb(key), parse_mode="md")
-                await event.answer()
-            else:
-                await event.answer("پیدا نشد", alert=True)
-
-        self._add_handler(
-            help_callback,
-            events.CallbackQuery(data=re.compile(b"help_")),
+            events.NewMessage(pattern=r"^\.راهنما(?:\s+(.+))?$", outgoing=True),
         )
 
         # ── .روشن ──
@@ -321,15 +159,26 @@ class PanelPlugin(BasePlugin):
                 await event.edit(f"✅ «{FEATURE_NAMES[feat_key]}» همیشه فعاله.")
                 return
 
-            await db.set_feature(self.user_id, feat_key, True)
+            # اشتراک باید معتبر باشد (قبلاً این مسیر اشتراک را چک نمی‌کرد و
+            # قابلیت‌های پولی بدون پرداخت روشن می‌شدند)
+            from core.access import eligible
+            user = await db.get_user_by_db_id(self.user_id)
+            ok, reason = eligible(user)
+            if not ok:
+                await event.edit(
+                    "❌ برای روشن کردن این قابلیت اشتراک فعال لازم است.\n"
+                    "از ربات → «💎 اشتراک» تمدید کنید."
+                )
+                return
 
-            # load plugin
-            from core.client_manager import get_client
             from core.plugin_manager import enable_plugin
-            client = await get_client(self.user_id)
-            if client:
-                await enable_plugin(self.user_id, feat_key, client)
+            loaded = await enable_plugin(self.user_id, feat_key, self.client)
+            if not loaded:
+                await event.edit("❌ فعال‌سازی ناموفق بود.")
+                return
 
+            await db.set_feature(self.user_id, feat_key, True)
+            await db.audit_log(self.user_id, "feature_toggle", f"{feat_key} -> ON (chat)")
             await event.edit(f"✅ «{FEATURE_NAMES.get(feat_key, feat_key)}» روشن شد.")
 
         self._add_handler(
@@ -357,6 +206,7 @@ class PanelPlugin(BasePlugin):
 
             from core.plugin_manager import disable_plugin
             await disable_plugin(self.user_id, feat_key)
+            await db.audit_log(self.user_id, "feature_toggle", f"{feat_key} -> OFF (chat)")
 
             await event.edit(f"❌ «{FEATURE_NAMES.get(feat_key, feat_key)}» خاموش شد.")
 
@@ -378,7 +228,10 @@ class PanelPlugin(BasePlugin):
             n_clients = len(active_clients)
 
             features = await db.get_features(self.user_id)
-            enabled_count = sum(1 for f in features if f["is_enabled"])
+            enabled_count = sum(
+                1 for f in features
+                if f["is_enabled"] and f["feature_name"] not in ALWAYS_ON
+            )
 
             text = (
                 f"📊 **وضعیت**\n\n"
@@ -387,7 +240,6 @@ class PanelPlugin(BasePlugin):
                 f"⚡ CPU: {cpu:.1f}%\n"
                 f"🧩 قابلیت‌های روشن: {enabled_count + len(ALWAYS_ON)}\n"
             )
-
             await event.edit(text)
 
         self._add_handler(
@@ -414,41 +266,54 @@ class PanelPlugin(BasePlugin):
 
         self.logger.info("loaded")
 
+    async def _send_inline_help(self, event, key: str) -> bool:
+        """
+        ارسال راهنمای دکمه‌ای از طریق inline mode ربات کنترلی.
+        (اکانت کاربر خودش نمی‌تواند دکمه‌ی شیشه‌ای بفرستد.)
+        """
+        bot_username = runtime.bot_username
+        if not bot_username:
+            return False
+
+        query = "help" if key == "main" else f"help {key}"
+        try:
+            results = await self.client.inline_query(bot_username, query)
+            if not results:
+                return False
+            reply_to = event.reply_to_msg_id
+            try:
+                await results[0].click(event.chat_id, reply_to=reply_to, hide_via=True)
+            except Exception:
+                await results[0].click(event.chat_id, reply_to=reply_to)
+        except Exception as e:
+            self.logger.info(f"inline help unavailable ({type(e).__name__}: {e})")
+            return False
+
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        return True
+
+    async def stop(self):
+        if getattr(self, "_account_id", None):
+            runtime.selfbot_accounts.pop(self._account_id, None)
+        await super().stop()
+
     def _resolve_feature(self, name: str) -> str | None:
         """تبدیل نام فارسی/انگلیسی به کلید"""
         name = name.strip().lower()
 
-        # چک مستقیم کلید
+        if name in _MANUAL_NAMES:
+            return _MANUAL_NAMES[name]
         if name in FEATURE_NAMES:
             return name
 
-        # چک نام فارسی
+        name_clean = re.sub(r"[^\w]", "", name)
+        if not name_clean:
+            return None
         for key, fname in FEATURE_NAMES.items():
-            # حذف ایموجی و فاصله
-            clean = fname.replace(" ", "").lower()
-            # حذف ایموجی‌ها
-            import re
-            clean = re.sub(r'[^\w]', '', clean)
-            name_clean = re.sub(r'[^\w]', '', name)
-
-            if name_clean in clean or clean in name_clean:
+            clean = re.sub(r"[^\w]", "", fname.lower())
+            if name_clean == clean or name_clean in clean:
                 return key
-
-        # مپ دستی
-        manual = {
-            "تاس": "dice",
-            "قلب": "heart_animation",
-            "ذخیره": "save_from_link",
-            "استیکر": "sticker_convert",
-            "بنر": "banner",
-            "تایم‌دار": "timed_saver",
-            "تایمدار": "timed_saver",
-            "ضدحذف": "anti_delete",
-            "ضد حذف": "anti_delete",
-            "ضدویرایش": "anti_edit",
-            "ضد ویرایش": "anti_edit",
-            "دشمن": "auto_response",
-            "مانیتور": "channel_monitor",
-        }
-
-        return manual.get(name, None)
+        return None

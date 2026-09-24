@@ -35,6 +35,43 @@ def check_rate_limit(
     return True
 
 
+def prune_rate_limits(max_age_seconds: int = 3600) -> int:
+    """
+    حذف کلیدهای قدیمی rate limiter — بدون این، دیکشنری با هر کاربر/اکشن
+    جدید برای همیشه بزرگ می‌شد (نشت حافظه).
+    """
+    now = time.time()
+    dead = [
+        k for k, calls in _rate_limits.items()
+        if not calls or now - calls[-1] > max_age_seconds
+    ]
+    for k in dead:
+        _rate_limits.pop(k, None)
+    return len(dead)
+
+
+# ── Subscription ──
+
+
+def is_subscription_active(user: dict | None) -> bool:
+    """
+    آیا کاربر اشتراک معتبر دارد؟ (مرجع واحد — ربات و موتور هر دو از این
+    استفاده می‌کنند تا منطق انقضا در یک جا باشد)
+    """
+    if not user:
+        return False
+    if user.get("is_banned"):
+        return False
+    if (user.get("plan") or "free") == "free":
+        return False
+    expires = user.get("plan_expires_at")
+    if not expires:
+        return False
+    if getattr(expires, "tzinfo", None) is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires > datetime.now(timezone.utc)
+
+
 # ── Validators ──
 
 
@@ -172,7 +209,16 @@ def sanitize_filename(name: str) -> str:
 
 
 def hash_phone(phone: str) -> str:
-    return hashlib.sha256(phone.encode("utf-8")).hexdigest()
+    """
+    هش کلیددار (HMAC-SHA256) شماره تلفن.
+
+    قبلاً SHA-256 ساده بود؛ فضای شماره‌تلفن‌ها کوچک است و با نشت دیتابیس
+    در چند دقیقه brute-force می‌شد. حالا بدون ENCRYPTION_KEY قابل برگشت نیست.
+    """
+    import hmac
+    from config import ENCRYPTION_KEY
+    key = hashlib.sha256(b"phone-hash:" + ENCRYPTION_KEY.encode("utf-8")).digest()
+    return hmac.new(key, phone.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 # ── File Validation ──

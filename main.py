@@ -35,6 +35,19 @@ logger = logging.getLogger("main")
 
 
 async def post_init(app: Application):
+    from core import runtime
+    runtime.bot = app.bot
+    try:
+        me = await app.bot.get_me()
+        runtime.bot_username = me.username
+        if not getattr(me, "supports_inline_queries", False):
+            logger.warning(
+                "Inline mode ربات خاموش است — راهنمای دکمه‌ای `.راهنما` در چت‌ها "
+                "به حالت متنی برمی‌گردد. در @BotFather: /setinline"
+            )
+    except Exception as e:
+        logger.warning(f"get_me failed: {e}")
+
     await init_db()
     await startup()
     logger.info("Bot is running!")
@@ -77,7 +90,7 @@ def main():
     print("🚀 SelfBot Pro")
     print("=" * 50 + "\n")
 
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

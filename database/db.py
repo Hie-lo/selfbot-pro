@@ -262,15 +262,41 @@ async def get_all_active_sessions() -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT s.*, u.telegram_id, u.plan,
-                   u.plan_expires_at, u.is_banned
+                   u.plan_expires_at, u.is_banned, u.is_active
             FROM account_sessions s
             JOIN users u ON s.user_id = u.id
             WHERE s.status IN ('active', 'connected')
-              AND u.is_active = TRUE
-              AND u.is_banned = FALSE
             """
         )
         return [dict(r) for r in rows]
+
+async def get_suspended_sessions() -> list[dict]:
+    """session‌های معلق + وضعیت اشتراک صاحبشان (برای watchdog)"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.user_id, s.error_message,
+                   u.telegram_id, u.plan, u.plan_expires_at,
+                   u.is_banned, u.is_active
+            FROM account_sessions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.status = 'suspended'
+            """
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_users_by_db_ids(ids: list[int]) -> list[dict]:
+    if not ids:
+        return []
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM users WHERE id = ANY($1::int[])", list(ids)
+        )
+        return [dict(r) for r in rows]
+
 
 # ═══════ Features ═══════
 
