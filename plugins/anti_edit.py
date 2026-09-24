@@ -17,6 +17,7 @@ class AntiEditPlugin(BasePlugin):
         super().__init__(client, user_id)
         self._originals: dict[int, dict[int, dict]] = {}
         self._max_cache_per_chat = 500
+        self._max_chats = 50
         self._my_id = None
 
     async def start(self):
@@ -42,6 +43,10 @@ class AntiEditPlugin(BasePlugin):
             is_me = (sender_id == self._my_id)
 
             if chat_id not in self._originals:
+                # سقف تعداد چت‌های کش‌شده (جلوگیری از رشد بی‌نهایت حافظه)
+                if len(self._originals) >= self._max_chats:
+                    oldest_chat = next(iter(self._originals))
+                    self._originals.pop(oldest_chat, None)
                 self._originals[chat_id] = {}
 
             if len(self._originals[chat_id]) >= self._max_cache_per_chat:
@@ -87,7 +92,6 @@ class AntiEditPlugin(BasePlugin):
             if not event.is_private:
                 return
 
-            chat_id = event.chat_id
             msg_id = msg.id
             new_text = msg.text or ""
 

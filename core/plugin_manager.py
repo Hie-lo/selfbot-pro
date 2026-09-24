@@ -18,8 +18,9 @@ from plugins.anti_delete import AntiDeletePlugin
 from plugins.anti_edit import AntiEditPlugin
 from plugins.auto_response import AutoResponsePlugin
 
-logger = logging.getLogger("plugin_manager")
 from plugins.channel_monitor import ChannelMonitorPlugin
+
+logger = logging.getLogger("plugin_manager")
 
 ALWAYS_ON_PLUGINS = {
     "dice": DicePlugin,
@@ -37,7 +38,7 @@ TOGGLEABLE_PLUGINS = {
     "anti_delete": AntiDeletePlugin,
     "anti_edit": AntiEditPlugin,
     "auto_response": AutoResponsePlugin,
-    # "channel_monitor": ChannelMonitorPlugin,
+    "channel_monitor": ChannelMonitorPlugin,
 }
 
 # پلاگین‌های فعال هر کاربر

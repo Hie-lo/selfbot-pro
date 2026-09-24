@@ -85,16 +85,37 @@ class TimedSaverPlugin(BasePlugin):
                 self.logger.error(f"Timed download failed: {e}")
 
             # 1) اول INSERT در DB (اگر تکراری بود، ارسال نکن)
-            inserted = await db.save_message_record(
-                self.user_id,
-                "timed",
-                chat_id,
-                chat_title,
-                msg_id,
-                text,
-                media_type=media_type,
-                media_path=media_path or "",
-            )
+            try:
+                inserted = await db.save_message_record(
+                    self.user_id,
+                    "timed",
+                    chat_id,
+                    chat_title,
+                    msg_id,
+                    text,
+                    media_type=media_type,
+                    media_path=media_path or "",
+                )
+            except Exception as e:
+                # قبلاً این خطا بی‌صدا گم می‌شد و فایل دانلودشده
+                # روی دیسک می‌ماند
+                self.logger.error(
+                    f"Timed DB insert failed (chat={chat_id} msg={msg_id}): {e}",
+                    exc_info=True,
+                )
+                if media_path and os.path.exists(media_path):
+                    try:
+                        os.remove(media_path)
+                    except Exception:
+                        pass
+                try:
+                    await self.client.send_message(
+                        my_id,
+                        f"⚠️ ذخیره پیام تایم‌دار ناموفق بود:\n{str(e)[:150]}",
+                    )
+                except Exception:
+                    pass
+                return
 
             if not inserted:
                 # اگر تکراری بود، فایل دانلودشده رو هم پاک کن
@@ -115,7 +136,11 @@ class TimedSaverPlugin(BasePlugin):
 
             try:
                 if media_path and os.path.exists(media_path):
-                    await self.client.send_file(dest_peer, media_path, caption=caption)
+                    # supports_streaming → ویدیو (نه گیف) تا Recents آلوده نشود
+                    await self.client.send_file(
+                        dest_peer, media_path, caption=caption,
+                        supports_streaming=True,
+                    )
                 else:
                     await self.client.send_message(dest_peer, caption)
             except Exception as e:

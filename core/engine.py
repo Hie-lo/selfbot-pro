@@ -45,6 +45,19 @@ async def startup():
 
     logger.info(f"Engine: {connected}/{len(sessions)} clients connected")
 
+    # ادامه فورواردهای نیمه‌کاره (کم‌کم و با فاصله)
+    try:
+        from core.forwarder import resume_pending_jobs
+        from bot.handlers import notify_job_progress
+        await resume_pending_jobs(
+            on_progress_factory=lambda uid, row: (
+                lambda job: notify_job_progress(uid, job, row)
+            ),
+            delay=10.0,
+        )
+    except Exception as e:
+        logger.warning(f"Forward jobs resume skipped: {e}")
+
 
 async def shutdown():
     """خاموش کردن تمیز"""

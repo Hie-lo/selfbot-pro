@@ -9,8 +9,9 @@
 """
 
 import os
+import re
 import psutil
-from telethon import events
+from telethon import Button, events
 from plugins.base import BasePlugin
 from database import db
 
@@ -27,8 +28,6 @@ FEATURE_NAMES = {
     "anti_edit": "✏️ ضد ویرایش",
     "auto_response": "💬 دشمن",
     "channel_monitor": "📡 مانیتور",
-    "auto_download": "📥 دانلود خودکار",
-    "upload_url": "📤 آپلود از لینک",
 }
 
 # قابلیت‌هایی که همیشه روشنن
@@ -79,59 +78,231 @@ class PanelPlugin(BasePlugin):
             events.NewMessage(pattern=r"^\.پنل$", outgoing=True),
         )
 
-        # ── .راهنما ──
+        # ── .راهنما — پنل دکمه‌ای ──
+        from telethon import Button
+
+        HELP_MAIN = (
+            "📖 **راهنما — پنل اصلی**\n\n"
+            "یک دسته رو انتخاب کن:\n"
+            "⚙️ مدیریت · 💎 اشتراک · 📥 فوروارد · 📂 ذخیره‌سازی\n"
+            "🎲 سرگرمی · 🛡️ ضدحذف/ویرایش · 💬 دشمن · 📢 بنر/مانیتور\n\n"
+            "💡 نکته: همه‌ی دستورات با `.` شروع می‌شن و فقط برای خودت کار می‌کنن."
+        )
+
+        HELP_TEXTS = {
+            "mgmt": (
+                "⚙️ **مدیریت**\n\n"
+                "`.پنل` — پنل مدیریت و وضعیت قابلیت‌ها\n"
+                "`.راهنما` — همین پنل\n"
+                "`.وضعیت` — وضعیت سرور (RAM/CPU/کلاینت‌ها)\n"
+                "`.روشن نام` — روشن کردن قابلیت\n"
+                "`.خاموش نام` — خاموش کردن\n\n"
+                "نام‌های قابل استفاده: ضد حذف، ضد ویرایش، تایم‌دار، بنر، دشمن، مانیتور و…\n"
+                "همیشه فعال: 🎲 تاس، ❤️ قلب، 🔗 ذخیره از لینک، 🖼 استیکر"
+            ),
+            "sub": (
+                "💎 **اشتراک**\n\n"
+                "از ربات → «💎 اشتراک»: پلن رو انتخاب کن → کارت به کارت → عکس رسید رو بفرست → ادمین تایید می‌کنه.\n\n"
+                "بعد از تایید، همه‌ی قابلیت‌های پولی باز می‌شه و `.پنل` وضعیت رو نشون می‌ده."
+            ),
+            "forward": (
+                "📥 **فوروارد محتوا**\n\n"
+                "`.فوروارد <مبدأ> به <مقصد>` — فوروارد واقعی با نام منبع\n"
+                "`.فوروارد با آیدی <مبدأ> به <مقصد>` — کپی + هدر مشخصات\n\n"
+                "نمونه هدر:\n"
+                "  📥 از: گروه خانواده (-100...)\n"
+                "  👤 فرستنده: علی — @ali (123456789)\n"
+                "  🕒 2026-09-22 14:22 (UTC)\n"
+                "  🔗 https://t.me/c/.../55\n"
+                "  ──────────────\n\n"
+                "📋 **ربات → 📥 فوروارد محتوا:**\n"
+                "  لیست چت‌های اکانت (حتی بدون لینک)، فیلتر «فقط کانال/گروه»، جستجو، ورود دستی لینک دعوت،\n"
+                "  ۳ حالت: 🏷 کپی با مشخصات / ↪️ فوروارد / 🔁 کپی بدون نام\n"
+                "  ⚡ سرعت: محتاط/متعادل/سریع/حداکثری (خودکار با FloodWait)\n"
+                "  🖼 استیکر/گیف خودکار از Recents پاک می‌شه\n"
+                "  🗄 کش روی سرور: اول همه روی سرور کش، بعد ارسال — قطع دسترسی هم ادامه می‌ده\n"
+                "  🔓 گیر کرد؟ ▶️ ادامه یا 🔓 بستن / `.فوروارد بستن` — ردیف مرده خودکار آزاد می‌شه\n"
+                "  🗑 حذف کامل: دکمه‌ی «حذف کامل» یا `.فوروارد حذف`\n"
+                "  ♻️ بدون سقف، FloodWait خودکار، پیشرفت ذخیره، ⏹/▶️ توقف/ادامه"
+            ),
+            "storage": (
+                "📂 **ذخیره‌سازی (مسیرها)**\n\n"
+                "هر قابلیت مقصدش جدا تنظیم می‌شه: Saved Messages یا کانال/گروه دلخواه\n\n"
+                "📍 تنظیم: ربات → 📂 ذخیره‌سازی → انتخاب قابلیت →\n"
+                "  • 💾 Saved Messages\n"
+                "  • 📢 چنل/گروه (ارسال آیدی @ یا -100...)\n"
+                "  • 👑 کانال‌ها/گروه‌های من (فقط مالکم) — لیست صفحه‌بندی\n\n"
+                "قابلیت‌ها: ضد حذف، ضد ویرایش، تایم‌دار، دانلود خودکار، ذخیره از لینک، مانیتور\n"
+                "مانیتور: `.مانیتور @src @dst` / `.مانیتور حذف @src` / `.لیست مانیتور`"
+            ),
+            "fun": (
+                "🎲 **سرگرمی**\n\n"
+                "`.تاس 6` — تاس معمولی\n"
+                "`.تاس 🎲 5` — با ایموجی\n"
+                "`.تاس 🎰 32` — اسلات\n\n"
+                "❤️ **قلب:**\n"
+                "`.قلب` — قلب متحرک (روی ریپلای هم میشه)\n"
+                "  بعد از **سین زدنِ طرف مقابل** انیمیشن شروع می‌شه (تا 120ث صبر می‌کنه، بعد خودش شروع می‌کنه)\n"
+                "  ❤️ **قلب — چند انیمیشن خفن:**\n"
+                "`.قلب` — اصلی (۱۲ قلب با حرکت)\n"
+                "`.قلب2` / `.قلب 2` — زنجیره‌ای: ‌🖤 → 🖤💜 → 🖤💜💙 → … تا کامل (با نیم‌فاصله، تک‌اموجی کوچیک)\n"
+                "`.قلب3` — ضربان رنگی (تک‌قلب با تغییر رنگ)\n"
+                "`.قلب4` — نفس (تپش با فاصله)\n"
+                "`.قلب5` — جرقه‌ای ✨\n"
+                "  همه بعد از **سین زدنِ طرف مقابل** شروع می‌شن (پی‌وی تا 120ث، گروه فوری) + ریپلای"
+            ),
+            "protect": (
+                "🛡️ **ضد حذف / ضد ویرایش / Recents**\n\n"
+                "🗑 ضد حذف (فقط پی‌وی): پیامِ حذف‌شده با ترتیب اصلی ذخیره می‌شه\n"
+                "  هدر مثل فوروارد: 📥 از، 👤 فرستنده — @user (id)، 🕒 تاریخ، 🔗 لینک/ID\n"
+                "  مدیا با Recents پاک\n"
+                "✏️ ضد ویرایش: متنِ قبل و بعد ذخیره می‌شه\n\n"
+                "🧹 **Recents:**\n"
+                "`.recents` یا ربات → 📂 ذخیره‌سازی → 🧹 پاکسازی\n"
+                "  پیش‌فرض هیچ استیکر/گیفی به Recents اضافه نمی‌شه (فایل + پاکسازی خودکار)\n"
+                "  حالت‌ها: CLEAN_RECENTS_MODE=document/cleanup/off"
+            ),
+            "spam": (
+                "💬 **دشمن / اسپم**\n\n"
+                "`.دشمن` (ریپلای) — اضافه\n"
+                "`.دشمن @user` — با یوزرنیم\n"
+                "`.دشمن حذف` (ریپلای) — حذف\n"
+                "`.لیست دشمن` — لیست\n"
+                "`.بکنش` (ریپلای) — شروع اسپم\n"
+                "`.بس` — توقف\n\n"
+                "📢 **بنر:**\n"
+                "`.تنظیم بنر 300` (ریپلای) — هر 300ث\n"
+                "`.لیست بنر` — لیست\n"
+                "`.پاکسازی بنر` — حذف همه"
+            ),
+            "save": (
+                "🔗 **ذخیره**\n\n"
+                "`.ذخیره لینک` — ذخیره پیام از لینک (حتی خصوصی اگر عضو باشی)\n"
+                "`.استیکر` (ریپلای) — تبدیل عکس/گیف به استیکر\n\n"
+                "📡 **مانیتور:**\n"
+                "`.مانیتور @src @dst` — ست\n"
+                "`.مانیتور حذف @src` — حذف\n"
+                "`.لیست مانیتور` — لیست"
+            ),
+            "all": None,  # پر می‌شود پایین
+        }
+        # متن کامل برای دکمه همه
+        HELP_TEXTS["all"] = (
+            "📖 **راهنمای کامل — همه دستورات**\n\n"
+            + HELP_TEXTS["mgmt"] + "\n\n"
+            + HELP_TEXTS["sub"] + "\n\n"
+            + HELP_TEXTS["forward"] + "\n\n"
+            + HELP_TEXTS["protect"] + "\n\n"
+            + HELP_TEXTS["fun"] + "\n\n"
+            + HELP_TEXTS["save"] + "\n\n"
+            + HELP_TEXTS["spam"] + "\n\n"
+            + HELP_TEXTS["storage"]
+        )
+
+        def help_kb(page="main"):
+            if page == "main":
+                return [
+                    [Button.inline("⚙️ مدیریت", b"help_mgmt"), Button.inline("💎 اشتراک", b"help_sub")],
+                    [Button.inline("📥 فوروارد", b"help_forward"), Button.inline("📂 ذخیره‌سازی", b"help_storage")],
+                    [Button.inline("🎲/❤️ سرگرمی", b"help_fun"), Button.inline("🛡️ ضدحذف", b"help_protect")],
+                    [Button.inline("💬 دشمن", b"help_spam"), Button.inline("🔗 ذخیره/بنر", b"help_save")],
+                    [Button.inline("📖 همه", b"help_all"), Button.inline("❌ بستن", b"help_close")],
+                ]
+            else:
+                return [
+                    [Button.inline("🔙 بازگشت", b"help_main"), Button.inline("❌ بستن", b"help_close")],
+                ]
+
         async def help_cmd(event):
             if not event.out:
                 return
-
-            text = """📖 **راهنمای کامل**
-
-── مدیریت ──
-`.پنل` — پنل مدیریت
-`.راهنما` — همین راهنما
-`.وضعیت` — وضعیت سرور
-`.روشن نام` — روشن کردن قابلیت
-`.خاموش نام` — خاموش کردن قابلیت
-
-── تاس ──
-`.تاس 6` — تاس معمولی
-`.تاس 🎲 5` — تاس با ایموجی
-`.تاس 🎰 32` — اسلات
-
-── قلب ──
-`.قلب` — قلب متحرک (ریپلای هم میشه)
-
-── ذخیره ──
-`.ذخیره لینک` — ذخیره پیام از لینک
-`.استیکر` — تبدیل استیکر (ریپلای)
-
-── دشمن ──
-`.دشمن` — ریپلای: اضافه کردن
-`.دشمن @user` — اضافه با یوزرنیم
-`.دشمن حذف` — ریپلای: حذف
-`.لیست دشمن` — لیست دشمنان
-`.بکنش` — ریپلای: شروع اسپم
-`.بس` — توقف اسپم
-
-── بنر ──
-`.تنظیم بنر 300` — ریپلای: هر 300ث
-`.لیست بنر` — لیست بنرها
-`.پاکسازی بنر` — حذف بنرها
-
-── مانیتور ──
-`.مانیتور @src @dst` — ست مسیر
-`.مانیتور حذف @src` — حذف
-`.لیست مانیتور` — لیست
-
-── ذخیره‌سازی ──
-مسیر ذخیره هر قابلیت از پنل ربات
-قابل تنظیم است."""
-
-            await event.edit(text)
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            # سعی کن با لوگو بفرستی (عکس + کپشن دکمه‌ای) — بعداً می‌تونی ویدیو جایگزین کنی
+            logo_path = "assets/logo.jpg"
+            # اگر فایل نبود، همون متن بفرست
+            import os
+            use_logo = os.path.exists(logo_path)
+            try:
+                if use_logo:
+                    await self.client.send_file(
+                        event.chat_id,
+                        logo_path,
+                        caption=HELP_MAIN,
+                        buttons=help_kb("main"),
+                        parse_mode="md",
+                    )
+                else:
+                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+            except Exception as e:
+                # فالبک به متن ساده
+                try:
+                    await self.client.send_message(event.chat_id, HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+                except Exception:
+                    self.logger.warning(f"help send failed: {e}")
 
         self._add_handler(
             help_cmd,
             events.NewMessage(pattern=r"^\.راهنما$", outgoing=True),
+        )
+
+        async def help_callback(event):
+            # فقط برای صاحب اکانت
+            if not event.is_private and event.sender_id != self.user_id:
+                # در گروه، فقط صاحب سلف اجازه دارد — بقیه نادیده
+                try:
+                    me = await self.client.get_me()
+                    if event.sender_id != me.id:
+                        await event.answer("فقط صاحب اکانت", alert=True)
+                        return
+                except Exception:
+                    pass
+            data = event.data.decode() if isinstance(event.data, bytes) else str(event.data)
+            if data == "help_close":
+                try:
+                    await event.delete()
+                except Exception:
+                    try:
+                        await self.client.delete_messages(event.chat_id, event.message_id)
+                    except Exception:
+                        pass
+                await event.answer()
+                return
+            if data == "help_main":
+                await event.edit(HELP_MAIN, buttons=help_kb("main"), parse_mode="md")
+                await event.answer()
+                return
+            key = data.replace("help_", "", 1)
+            text = HELP_TEXTS.get(key)
+            if text:
+                # اگر کپشن عکس باشه سقف 1024 ـه، برای "همه" متن طولانیه — جداگانه بفرست
+                try:
+                    # تشخیص اینکه پیام عکس داره
+                    is_media = bool(getattr(event.message, "media", None) or getattr(event.message, "photo", None))
+                except Exception:
+                    is_media = False
+                if is_media and len(text) > 1000:
+                    # برای متن طولانی، پیام جدید بفرست و قبلی رو پاک کن
+                    try:
+                        await self.client.send_message(event.chat_id, text, buttons=help_kb(key), parse_mode="md")
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        # فالبک: همون ادیت با برش
+                        await event.edit(text[:1000] + "\n…", buttons=help_kb(key), parse_mode="md")
+                else:
+                    await event.edit(text, buttons=help_kb(key), parse_mode="md")
+                await event.answer()
+            else:
+                await event.answer("پیدا نشد", alert=True)
+
+        self._add_handler(
+            help_callback,
+            events.CallbackQuery(data=re.compile(b"help_")),
         )
 
         # ── .روشن ──
@@ -224,6 +395,23 @@ class PanelPlugin(BasePlugin):
             events.NewMessage(pattern=r"^\.وضعیت$", outgoing=True),
         )
 
+        # ── .recents ──
+        async def recents_cmd(event):
+            if not event.out:
+                return
+
+            from core.media import clear_recent_stickers
+            ok = await clear_recent_stickers(self.client)
+            await event.edit(
+                "✅ لیست استیکرهای اخیر پاک شد."
+                if ok else "❌ پاکسازی ناموفق بود."
+            )
+
+        self._add_handler(
+            recents_cmd,
+            events.NewMessage(pattern=r"^\.recents$", outgoing=True),
+        )
+
         self.logger.info("loaded")
 
     def _resolve_feature(self, name: str) -> str | None:
@@ -261,8 +449,6 @@ class PanelPlugin(BasePlugin):
             "ضد ویرایش": "anti_edit",
             "دشمن": "auto_response",
             "مانیتور": "channel_monitor",
-            "دانلود": "auto_download",
-            "آپلود": "upload_url",
         }
 
         return manual.get(name, None)

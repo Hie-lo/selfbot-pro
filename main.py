@@ -3,12 +3,13 @@
 """
 
 import logging
+import os
 import sys
 
 from telegram import Update
 from telegram.ext import Application, ContextTypes
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, LOGS_DIR
 from database.db import init_db
 from core.engine import startup, shutdown
 from bot.handlers import register_handlers
@@ -20,7 +21,9 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/bot.log", encoding="utf-8"),
+        logging.FileHandler(
+            os.path.join(LOGS_DIR, "bot.log"), encoding="utf-8"
+        ),
     ],
 )
 
@@ -44,6 +47,16 @@ async def post_shutdown(app: Application):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled bot exception", exc_info=context.error)
+
+    # کاربر نباید بی‌جواب بماند
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کنید.",
+            )
+        except Exception:
+            pass
 
 
 def main():

@@ -52,4 +52,74 @@ for _d in [SESSIONS_DIR, DOWNLOADS_DIR, LOGS_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 # ── Subscription ──
-MONTHLY_PRICE_TOMAN: int = 150_000
+
+# پلن‌های قابل خرید — key: کلید داخلی
+PLANS: dict[str, dict] = {
+    "1m": {"title": "۱ ماهه", "days": 30, "price": 150_000},
+    "3m": {"title": "۳ ماهه", "days": 90, "price": 400_000},
+    "6m": {"title": "۶ ماهه", "days": 180, "price": 750_000},
+    "12m": {"title": "۱۲ ماهه", "days": 365, "price": 1_300_000},
+}
+
+# برای سازگاری با نسخه قبلی
+MONTHLY_PRICE_TOMAN: int = PLANS["1m"]["price"]
+
+# ── پرداخت کارت به کارت ──
+CARD_NUMBER: str = os.getenv("CARD_NUMBER", "6037-0000-0000-0000")
+CARD_HOLDER: str = os.getenv("CARD_HOLDER", "نام صاحب کارت")
+BANK_NAME: str = os.getenv("BANK_NAME", "")
+
+# حداکثر حجم عکس رسید (مگابایت)
+RECEIPT_MAX_MB: int = int(os.getenv("RECEIPT_MAX_MB", "10"))
+
+# ── Recents (استیکر و گیف‌های اخیر) ──
+# document → ارسال به‌صورت فایل (هیچ‌وقت به Recents اضافه نمی‌شود) — پیش‌فرض
+# cleanup  → ارسال به‌صورت استیکر/گیف واقعی + حذف از Recents با API
+# off      → رفتار قبلی (ممکن است Recents را پر کند)
+CLEAN_RECENTS_MODE: str = os.getenv("CLEAN_RECENTS_MODE", "document").strip().lower()
+# ── فوروارد: سرعت و مقاومت در برابر محدودیت تلگرام ──
+# هیچ سقفی روی تعداد پیام نیست؛ job تا پایان ادامه می‌دهد و پس از
+# ری‌استارت سرور هم از همان‌جا ادامه پیدا می‌کند.
+FORWARD_BATCH_SIZE: int = int(os.getenv("FORWARD_BATCH_SIZE", "20"))
+FORWARD_BATCH_PAUSE: float = float(os.getenv("FORWARD_BATCH_PAUSE", "1.0"))
+
+# ── سرعت (پریست): safe | balanced | fast | max ──
+# خود موتور با بازخورد تلگرام تنظیمش می‌کند (Pacer): FloodWait خورد → کندتر،
+# چند پیام بی‌مشکل رفت → تندتر. پس لازم نیست دستی وسواس کنی.
+FORWARD_SPEED: str = os.getenv("FORWARD_SPEED", "balanced").strip().lower()
+
+# مقدار دستی (اختیاری) — اگر ست شود، جای pause پریست را می‌گیرد.
+# ⚠️ اگر مقدار قدیمی و کند باشد (مثل ۰.۸) سرعت پایین می‌ماند؛ برای همین
+# هشدار می‌دهیم تا از .env حذفش کنی و با پریست‌ها کار کنی.
+FORWARD_MSG_PAUSE_ENV: str | None = os.getenv("FORWARD_MSG_PAUSE")
+FORWARD_MSG_PAUSE: float = (
+    float(FORWARD_MSG_PAUSE_ENV) if FORWARD_MSG_PAUSE_ENV else 0.2
+)
+FORWARD_SPEED_ENV: str | None = os.getenv("FORWARD_SPEED")
+
+_PRESET_PAUSE = {"safe": 0.8, "balanced": 0.2, "fast": 0.08, "max": 0.0}
+_SLOW_ENV_WARNING = bool(
+    os.getenv("FORWARD_MSG_PAUSE")
+    and not os.getenv("FORWARD_SPEED")
+    and FORWARD_MSG_PAUSE > _PRESET_PAUSE.get(FORWARD_SPEED, 0.2)
+)
+
+# چند پیام همزمان (0 = از پریست)
+FORWARD_CONCURRENCY: int = int(os.getenv("FORWARD_CONCURRENCY", "0"))
+
+# ── فاز جمع‌آوری کش (خواندن تاریخچه، سبک‌تر از ارسال) ──
+FORWARD_CACHE_BATCH: int = int(os.getenv("FORWARD_CACHE_BATCH", "100"))
+FORWARD_CACHE_PAUSE: float = float(os.getenv("FORWARD_CACHE_PAUSE", "0.15"))
+FORWARD_MAX_FLOOD_WAIT: int = int(os.getenv("FORWARD_MAX_FLOOD_WAIT", "86400"))
+
+# ── حالت کش (ذخیره روی سرور قبل از ارسال) ──
+# وقتی روشن باشد، اول همه پیام‌ها روی سرور ذخیره می‌شوند و بعد ارسال
+# می‌شوند؛ اگر وسط کار دسترسی به مبدأ از دست برود، ارسال ادامه می‌یابد.
+FORWARD_CACHE_MODE: bool = os.getenv("FORWARD_CACHE_MODE", "1").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+FORWARD_CACHE_CAPTURE_MEDIA: bool = os.getenv(
+    "FORWARD_CACHE_CAPTURE_MEDIA", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+FORWARD_CACHE_MAX_GB: float = float(os.getenv("FORWARD_CACHE_MAX_GB", "5"))
+FORWARD_CACHE_MEDIA_MAX_MB: int = int(os.getenv("FORWARD_CACHE_MEDIA_MAX_MB", "100"))

@@ -4,7 +4,6 @@
 import html
 import asyncio
 import logging
-from datetime import datetime, timezone
 from bot.keyboards import monitor_menu_kb, mon_confirm_delete_kb
 from telegram import Update
 from telegram.error import NetworkError, TimedOut, RetryAfter
@@ -13,18 +12,22 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ConversationHandler,
     ContextTypes,
     filters,
 )
 
-from config import ADMIN_TELEGRAM_ID, MONTHLY_PRICE_TOMAN, LOGIN_TIMEOUT
+from config import (
+    ADMIN_TELEGRAM_ID,
+    MONTHLY_PRICE_TOMAN,
+    LOGIN_TIMEOUT,
+    MAX_LOGIN_ATTEMPTS,
+)
 from bot.texts import t
 from bot.keyboards import (
-    main_menu_kb,
     features_kb,
     storage_menu_kb,
     storage_target_kb,
+    storage_owned_kb,
     confirm_kb,
     back_kb,
     numpad_kb,
@@ -32,6 +35,51 @@ from bot.keyboards import (
     ALL_FEATURES,
 )
 from database import db
+from bot.subscription import (
+    check_subscription,
+    cb_subscription,
+    cb_buy_plan,
+    cb_send_receipt,
+    cb_my_requests,
+    handle_receipt_photo,
+    is_admin as is_admin_id,
+)
+from bot.forward import (
+    cb_fwd_start,
+    cb_fwd_nav,
+    cb_fwd_page,
+    cb_fwd_pick,
+    cb_fwd_filter,
+    cb_fwd_search,
+    cb_fwd_clear_search,
+    cb_fwd_dst_saved,
+    cb_fwd_manual,
+    cb_fwd_join,
+    cb_fwd_cancel_join,
+    cb_fwd_opt,
+    cb_fwd_go,
+    cb_fwd_stop,
+    cb_fwd_resume,
+    cb_fwd_unlock,
+    cb_fwd_delete,
+    cb_fwd_delete_confirm,
+    cb_fwd_delete_cancel,
+    handle_fwd_search_input,
+    handle_fwd_manual_input,
+)
+from bot.admin import (
+    cb_admin,
+    cb_admin_stats,
+    cb_admin_requests,
+    cb_admin_approve,
+    cb_admin_reject,
+    cb_admin_users,
+    cb_admin_user,
+    cb_admin_grant,
+    cb_admin_cancel_sub,
+    cb_admin_ban,
+    handle_reject_reason,
+)
 from core.security import (
     validate_phone,
     validate_2fa_password,
@@ -56,18 +104,10 @@ logger = logging.getLogger("bot.handlers")
 # ═══════════════════════════════════
 
 
-async def check_subscription(user: dict) -> bool:
-    if not user:
-        return False
-    if user.get("plan") == "free":
-        return False
-    expires = user.get("plan_expires_at")
-    if not expires:
-        return False
-    now = datetime.now(timezone.utc)
-    if hasattr(expires, "tzinfo") and expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    return expires > now
+def main_kb(tg_id: int, has_account: bool):
+    """منوی اصلی — دکمه پنل ادمین فقط برای ادمین"""
+    from bot.keyboards import main_menu_kb
+    return main_menu_kb(has_account, is_admin=is_admin_id(tg_id))
 
 
 async def get_or_create_user(update: Update) -> dict:
@@ -114,7 +154,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = await db.get_session(user["id"])
     await update.message.reply_text(
         t("welcome", name=name),
-        reply_markup=main_menu_kb(session is not None),
+        reply_markup=main_kb(update.effective_user.id, session is not None),
     )
 
 
@@ -131,20 +171,8 @@ async def cb_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "کاربر"
     await query.edit_message_text(
         t("welcome", name=name),
-        reply_markup=main_menu_kb(session is not None),
+        reply_markup=main_kb(update.effective_user.id, session is not None),
     )
-
-
-async def cb_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = await get_or_create_user(update)
-    has_sub = await check_subscription(user)
-    if has_sub:
-        text = t("subscription_active", expires=str(user["plan_expires_at"])[:10])
-    else:
-        text = t("no_subscription", price=f"{MONTHLY_PRICE_TOMAN:,}")
-    await query.edit_message_text(text, reply_markup=back_kb())
 
 
 async def cb_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,7 +208,7 @@ async def cb_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan_text = "✅ فعال" if has_sub else "❌ ندارید"
     await query.edit_message_text(
         t("panel_title", status=status, plan=plan_text),
-        reply_markup=main_menu_kb(True),
+        reply_markup=main_kb(update.effective_user.id, True),
     )
 
 
@@ -228,24 +256,40 @@ async def cb_toggle_feature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ اشتراک ندارید", show_alert=True)
         return
 
+    from core.client_manager import get_client
+    from core.plugin_manager import (
+        TOGGLEABLE_PLUGINS,
+        enable_plugin,
+        disable_plugin,
+    )
+
+    # قابلیتی که پلاگین ندارد، نباید اصلاً قابل روشن کردن باشد
+    if feature_name not in TOGGLEABLE_PLUGINS:
+        await query.answer("❌ این قابلیت پشتیبانی نمی‌شود", show_alert=True)
+        return
+
+    client = await get_client(user["id"])
+    if not client:
+        await query.answer("❌ اکانت متصل نیست", show_alert=True)
+        return
+
     is_on = await db.is_feature_enabled(user["id"], feature_name)
     new_state = not is_on
+
+    # اول پلاگین، بعد ذخیره در DB (تا وضعیت نمایش‌داده‌شده واقعی باشد)
+    if new_state:
+        loaded = await enable_plugin(user["id"], feature_name, client)
+        if not loaded:
+            await query.answer("❌ فعال‌سازی ناموفق بود", show_alert=True)
+            return
+    else:
+        await disable_plugin(user["id"], feature_name)
+
     await db.set_feature(user["id"], feature_name, new_state)
     await db.audit_log(
         user["id"], "feature_toggle",
         f"{feature_name} -> {'ON' if new_state else 'OFF'}",
     )
-
-    # load/unload plugin در لحظه
-    from core.client_manager import get_client
-    from core.plugin_manager import enable_plugin, disable_plugin
-
-    client = await get_client(user["id"])
-    if client:
-        if new_state:
-            await enable_plugin(user["id"], feature_name, client)
-        else:
-            await disable_plugin(user["id"], feature_name)
 
     from bot.keyboards import ALL_FEATURES
     fname = ALL_FEATURES.get(feature_name, feature_name)
@@ -289,12 +333,47 @@ async def cb_storage_feature(update: Update, context: ContextTypes.DEFAULT_TYPE)
     current = "تنظیم نشده"
     if target:
         current = "💾 Saved Messages" if target["target_type"] == "saved" else f"📢 {target.get('target_title', target['target_id'])}"
-    from bot.keyboards import STORAGE_FEATURES
     fname = ALL_FEATURES.get(feature_name, feature_name)
     await query.edit_message_text(
         f"📂 **{fname}**\n\nمسیر فعلی: {current}\n\nمقصد جدید:",
         reply_markup=storage_target_kb(feature_name),
         parse_mode="Markdown",
+    )
+
+
+async def cb_recents_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید پاکسازی لیست استیکرهای Recent"""
+    query = update.callback_query
+    await query.answer()
+
+    from bot.keyboards import recents_clear_kb
+    await query.edit_message_text(
+        t("recents_ask"),
+        reply_markup=recents_clear_kb(),
+        parse_mode="HTML",
+    )
+
+
+async def cb_recents_clear_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پاک کردن لیست استیکرهای اخیر اکانت"""
+    query = update.callback_query
+
+    user = await get_or_create_user(update)
+    client = await client_manager.get_client(user["id"])
+    if not client:
+        await query.answer(t("error_no_account"), show_alert=True)
+        return
+
+    from core.media import clear_recent_stickers
+    ok = await clear_recent_stickers(client)
+    await db.audit_log(user["id"], "recents_clear", "ok" if ok else "failed")
+
+    await query.answer(
+        t("recents_done") if ok else t("recents_failed"), show_alert=True
+    )
+    await query.edit_message_text(
+        t("recents_done") if ok else t("recents_failed"),
+        reply_markup=back_kb("storage"),
     )
 
 
@@ -353,6 +432,123 @@ async def cb_storage_target_custom(update: Update, context: ContextTypes.DEFAULT
 
 
 # ============================================================
+# انتخاب مسیر از کانال/گروه‌های مالک (فقط creator)
+# ============================================================
+STORAGE_OWN_PER_PAGE = 8
+
+async def cb_storage_target_owned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # starget_{feature}_own
+    feature_name = data[len("starget_"):-len("_own")]
+    if feature_name not in [k for k,_ in __import__("bot.keyboards", fromlist=["STORAGE_FEATURES"]).STORAGE_FEATURES]:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    try:
+        items = await fw.load_dialogs(user["id"])
+    except ValueError as e:
+        msg = "❌ اکانت متصل نیست." if str(e) == "account_not_connected" else "❌ خواندن لیست چت‌ها ناموفق بود."
+        await query.edit_message_text(msg, reply_markup=back_kb("storage"))
+        return
+    owned = fw.filter_owned_dialogs(items)
+    pages = max(1, (len(owned) + STORAGE_OWN_PER_PAGE - 1) // STORAGE_OWN_PER_PAGE)
+    chunk = owned[0:STORAGE_OWN_PER_PAGE]
+    fname = ALL_FEATURES.get(feature_name, feature_name)
+    text = (
+        f"👑 <b>کانال‌ها و گروه‌های شما (فقط مالک)</b>\n\n"
+        f"برای «{html.escape(str(fname))}» یک مقصد انتخاب کنید:\n"
+        f"تعداد مالک: {len(owned)} — صفحه 1 از {pages}\n\n"
+        f"فقط چت‌هایی که شما مالک (creator) آن هستید نمایش داده می‌شود؛ با دسترسی تضمین‌شده."
+
+    )
+    if not owned:
+        text += "\n📭 هیچ کانال/گروهی که مالکش باشید پیدا نشد."
+    await query.edit_message_text(text, reply_markup=storage_owned_kb(chunk, 0, pages, feature_name), parse_mode="HTML")
+
+
+async def cb_storage_owned_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    import re
+    m = re.match(r"^starget_(.+)_own_p(\d+)$", query.data)
+    if not m:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    feature_name, page_str = m.group(1), m.group(2)
+    page = int(page_str)
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    try:
+        items = await fw.load_dialogs(user["id"])
+    except ValueError as e:
+        msg = "❌ اکانت متصل نیست." if str(e) == "account_not_connected" else "❌ خواندن لیست چت‌ها ناموفق بود."
+        await query.edit_message_text(msg, reply_markup=back_kb("storage"))
+        return
+    owned = fw.filter_owned_dialogs(items)
+    pages = max(1, (len(owned) + STORAGE_OWN_PER_PAGE - 1) // STORAGE_OWN_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = owned[page * STORAGE_OWN_PER_PAGE:(page + 1) * STORAGE_OWN_PER_PAGE]
+    fname = ALL_FEATURES.get(feature_name, feature_name)
+    text = (
+        f"👑 <b>کانال‌ها و گروه‌های شما (فقط مالک)</b>\n\n"
+        f"برای «{html.escape(str(fname))}» یک مقصد انتخاب کنید:\n"
+        f"تعداد مالک: {len(owned)} — صفحه {page+1} از {pages}\n\n"
+        f"فقط چت‌هایی که شما مالک (creator) آن هستید نمایش داده می‌شود؛ با دسترسی تضمین‌شده."
+
+    )
+    await query.edit_message_text(text, reply_markup=storage_owned_kb(chunk, page, pages, feature_name), parse_mode="HTML")
+
+
+async def cb_storage_owned_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    import re
+    m = re.match(r"^starget_(.+)_own_i(\d+)$", query.data)
+    if not m:
+        await query.edit_message_text(t("error_general"), reply_markup=back_kb("storage"))
+        return
+    feature_name, idx_str = m.group(1), m.group(2)
+    idx = int(idx_str)
+    user = await get_or_create_user(update)
+    from core import forwarder as fw
+    from telethon import utils
+    item = fw.get_dialog(user["id"], idx)
+    if not item:
+        await query.answer("لیست قدیمی شده؛ دوباره باز کنید", show_alert=True)
+        return
+    # اطمینان: فقط مالک اجازه دارد
+    ent = item.get("entity")
+    if not fw.is_owner(ent):
+        await query.answer("❌ فقط کانال/گروهی که مالکش هستید قابل انتخاب است", show_alert=True)
+        return
+    try:
+        target_id = utils.get_peer_id(ent)
+    except Exception:
+        await query.edit_message_text("❌ آیدی مقصد نامعتبر است.", reply_markup=back_kb("storage"))
+        return
+    target_title = item.get("name") or str(target_id)
+    safe_title = html.escape(str(target_title))
+    safe_feature = html.escape(str(ALL_FEATURES.get(feature_name, feature_name)))
+    try:
+        await db.set_storage_target(user["id"], feature_name, "custom", target_id, target_title)
+        await db.audit_log(user["id"], "storage_set", f"{feature_name} -> {target_title} ({target_id}) [owned]")
+    except Exception as e:
+        logger.error(f"DB storage save failed (owned): {e}")
+        await query.edit_message_text("❌ خطا در ذخیره اطلاعات در دیتابیس.", reply_markup=back_kb("storage"))
+        return
+    await query.edit_message_text(
+        f"✅ مسیر ذخیره‌سازی «<b>{safe_feature}</b>» با موفقیت تنظیم شد:\n\n"
+        f"📂 نام مقصد: <b>{safe_title}</b>\n"
+        f"🆔 آیدی عددی: <code>{target_id}</code>\n"
+        f"👑 مالک: شما",
+        reply_markup=back_kb("storage"),
+        parse_mode="HTML",
+    )
+
+
+# ============================================================
 # دریافت و پردازش آیدی/یوزرنیم کانال ارسالی کاربر
 # ============================================================
 async def handle_storage_target_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,7 +582,7 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
     if not client:
         await update.message.reply_text(
             "❌ اکانت متصل نیست. ابتدا اکانت خود را وصل کنید.",
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         context.user_data.pop("awaiting_storage_target", None)
         return
@@ -447,7 +643,7 @@ async def handle_storage_target_input(update: Update, context: ContextTypes.DEFA
         f"✅ مسیر ذخیره‌سازی «<b>{safe_feature}</b>» با موفقیت تنظیم شد:\n\n"
         f"📂 نام مقصد: <b>{safe_title}</b>\n"
         f"🆔 آیدی عددی: <code>{target_id}</code>",
-        reply_markup=main_menu_kb(True),
+        reply_markup=main_kb(update.effective_user.id, True),
         parse_mode="HTML",
     )
 
@@ -475,7 +671,9 @@ async def cb_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(t("login_already"), reply_markup=back_kb())
         return
 
-    if not check_rate_limit(user["telegram_id"], "login", 3, 300):
+    if not check_rate_limit(
+        user["telegram_id"], "login", MAX_LOGIN_ATTEMPTS, 300
+    ):
         await query.edit_message_text(t("login_too_many"), reply_markup=back_kb())
         return
 
@@ -514,7 +712,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_send(
             update.effective_chat,
             t("login_failed", error=str(e)),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         context.user_data.clear()
         return
@@ -525,7 +723,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_send(
             update.effective_chat,
             t("login_failed", error="خطا در ارسال کد"),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         return
 
@@ -600,7 +798,7 @@ async def cb_code_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         "❌ ورود لغو شد.",
-        reply_markup=main_menu_kb(False),
+        reply_markup=main_kb(update.effective_user.id, False),
     )
 
 
@@ -624,7 +822,7 @@ async def _process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code
         context.user_data.clear()
         await query.edit_message_text(
             t("login_failed", error=str(e)),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         return
     except Exception as e:
@@ -633,7 +831,7 @@ async def _process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code
         context.user_data.clear()
         await query.edit_message_text(
             t("login_failed", error="کد اشتباه یا منقضی شده"),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         return
 
@@ -650,13 +848,13 @@ async def _process_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code
         await _finalize_and_save(user, context)
         await query.edit_message_text(
             t("login_success"),
-            reply_markup=main_menu_kb(True),
+            reply_markup=main_kb(update.effective_user.id, True),
         )
     except Exception as e:
         logger.error(f"Finalize failed user {user['id']}: {type(e).__name__}: {e}")
         await query.edit_message_text(
             t("login_failed", error="خطا در ذخیره سشن"),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
 
 
@@ -665,7 +863,25 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Router واحد برای همه پیام‌های متنی PV
     بر اساس state در user_data تصمیم می‌گیره
     """
-    # اولویت ۱: storage target
+    # اولویت ۰: ادمین در حال نوشتن علت رد درخواست
+    if context.user_data.get("awaiting_reject_req"):
+        if is_admin_id(update.effective_user.id):
+            await handle_reject_reason(update, context)
+        else:
+            context.user_data.pop("awaiting_reject_req", None)
+        return
+
+    # اولویت ۱: جستجوی چت برای فوروارد
+    if context.user_data.get("awaiting_fwd_search"):
+        await handle_fwd_search_input(update, context)
+        return
+
+    # اولویت ۲: ورود دستی مبدأ/مقصد فوروارد
+    if context.user_data.get("awaiting_fwd_manual"):
+        await handle_fwd_manual_input(update, context)
+        return
+
+    # اولویت ۳: storage target
     if context.user_data.get("awaiting_storage_target"):
         await handle_storage_target_input(update, context)
         return
@@ -721,7 +937,7 @@ async def handle_2fa_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send(
             update.effective_chat,
             t("login_failed", error="رمز دوعاملی اشتباه"),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         return
 
@@ -730,14 +946,14 @@ async def handle_2fa_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send(
             update.effective_chat,
             t("login_success"),
-            reply_markup=main_menu_kb(True),
+            reply_markup=main_kb(update.effective_user.id, True),
         )
     except Exception as e:
         logger.error(f"Finalize 2FA failed user {user['id']}: {type(e).__name__}: {e}")
         await safe_send(
             update.effective_chat,
             t("login_failed", error="خطا در ذخیره سشن"),
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
 
 
@@ -757,6 +973,11 @@ async def _finalize_and_save(user: dict, context: ContextTypes.DEFAULT_TYPE):
         await db.update_session_status(user["id"], "connected")
         await db.audit_log(user["id"], "login_success", "")
     except Exception:
+        from core.plugin_manager import unload_all_for_user
+        try:
+            await unload_all_for_user(user["id"])
+        except Exception:
+            pass
         try:
             await client_manager.disconnect_client(user["id"])
         except Exception:
@@ -799,7 +1020,7 @@ async def cb_confirm_disconnect(update: Update, context: ContextTypes.DEFAULT_TY
     await db.audit_log(user["id"], "disconnect", "")
     await query.edit_message_text(
         "✅ اکانت قطع شد.",
-        reply_markup=main_menu_kb(False),
+        reply_markup=main_kb(update.effective_user.id, False),
     )
 
 
@@ -847,7 +1068,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = await db.get_session(user["id"])
     await update.message.reply_text(
         "❌ عملیات لغو شد.",
-        reply_markup=main_menu_kb(session is not None),
+        reply_markup=main_kb(update.effective_user.id, session is not None),
     )
 
 # ═══════════════════════════════════
@@ -868,12 +1089,13 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid args")
         return
-    from datetime import timedelta
+    from core.security import calc_plan_expiry
     user = await db.get_user(target_id)
     if not user:
         await update.message.reply_text("User not found")
         return
-    expires = datetime.now(timezone.utc) + timedelta(days=days)
+    # اگر اشتراک فعلی هنوز فعال است، روزها به آن اضافه می‌شود
+    expires = calc_plan_expiry(days, user.get("plan_expires_at"))
     await db.update_user(target_id, plan="premium", plan_expires_at=expires)
     await db.audit_log(user["id"], "subscription_activated", f"days={days}")
     await update.message.reply_text(
@@ -884,16 +1106,21 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
         return
-    users = await db.get_all_active_users()
+    users = await db.get_all_users()
     if not users:
         await update.message.reply_text("No users")
         return
-    text = "👥 **کاربران:**\n\n"
-    for i, u in enumerate(users, 1):
+
+    lines = []
+    for i, u in enumerate(users[:100], 1):
         has_sub = await check_subscription(u)
         sub = "💎" if has_sub else "⚪"
-        text += f"{i}. {sub} `{u['telegram_id']}` {u.get('first_name', '')} @{u.get('username', '-')}\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+        name = html.escape((u.get("first_name") or "")[:24])
+        uname = html.escape(u.get("username") or "-")
+        lines.append(f"{i}. {sub} <code>{u['telegram_id']}</code> {name} @{uname}")
+
+    text = "👥 <b>کاربران</b> ({}):\n\n".format(len(users)) + "\n".join(lines)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 # ═══════════════════════════════════
 # مانیتور کانال — پنل
@@ -924,7 +1151,6 @@ async def cb_monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_mon_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """فعال/غیرفعال کردن یک مسیر"""
     query = update.callback_query
-    await query.answer()
 
     src_id = int(query.data.replace("mon_toggle_", ""))
     user = await get_or_create_user(update)
@@ -971,7 +1197,6 @@ async def cb_mon_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_mon_confirm_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """حذف قطعی مسیر"""
     query = update.callback_query
-    await query.answer()
 
     src_id = int(query.data.replace("mon_confirm_del_", ""))
     user = await get_or_create_user(update)
@@ -1050,13 +1275,12 @@ async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TY
     user = await get_or_create_user(update)
     src_ref = context.user_data.get("mon_source_ref", "")
     dst_ref = update.message.text.strip()
-    safe_dst = html.escape(dst_ref)
 
     # اعتبارسنجی
     if not src_ref:
         await update.message.reply_text(
             "❌ منبع مشخص نیست. از اول شروع کنید.",
-            reply_markup=main_menu_kb(True),
+            reply_markup=main_kb(update.effective_user.id, True),
         )
         context.user_data.clear()
         return
@@ -1076,7 +1300,7 @@ async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TY
     if not client:
         await update.message.reply_text(
             "❌ اکانت متصل نیست.",
-            reply_markup=main_menu_kb(False),
+            reply_markup=main_kb(update.effective_user.id, False),
         )
         context.user_data.clear()
         return
@@ -1108,7 +1332,7 @@ async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TY
             f"✅ مسیر ثبت شد:\n"
             f"📥 منبع: <b>{safe_src_title}</b>\n"
             f"📤 مقصد: <b>{safe_dst_title}</b>",
-            reply_markup=main_menu_kb(True),
+            reply_markup=main_kb(update.effective_user.id, True),
             parse_mode="HTML",
         )
         logger.info(f"Monitor route added: {src_id} -> {dst_id}")
@@ -1128,6 +1352,59 @@ async def handle_mon_dest_input(update: Update, context: ContextTypes.DEFAULT_TY
 # ═══════════════════════════════════
 # ثبت هندلرها
 # ═══════════════════════════════════
+
+
+async def notify_job_progress(user_db_id: int, job, row: dict = None):
+    """
+    اطلاع‌رسانی پیشرفت job ادامه‌یافته به کاربر.
+    (وقتی سرور ری‌استارت می‌شود، job خودکار ادامه پیدا می‌کند و اینجا
+    پیشرفت به کاربر گزارش می‌شود)
+    """
+    from telegram import Bot
+    from config import BOT_TOKEN
+
+    chat_id = job.chat_id or (row or {}).get("chat_id")
+    message_id = job.message_id or (row or {}).get("message_id")
+    if not chat_id:
+        return
+
+    from core import forwarder
+    from core import cache_forward
+
+    # job دو مرحله‌ای (کش روی سرور) خلاصه‌ی خودش را دارد
+    if isinstance(job, cache_forward.CacheForwardJob):
+        stats = None
+        if job.db_id and job.phase == "send":
+            try:
+                stats = await db.cache_stats(job.db_id)
+            except Exception as e:
+                logger.debug(f"cache stats skipped: {e}")
+        text = cache_forward.cache_job_summary(job, stats)
+    else:
+        text = forwarder.job_summary(job)
+
+    from bot.keyboards import fwd_running_kb, fwd_done_kb
+    markup = (
+        fwd_running_kb(job) if job.state in ("running", "waiting")
+        else fwd_done_kb(paused=job.state != "done")
+    )
+
+    bot = Bot(BOT_TOKEN)
+    try:
+        if message_id:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=text, reply_markup=markup, parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"job progress notify skipped: {e}")
+    finally:
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
 
 
 def register_handlers(app: Application):
@@ -1160,8 +1437,13 @@ def register_handlers(app: Application):
     # ذخیره‌سازی — ترتیب مهمه!
     app.add_handler(CallbackQueryHandler(cb_storage, pattern="^storage$"))
     app.add_handler(CallbackQueryHandler(cb_monitor_menu, pattern="^storage_monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(cb_recents_clear, pattern="^recents_clear$"))
+    app.add_handler(CallbackQueryHandler(cb_recents_clear_ok, pattern="^recents_clear_ok$"))
     app.add_handler(CallbackQueryHandler(cb_storage_target_saved, pattern=r"^starget_.+_saved$"))
     app.add_handler(CallbackQueryHandler(cb_storage_target_custom, pattern=r"^starget_.+_custom$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_target_owned, pattern=r"^starget_.+_own$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_owned_page, pattern=r"^starget_.+_own_p\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_storage_owned_pick, pattern=r"^starget_.+_own_i\d+$"))
     app.add_handler(CallbackQueryHandler(cb_storage_feature, pattern=r"^storage_"))
 
     # مانیتور
@@ -1177,7 +1459,53 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_confirm_disconnect, pattern="^confirm_disconnect$"))
     app.add_handler(CallbackQueryHandler(cb_help, pattern="^help$"))
 
-    # ── 3. Text Router (state-based) ──
+    # ── 3. خرید اشتراک ──
+    app.add_handler(CallbackQueryHandler(cb_buy_plan, pattern=r"^buyplan_"))
+    app.add_handler(CallbackQueryHandler(cb_send_receipt, pattern=r"^sendreceipt_"))
+    app.add_handler(CallbackQueryHandler(cb_my_requests, pattern="^my_requests$"))
+
+    # ── 4. پنل ادمین ──
+    app.add_handler(CallbackQueryHandler(cb_admin, pattern="^admin$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_stats, pattern="^admin_stats$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_requests, pattern="^admin_requests$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_users, pattern=r"^admin_users_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_user, pattern=r"^admin_user_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_approve, pattern=r"^adm_ok_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_reject, pattern=r"^adm_no_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_grant, pattern=r"^admsub_"))
+    app.add_handler(CallbackQueryHandler(cb_admin_cancel_sub, pattern=r"^admcancel_"))
+    app.add_handler(CallbackQueryHandler(cb_admin_ban, pattern=r"^admban_"))
+
+    # ── 5. فوروارد محتوا ──
+    app.add_handler(CallbackQueryHandler(cb_fwd_start, pattern="^fwd_start$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_nav, pattern=r"^fwd_show_(src|dst)$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_page, pattern=r"^fwd_(src|dst)_p\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_pick, pattern=r"^fwd_(src|dst)_i\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_filter, pattern="^fwd_flt$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_search, pattern="^fwd_srch$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_clear_search, pattern="^fwd_srch_clr$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_dst_saved, pattern="^fwd_dst_saved$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_manual, pattern=r"^fwd_(src|dst)_manual$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_join, pattern=r"^fwd_join_"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_cancel_join, pattern="^fwd_cancel_join$"))
+    app.add_handler(CallbackQueryHandler(
+        cb_fwd_opt, pattern=r"^fwd_(limit|mode|media|cache|cachemedia|speed)$"
+    ))
+    app.add_handler(CallbackQueryHandler(cb_fwd_go, pattern="^fwd_go$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_stop, pattern=r"^fwd_stop_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_resume, pattern="^fwd_resume$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_unlock, pattern="^fwd_unlock$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete, pattern="^fwd_delete$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete_confirm, pattern="^fwd_delete_confirm$"))
+    app.add_handler(CallbackQueryHandler(cb_fwd_delete_cancel, pattern="^fwd_delete_cancel$"))
+
+    # ── 6. عکس رسید پرداخت ──
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE,
+        handle_receipt_photo,
+    ))
+
+    # ── 7. Text Router (state-based) ──
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
         handle_text_router,

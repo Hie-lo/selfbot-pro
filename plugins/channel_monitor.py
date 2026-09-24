@@ -9,6 +9,7 @@
 from telethon import events
 from telethon import utils
 from plugins.base import BasePlugin
+from core.media import send_media_clean
 from database import db
 
 
@@ -24,7 +25,7 @@ class ChannelMonitorPlugin(BasePlugin):
     async def start(self):
         await self._load_routes()
 
-        self.logger.info(f"ChannelMonitor loaded with {len(self._routes)} routes")
+        self.logger.info("ChannelMonitor loaded with %s routes", len(self._routes))
 
         async def cmd_handler(event):
             if not event.out:
@@ -71,7 +72,8 @@ class ChannelMonitorPlugin(BasePlugin):
 
             try:
                 if event.message.media:
-                    await self.client.send_file(
+                    await send_media_clean(
+                        self.client,
                         dest_id,
                         event.message.media,
                         caption=event.message.text or "",
@@ -81,7 +83,7 @@ class ChannelMonitorPlugin(BasePlugin):
                         dest_id,
                         event.message.text or "",
                     )
-                self.logger.info(f"✅ Forwarded OK")
+                self.logger.info("✅ Forwarded OK")
             except Exception as e:
                 self.logger.error(f"❌ Forward error: {type(e).__name__}: {e}")
 
@@ -171,7 +173,7 @@ class ChannelMonitorPlugin(BasePlugin):
             )
             self.logger.info(f"Route added: {src_id} -> {dst_id}")
 
-        except ValueError as e:
+        except ValueError:
             await event.delete()
             await self.client.send_message(
                 event.chat_id,
@@ -210,7 +212,7 @@ class ChannelMonitorPlugin(BasePlugin):
             self._routes.pop(norm_src_id, None)
             
             await event.delete()
-            await self.client.send_message(event.chat_id, f"✅ حذف شد.")
+            await self.client.send_message(event.chat_id, "✅ حذف شد.")
             self.logger.info(f"Route removed: {src_id}")
         except Exception as e:
             await event.delete()
