@@ -12,12 +12,12 @@
 • .قلب بساز ‹رنگ›  : مثل 3 با رنگ دلخواه (قرمز، آبی، سبز، ...)
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
 اگه ریپلای باشه، روی همون پیام ریپلای میشه
-ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی، تا 120ث)
+ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی). اگه تا ۱۲ ساعت سین نزنه، انیمیشن اجرا نمیشه
 """
 import asyncio
 import time
 from collections import deque
-from telethon import events
+from telethon import events, functions, types
 from telethon.errors import MessageNotModifiedError, FloodWaitError
 from plugins.base import BasePlugin
 
@@ -27,6 +27,8 @@ HEARTS_GROW = ["🖤", "💜", "💙", "🩵", "💚", "💛", "🧡", "🩷", "
 GROW_MAX = 6   # حداکثر تعداد قلب در .قلب2
 # نیم‌فاصله برای کوچیک کردن تک‌اموجی
 ZWNJ = "\u200c"
+# حداکثر صبر برای سین در پی‌وی؛ بعدش انیمیشن اجرا نمی‌شود (نه اینکه خودش شروع شود)
+SEEN_TIMEOUT = 12 * 3600
 # .قلب5 — فقط قلب‌های صورتیِ خاص، به همین ترتیب
 HEARTS_PINK = ["💕", "💞", "💓", "💗", "💘", "💝"]
 # .قلب6 — همه‌ی قلب‌های رنگی ساده (بدون قلب‌های صورتیِ خاص)
@@ -322,41 +324,52 @@ class HeartPlugin(BasePlugin):
 
     async def start(self):
 
-        async def wait_for_seen(msg, event):
-            # فقط پی‌وی منتظر سین بمون
-            if not event.is_private:
-                return
+        async def _already_seen(msg) -> bool:
+            """آیا طرف مقابل تا این پیام را خوانده؟ (از خود تلگرام)"""
             try:
-                read_future = asyncio.get_event_loop().create_future()
-                async def _on_read(read_event):
-                    try:
-                        chat_ok = False
-                        try:
-                            chat_ok = (read_event.chat_id == msg.chat_id)
-                        except Exception:
-                            chat_ok = (getattr(read_event, 'chat_id', None) == event.chat_id)
-                        is_outbox = getattr(read_event, 'is_outbox', True)
-                        max_id = getattr(read_event, 'max_id', 0) or 0
-                        if chat_ok and is_outbox and max_id >= msg.id:
-                            if not read_future.done():
-                                read_future.set_result(True)
-                        elif chat_ok and is_outbox and max_id == 0:
-                            if not read_future.done():
-                                read_future.set_result(True)
-                    except Exception:
-                        pass
-                self.client.add_event_handler(_on_read, events.MessageRead)
-                try:
-                    await asyncio.wait_for(read_future, timeout=120)
-                except asyncio.TimeoutError:
-                    pass
-                finally:
-                    try:
-                        self.client.remove_event_handler(_on_read, events.MessageRead)
-                    except Exception:
-                        pass
+                res = await self.client(functions.messages.GetPeerDialogsRequest(
+                    peers=[types.InputDialogPeer(await msg.get_input_chat())]
+                ))
+                return bool(res.dialogs) and (res.dialogs[0].read_outbox_max_id or 0) >= msg.id
             except Exception:
-                pass
+                return False
+
+        async def wait_for_seen(msg, event) -> bool:
+            """
+            فقط پی‌وی: تا طرف مقابل پیام را «سین» نکند انیمیشن شروع نمی‌شود.
+            True = سین شد (یا گروه است) → انیمیشن اجرا شود
+            False = تا SEEN_TIMEOUT سین نشد → انیمیشن اجرا نمی‌شود (پیام همان‌طور می‌ماند)
+            قبلاً بعد از ۱۲۰ ثانیه بدون سین هم خودش شروع می‌شد.
+            """
+            if not event.is_private:
+                return True
+            loop = asyncio.get_running_loop()
+            read_future = loop.create_future()
+
+            async def _on_read(read_event):
+                try:
+                    if (read_event.chat_id == msg.chat_id
+                            and read_event.outbox   # Telethon: outbox (نه is_outbox)
+                            and (read_event.max_id or 0) >= msg.id
+                            and not read_future.done()):
+                        read_future.set_result(True)
+                except Exception:
+                    pass
+
+            self.client.add_event_handler(_on_read, events.MessageRead(inbox=False))
+            try:
+                # اگر طرف قبل از ثبت شنونده خوانده باشد، رویدادش از دست رفته
+                if await _already_seen(msg):
+                    return True
+                await asyncio.wait_for(read_future, timeout=SEEN_TIMEOUT)
+                return True
+            except asyncio.TimeoutError:
+                return False
+            finally:
+                try:
+                    self.client.remove_event_handler(_on_read, events.MessageRead)
+                except Exception:
+                    pass
 
         async def anim_original(msg):
             # انیمیشن اصلی — 12 قلب با فاصله
@@ -514,7 +527,8 @@ class HeartPlugin(BasePlugin):
                 event.chat_id, first_frame(num), reply_to=reply_to
             )
 
-            await wait_for_seen(msg, event)
+            if not await wait_for_seen(msg, event):
+                return
             await anim(msg)
 
         pacer = EditPacer()   # یکی برای هر اکانت
@@ -541,7 +555,8 @@ class HeartPlugin(BasePlugin):
                     reply_to = None
             await event.delete()
             msg = await self.client.send_message(event.chat_id, frames[0][0], reply_to=reply_to)
-            await wait_for_seen(msg, event)
+            if not await wait_for_seen(msg, event):
+                return
             await play_frames(msg, frames, pacer)
 
         # ── .قلب بساز فعلاً غیرفعال است (به درخواست کاربر): شکل روی بعضی
