@@ -2,8 +2,8 @@
 پلاگین قلب متحرک — چند انیمیشن
 کامندها: .قلب / .قلب 2 / .قلب2 / .قلب 3 ...
 • .قلب   : انیمیشن ۱۲ قلب با حرکت (اصلی)
-• .قلب2  : زنجیره‌ای — هی یکی اضافه میشه (‌🖤 → 🖤💜 → 🖤💜💙 ... با نیم‌فاصله برای کوچیک موندن تک‌اموجی)
-• .قلب3  : ضربان — تک‌قلب با تغییر رنگ
+• .قلب2  : زنجیره‌ای تا ۶ قلب و بعد جابه‌جا (🖤 → 🖤💜 → ... ) — همه کوچیک (نیم‌فاصله بعد از هر قلب)
+• .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
 • .قلب4  : نفس — قلب با فاصله تپنده
 • .قلب5  : قلب‌های صورتیِ خاص دونه‌دونه عوض میشن (💕💞💓💗💘💝)
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
@@ -17,7 +17,8 @@ from plugins.base import BasePlugin
 
 HEARTS = ["❤️", "🩷", "🧡", "💛", "💚", "🩵", "💙", "💜", "🖤", "🤍", "🩶", "💗"]
 # برای زنجیره‌ای — همون ترتیب مثال شما
-HEARTS_GROW = ["🖤", "💜", "💙", "🩵", "💚", "💛", "🧡", "🩷", "❤️", "💗", "🤍", "🩶"]
+HEARTS_GROW = ["🖤", "💜", "💙", "🩵", "💚", "💛", "🧡", "🩷", "❤️", "🤍", "🩶"]
+GROW_MAX = 6   # حداکثر تعداد قلب در .قلب2
 # نیم‌فاصله برای کوچیک کردن تک‌اموجی
 ZWNJ = "\u200c"
 # .قلب5 — فقط قلب‌های صورتیِ خاص، به همین ترتیب
@@ -41,14 +42,27 @@ def slide_frames(hearts, width=3, rounds=3):
     return frames
 
 
+def _split(frame: str):
+    """جدا کردن قلب‌های یک فریم (❤️ دو کاراکتر است)"""
+    out = []
+    for ch in frame:
+        if ch == "\ufe0f" and out:
+            out[-1] += ch
+        else:
+            out.append(ch)
+    return out
+
+
 def first_frame(num) -> str:
     """اولین فریم هر انیمیشن (هم پیام عادی هم ریپلای)"""
     if num == "2":
         return small(HEARTS_GROW[:1])
     if num == "3":
-        return ZWNJ + "🤍"
+        return "🤍"
+    if num == "4":
+        return "❤️"
     if num == "5":
-        return ZWNJ + HEARTS_PINK[0]
+        return HEARTS_PINK[0]
     if num == "6":
         return HEARTS_SLIDE[0]
     return ZWNJ + HEARTS[0]
@@ -116,20 +130,20 @@ class HeartPlugin(BasePlugin):
                 pass
 
         async def anim_grow(msg):
-            # .قلب2 — زنجیره‌ای: ‌🖤 → 🖤💜 → 🖤💜💙 → ... → کامل → دوباره
-            # نکته نیم‌فاصله: تک‌اموجی با ZWNJ کوچیک می‌مونه
-            for _ in range(2):  # 2 دور کامل
-                for i in range(1, len(HEARTS_GROW) + 1):
-                    try:
-                        # نیم‌فاصله بعد از هر قلب → در همه‌ی مراحل کوچیک
-                        await msg.edit(small(HEARTS_GROW[:i]))
-                        await asyncio.sleep(0.6)
-                    except MessageNotModifiedError:
-                        continue
-                    except FloodWaitError as e:
-                        await asyncio.sleep(e.seconds + 1)
-                    except Exception:
-                        return
+            # .قلب2 — زنجیره‌ای تا حداکثر ۶ قلب، بعد به ترتیب جابه‌جا میشن:
+            # 🖤 → 🖤💜 → ... → 🖤💜💙🩵💚💛 → 💜💙🩵💚💛🧡 → ...
+            # نیم‌فاصله بعد از هر قلب → در همه‌ی مراحل کوچیک
+            frames = slide_frames(HEARTS_GROW, width=GROW_MAX, rounds=2)
+            for fr in frames[1:]:   # فریم اول همان پیام اولیه است
+                try:
+                    await msg.edit(small(list(_split(fr))))
+                    await asyncio.sleep(0.6)
+                except MessageNotModifiedError:
+                    continue
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds + 1)
+                except Exception:
+                    return
             # پایان: قلب قرمز کوچیک
             try:
                 await msg.edit(small(["❤️"]))
@@ -137,12 +151,12 @@ class HeartPlugin(BasePlugin):
                 pass
 
         async def anim_pulse(msg):
-            # .قلب3 — ضربان تک‌قلب با تغییر رنگ (همه با ZWNJ کوچیک)
+            # .قلب3 — ضربان تک‌قلب با تغییر رنگ (بزرگ، بدون فاصله)
             seq = ["🤍","🩶","🖤","💜","💙","🩵","💚","💛","🧡","🩷","❤️","💗","💓","💞","💕","💖"]
             for _ in range(2):
-                for h in seq:
+                for h in seq + seq[-2::-1]:   # رفت و برگشت (بدون تکرار قلب وسط)
                     try:
-                        await msg.edit(ZWNJ + h)
+                        await msg.edit(h)
                         await asyncio.sleep(0.35)
                     except MessageNotModifiedError:
                         continue
@@ -150,14 +164,8 @@ class HeartPlugin(BasePlugin):
                         await asyncio.sleep(e.seconds + 1)
                     except Exception:
                         return
-                for h in reversed(seq):
-                    try:
-                        await msg.edit(ZWNJ + h)
-                        await asyncio.sleep(0.35)
-                    except:
-                        return
             try:
-                await msg.edit(ZWNJ + "❤️")
+                await msg.edit("❤️")
             except Exception:
                 pass
 
@@ -184,11 +192,11 @@ class HeartPlugin(BasePlugin):
                 pass
 
         async def anim_pink(msg):
-            # .قلب5 — فقط قلب‌های صورتیِ خاص، دونه‌دونه عوض میشن
+            # .قلب5 — فقط قلب‌های صورتیِ خاص، دونه‌دونه عوض میشن (بزرگ)
             for _ in range(4):
                 for h in HEARTS_PINK:
                     try:
-                        await msg.edit(ZWNJ + h)
+                        await msg.edit(h)   # بزرگ
                         await asyncio.sleep(0.5)
                     except MessageNotModifiedError:
                         continue
