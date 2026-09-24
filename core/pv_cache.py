@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import shutil
 import sys
 import time
@@ -50,6 +51,11 @@ from config import (
     PV_VAULT_QUOTA_MB,
     PV_VAULT_TTL_HOURS,
     PV_VAULT_TYPES,
+    PV_WARMUP_CHATS,
+    PV_WARMUP_ENABLED,
+    PV_WARMUP_HOURS,
+    PV_WARMUP_MESSAGES,
+    PV_WARMUP_VAULT_FILES,
 )
 from core import governor, metrics, peers
 
@@ -59,6 +65,11 @@ MB = 1024 * 1024
 VAULT_ROOT = os.path.join(DOWNLOADS_DIR, "vault")
 SWEEP_INTERVAL = 600
 MAX_PENDING_CAPTURES = 20
+WARMUP_DELAY = (3.0, 15.0)     # بعد از اتصال، تا کار روشن شدن تمام شود
+WARMUP_GAP = 1.0               # فاصله بین خواندن دو چت (محدودیت تلگرام)
+WARMUP_SCAN = 100              # چند دیالوگ آخر بررسی شود (= یک درخواست)
+AUTO_DELETE_MARGIN = 15        # ثانیه — حذف نزدیک به زمان «حذف خودکار» ≠ حذف دستی
+SERVICE_IDS = {777000}         # اعلان‌های رسمی تلگرام (کدها خودکار پاک می‌شوند)
 
 _instances: "weakref.WeakSet[PVCache]" = weakref.WeakSet()
 
@@ -135,7 +146,7 @@ class Rec:
     __slots__ = (
         "msg_id", "chat_id", "sender_id", "is_me", "date", "ts",
         "text", "orig_text", "kind", "ref", "attrs", "mime",
-        "vault", "size",
+        "vault", "size", "expires",
     )
 
     def __init__(self, msg_id, chat_id, sender_id, is_me, date, text,
@@ -153,6 +164,7 @@ class Rec:
         self.attrs = attrs
         self.mime = mime
         self.vault = None              # مسیر فایل رمزنگاری‌شده
+        self.expires = 0.0             # زمان «حذف خودکار» چت (ttl_period)؛ 0 = ندارد
         self.size = 0
         self.resize()
 
@@ -168,6 +180,15 @@ class Rec:
             size += 200 * len(self.attrs)
         self.size = size
         return size
+
+    def auto_expired(self, now: float | None = None) -> bool:
+        """
+        آیا این پیام با تایمر «حذف خودکار» چت پاک شده؟ (کسی حذفش نکرده)
+        تلگرام برای حذف خودکار هم همان آپدیت حذف را می‌فرستد.
+        """
+        if not self.expires:
+            return False
+        return (now or time.time()) >= self.expires - AUTO_DELETE_MARGIN
 
     @property
     def original_text(self) -> str:
@@ -327,6 +348,9 @@ class PVCache:
         self._consumers: dict[str, bool] = {}   # name → needs media
         self._handler = None
         self._sweeper: asyncio.Task | None = None
+        self._warm_task: asyncio.Task | None = None
+        self._warmed_media = False      # بازخوانی با مدیا انجام شده؟
+        self.warm_stats = {"chats": 0, "messages": 0, "state": "—"}
         _instances.add(self)
 
     # ── مصرف‌کننده‌ها ──
@@ -349,6 +373,7 @@ class PVCache:
             self.client.add_event_handler(*self._handler)
         if self._sweeper is None or self._sweeper.done():
             self._sweeper = asyncio.create_task(self._sweep_loop())
+        self._maybe_warm_up()
 
     async def release(self, name: str) -> None:
         self._consumers.pop(name, None)
@@ -375,6 +400,10 @@ class PVCache:
         if self._sweeper:
             self._sweeper.cancel()
             self._sweeper = None
+        if self._warm_task and not self._warm_task.done():
+            self._warm_task.cancel()
+        self._warm_task = None
+        self._warmed_media = False
         self._store.clear()
         self.bytes = 0
         self.vault.wipe()
@@ -390,7 +419,33 @@ class PVCache:
             return   # Saved Messages کش نمی‌شود (گزارش‌ها همان‌جا می‌روند)
         self.add_message(msg, chat_id)
 
-    def add_message(self, msg, chat_id: int) -> Rec | None:
+    def add_message(self, msg, chat_id: int, warm: bool = False) -> Rec | None:
+        """
+        افزودن پیام به کش. warm=True یعنی از بازخوانی تاریخچه آمده:
+        رکوردی که زنده ثبت شده بازنویسی نمی‌شود (متن اصلی قبل از ویرایش حفظ
+        شود) و دانلود گاوصندوق جداگانه و با سهمیه انجام می‌شود.
+        """
+        if getattr(msg, "action", None) is not None:
+            return None     # پیام سرویس (عضویت، تماس و ...)
+        media = getattr(msg, "media", None)
+        # مدیای «یک‌بار دیدنی/زمان‌دار» بعد از دیده شدن خودبه‌خود پاک می‌شود؛
+        # آن حذف کار کسی نیست → کش نمی‌شود (پلاگین تایم‌دار مسئول آن است)
+        if media is not None and getattr(media, "ttl_seconds", None):
+            return None
+
+        existing = self._store.get(msg.id)
+        if existing is not None and warm:
+            if self.need_media and existing.ref is None and existing.kind is None:
+                kind, ref, doc = classify(media)
+                if ref is not None:
+                    self.bytes -= existing.size
+                    existing.kind, existing.ref = kind, ref
+                    if doc is not None and kind in ("voice", "round"):
+                        existing.attrs = list(doc.attributes)
+                    existing.mime = getattr(doc, "mime_type", None) if doc is not None else None
+                    self.bytes += existing.resize()
+            return existing
+
         self.peers.learn_from_message(msg)
         sender_id = msg.sender_id
         is_me = bool(getattr(msg, "out", False)) or (sender_id == self.my_id)
@@ -398,7 +453,7 @@ class PVCache:
 
         kind = ref = doc = None
         if self.need_media:
-            kind, ref, doc = classify(msg.media)
+            kind, ref, doc = classify(media)
         elif not text:
             return None     # فقط ضدویرایش فعال است و پیام متنی نیست
 
@@ -407,17 +462,132 @@ class PVCache:
             attrs=list(doc.attributes) if (doc is not None and kind in ("voice", "round")) else None,
             mime=getattr(doc, "mime_type", None) if doc is not None else None,
         )
+        ttl_period = getattr(msg, "ttl_period", None)
+        if ttl_period:
+            rec.expires = rec.ts + int(ttl_period)
         self._put(rec)
         metrics.inc("pv_cached")
+        if warm:
+            return rec
 
         # نام طرف مقابل را در پس‌زمینه یاد بگیر (یک بار برای هر نفر)
         self.peers.warm(chat_id)
         if not is_me and sender_id and sender_id != chat_id:
             self.peers.warm(sender_id)
 
-        if ref is not None and self.vault.eligible(rec, msg.media):
+        if ref is not None and self.vault.eligible(rec, media):
             self.vault.schedule(self.client, msg, rec)
         return rec
+
+    # ── بازخوانی تاریخچه (پیام‌های قبل از ری‌استارت / قبل از روشن کردن) ──
+
+    def _maybe_warm_up(self):
+        if not PV_WARMUP_ENABLED:
+            return
+        running = self._warm_task is not None and not self._warm_task.done()
+        if running:
+            return
+        # اولین مصرف‌کننده، یا ضدحذف بعد از ضدویرایش روشن شد (ارجاع مدیا لازم است)
+        if self._warm_task is None or (self.need_media and not self._warmed_media):
+            self._warm_task = asyncio.create_task(self._warm_up(), name="pv-warmup")
+
+    async def _warm_up(self, delay: tuple = None):
+        self.warm_stats = {"chats": 0, "messages": 0, "state": "در انتظار"}
+        try:
+            lo, hi = delay or WARMUP_DELAY
+            await asyncio.sleep(random.uniform(lo, hi))
+            # بعد از مکث: همه‌ی پلاگین‌های این اکانت تا الان بارگذاری شده‌اند
+            with_media = self.need_media
+            self.warm_stats["state"] = "در حال خواندن"
+            cutoff = time.time() - min(PV_WARMUP_HOURS, PV_CACHE_MAX_AGE_HOURS) * 3600
+
+            try:
+                dialogs = await self.client.get_dialogs(limit=WARMUP_SCAN)
+            except FloodWaitError:
+                metrics.inc("floodwait")
+                self.warm_stats["state"] = "رد شد (محدودیت تلگرام)"
+                return
+
+            chats = []
+            for d in dialogs:
+                ent = getattr(d, "entity", None)
+                if not isinstance(ent, types.User):
+                    continue
+                self.peers.learn(ent)               # نام‌ها رایگان
+                if (ent.bot or ent.is_self or ent.deleted or ent.id == self.my_id
+                        or ent.id in SERVICE_IDS):
+                    continue
+                d_date = getattr(d, "date", None)
+                if not d_date or d_date.timestamp() < cutoff:
+                    continue
+                chats.append(ent)
+                if len(chats) >= PV_WARMUP_CHATS:
+                    break
+
+            candidates = []
+            for i, ent in enumerate(chats):
+                if not self._consumers:
+                    return
+                if i:
+                    await asyncio.sleep(WARMUP_GAP)
+                try:
+                    msgs = await self.client.get_messages(ent, limit=PV_WARMUP_MESSAGES)
+                except FloodWaitError as e:
+                    metrics.inc("floodwait")
+                    if int(getattr(e, "seconds", 999) or 999) > 30:
+                        self.warm_stats["state"] = "نیمه‌تمام (محدودیت تلگرام)"
+                        break
+                    await asyncio.sleep(int(e.seconds) + 1)
+                    continue
+                except Exception as e:
+                    logger.debug(f"warm-up history {ent.id} failed: {e}")
+                    continue
+                for m in reversed(list(msgs or [])):          # قدیمی → جدید
+                    date = getattr(m, "date", None)
+                    if not date or date.timestamp() < cutoff:
+                        continue
+                    rec = self.add_message(m, ent.id, warm=True)
+                    if rec is not None:
+                        self.warm_stats["messages"] += 1
+                        if rec.ref is not None and rec.vault is None:
+                            candidates.append((m, rec))
+                self.warm_stats["chats"] += 1
+
+            self._resort()
+            if with_media:
+                self._warmed_media = True
+                await self._warm_vault(candidates)
+            if self.warm_stats["state"] == "در حال خواندن":
+                self.warm_stats["state"] = "انجام شد"
+            logger.info(
+                f"warm-up user={self.user_db_id}: {self.warm_stats['chats']} chats, "
+                f"{self.warm_stats['messages']} msgs"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.warm_stats["state"] = "خطا"
+            logger.warning(f"warm-up user={self.user_db_id} failed: {type(e).__name__}: {e}")
+
+    async def _warm_vault(self, candidates: list):
+        """مدیای کوچکِ جدیدترین پیام‌ها — با سهمیه (نه هزاران دانلود در هر ری‌استارت)"""
+        budget = PV_WARMUP_VAULT_FILES
+        for m, rec in sorted(candidates, key=lambda x: -x[1].ts):
+            if budget <= 0 or not self.need_media:
+                break
+            if self._store.get(rec.msg_id) is not rec:
+                continue                      # در این فاصله حذف/بیرون رفت
+            while len(self.vault._pending) >= MAX_PENDING_CAPTURES:
+                await asyncio.sleep(0.5)
+            if self.vault.eligible(rec, m.media):
+                self.vault.schedule(self.client, m, rec)
+                budget -= 1
+
+    def _resort(self):
+        """ترتیب کش بر اساس زمان پیام (بازخوانی، پیام‌های قدیمی‌تر را بعداً اضافه می‌کند)"""
+        if len(self._store) > 1:
+            self._store = OrderedDict(sorted(self._store.items(), key=lambda kv: kv[1].ts))
+        self._evict()
 
     def _put(self, rec: Rec):
         old = self._store.pop(rec.msg_id, None)
@@ -438,10 +608,21 @@ class PVCache:
             self.bytes -= first.size
             self.vault.remove(first.msg_id)
 
+    def _evict_aged(self):
+        """پاکسازی کامل پیام‌های قدیمی و پیام‌های «حذف خودکار» منقضی"""
+        now = time.time()
+        cutoff = now - PV_CACHE_MAX_AGE_HOURS * 3600
+        for mid in [m for m, r in self._store.items()
+                    if r.ts < cutoff or (r.expires and now > r.expires + 3600)]:
+            rec = self._store.pop(mid)
+            self.bytes -= rec.size
+            self.vault.remove(mid)
+
     async def _sweep_loop(self):
         try:
             while True:
                 await asyncio.sleep(SWEEP_INTERVAL)
+                self._evict_aged()
                 self._evict()
                 self.vault.sweep()
         except asyncio.CancelledError:
@@ -484,7 +665,9 @@ def stats_line() -> str:
     mem = sum(c.bytes for c in caches)
     vf = sum(len(c.vault) for c in caches)
     vb = sum(c.vault.bytes for c in caches)
+    warmed = sum(1 for c in caches if c.warm_stats.get("state") == "انجام شد")
     return (
         f"🗂 کش پی‌وی: {len(caches)} اکانت · {n_msgs:,} پیام · ≈{mem / MB:.1f} MB"
+        f" · بازخوانی‌شده {warmed}/{len(caches)}"
         f"\n🔐 گاوصندوق مدیا: {vf:,} فایل · {vb / MB:.1f} MB"
     )

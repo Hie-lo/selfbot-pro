@@ -168,3 +168,11 @@ PV_VAULT_TYPES: set = {
 PV_VAULT_MAX_MB: float = float(os.getenv("PV_VAULT_MAX_MB", "5"))
 PV_VAULT_QUOTA_MB: float = float(os.getenv("PV_VAULT_QUOTA_MB", "50"))
 PV_VAULT_TTL_HOURS: int = int(os.getenv("PV_VAULT_TTL_HOURS", "48"))
+# بازخوانی هنگام روشن شدن: پیام‌های اخیر پی‌وی‌های فعال از خود تلگرام خوانده
+# می‌شود تا پیام‌هایی که قبل از ری‌استارت (یا قبل از روشن کردن ضدحذف) رسیده‌اند
+# و بعداً حذف می‌شوند هم پوشش داده شوند
+PV_WARMUP_ENABLED: bool = _env_bool("PV_WARMUP_ENABLED", "1")
+PV_WARMUP_HOURS: int = max(1, int(os.getenv("PV_WARMUP_HOURS", "48")))
+PV_WARMUP_CHATS: int = max(1, int(os.getenv("PV_WARMUP_CHATS", "50")))
+PV_WARMUP_MESSAGES: int = max(1, min(100, int(os.getenv("PV_WARMUP_MESSAGES", "100"))))
+PV_WARMUP_VAULT_FILES: int = max(0, int(os.getenv("PV_WARMUP_VAULT_FILES", "20")))

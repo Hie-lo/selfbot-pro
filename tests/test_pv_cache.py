@@ -37,11 +37,14 @@ from telethon import events  # noqa: E402
 from telethon.errors import FloodWaitError  # noqa: E402
 from telethon.tl import types  # noqa: E402
 
-from core import outbox, pv_cache  # noqa: E402
+from core import outbox, pv_cache, self_actions  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 from database import db  # noqa: E402
 import plugins.anti_delete as AD  # noqa: E402
 import plugins.anti_edit as AE  # noqa: E402
 
+pv_cache.WARMUP_DELAY = (0.0, 0.0)
+pv_cache.WARMUP_GAP = 0.0
 AD.DEBOUNCE = 0.05
 AD.MAX_BATCH_WAIT = 0.2
 outbox.MIN_GAP = 0.0
@@ -71,6 +74,29 @@ class FakeClient:
             PEER: types.User(id=PEER, first_name="Ali", last_name="Rezaei", username="ali_r"),
             300: types.User(id=300, first_name="Sara"),
         }
+        self.dialogs = []            # برای بازخوانی تاریخچه
+        self.history = {}            # chat_id → لیست پیام (جدید → قدیمی، مثل تلگرام)
+        self.history_calls = []
+        self.history_error = None
+        self.server_deleted = []
+        self.server_edited = []
+        self_actions.install(self)
+
+    async def get_dialogs(self, limit=None):
+        return self.dialogs
+
+    async def get_messages(self, entity, limit=None):
+        cid = getattr(entity, "id", entity)
+        self.history_calls.append(cid)
+        if self.history_error:
+            raise self.history_error
+        return list(self.history.get(cid, []))[:limit]
+
+    async def delete_messages(self, entity, message_ids, *a, **k):
+        self.server_deleted.append(message_ids)
+
+    async def edit_message(self, entity, message=None, text=None, *a, **k):
+        self.server_edited.append((message, text))
 
     def add_event_handler(self, cb, ev):
         self.handlers.append((cb, ev))
@@ -458,6 +484,233 @@ def test_disable_anti_delete_frees_media_keeps_edit():
         assert any(isinstance(ev, events.NewMessage) for _, ev in c.handlers)  # هندلر مشترک ماند
         await ae.stop()
         assert not any(isinstance(ev, events.NewMessage) for _, ev in c.handlers)
+    run(go())
+
+
+# ═══════ مثبت کاذب ═══════
+
+def test_selfbot_deleting_its_command_is_not_reported():
+    async def go():
+        c, ps, on_new = await make()
+        cmd = Msg(PEER, ME, ".راهنما", out=True)
+        real = Msg(PEER, ME, "پیام واقعی", out=True)
+        await on_new(NewEv(cmd, PEER))
+        await on_new(NewEv(real, PEER))
+        await c.delete_messages(PEER, [cmd.id])        # مثل event.delete() در پلاگین
+        await ps[0]._on_delete(DelEv([cmd.id]))
+        await ps[0]._on_delete(DelEv([real.id]))       # کاربر خودش در اپ پاک کرد
+        await settle(c)
+        texts = [x[2] for x in c.sent if x[0] == "msg"]
+        assert len(texts) == 1 and "پیام واقعی" in texts[0], texts
+        assert not any(".راهنما" in t for t in texts)
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+def test_selfbot_edits_are_not_reported():
+    async def go():
+        c, ps, on_new = await make(("anti_delete", "anti_edit"))
+        ae = ps[1]
+        heart = Msg(PEER, ME, ".قلب", out=True)
+        await on_new(NewEv(heart, PEER))
+        for frame in ("❤️", "🧡", "💛"):               # انیمیشن = ویرایش پشت‌سرهم
+            await c.edit_message(PEER, heart.id, frame)
+            await ae._on_edit(EditEv(Msg(PEER, ME, frame, out=True, mid=heart.id)))
+        await settle(c)
+        assert c.sent == [], c.sent
+        # ویرایش واقعی کاربر (در اپ) همچنان گزارش می‌شود
+        m = Msg(PEER, PEER, "قبل")
+        await on_new(NewEv(m, PEER))
+        await ae._on_edit(EditEv(Msg(PEER, PEER, "بعد", mid=m.id)))
+        await settle(c)
+        assert len(c.sent) == 1 and "📝 **متن قبلی:**\nقبل" in c.sent[0][2]
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+def test_auto_delete_timer_is_not_a_deletion():
+    async def go():
+        c, ps, on_new = await make()
+        expired = Msg(PEER, PEER, "با تایمر")
+        expired.ttl_period = 60
+        expired.date = datetime.now(timezone.utc) - timedelta(seconds=70)
+        early = Msg(PEER, PEER, "زود حذف شد")
+        early.ttl_period = 86400                        # تایمر یک‌روزه، ولی همین الان حذف شد
+        await on_new(NewEv(expired, PEER))
+        await on_new(NewEv(early, PEER))
+        await ps[0]._on_delete(DelEv([expired.id, early.id]))
+        await settle(c)
+        texts = [x[2] for x in c.sent]
+        assert len(texts) == 1 and "زود حذف شد" in texts[0], texts
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+def test_view_once_media_not_cached():
+    async def go():
+        c, ps, on_new = await make()
+        media = photo_media()
+        media.ttl_seconds = 10
+        m = Msg(PEER, PEER, "", media=media)
+        await on_new(NewEv(m, PEER))
+        assert ps[0]._cache.get(m.id) is None
+        await ps[0]._on_delete(DelEv([m.id]))           # خودتخریبی بعد از دیدن
+        await settle(c)
+        assert c.sent == []
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+# ═══════ بازخوانی تاریخچه (قبل از ری‌استارت) ═══════
+
+def _dialog(ent, hours_ago=1):
+    return SimpleNamespace(entity=ent, date=datetime.now(timezone.utc) - timedelta(hours=hours_ago))
+
+
+async def make_with_history(plugins=("anti_delete",), setup=None):
+    """کلاینت را قبل از start پلاگین‌ها آماده می‌کند (مثل ری‌استارت واقعی)"""
+    c = FakeClient()
+    if setup:
+        setup(c)
+    uid = 9000 + Msg._next
+    ps = []
+    for name in plugins:
+        P = AD.AntiDeletePlugin if name == "anti_delete" else AE.AntiEditPlugin
+        p = P(c, uid)
+        await p.start()
+        ps.append(p)
+    cache = ps[0]._cache
+    if cache._warm_task:
+        await asyncio.wait_for(cache._warm_task, 10)
+    on_new = next(cb for cb, ev in c.handlers if isinstance(ev, events.NewMessage))
+    return c, ps, on_new, cache
+
+
+def _history_setup(c):
+    old1 = Msg(PEER, PEER, "قبل از ری‌استارت ۱")
+    old2 = Msg(PEER, ME, "قبل از ری‌استارت ۲", out=True)
+    svc = Msg(PEER, PEER, "")
+    svc.action = object()                                    # پیام سرویس
+    ancient = Msg(PEER, PEER, "خیلی قدیمی")
+    ancient.date = datetime.now(timezone.utc) - timedelta(days=5)
+    c.history[PEER] = [svc, old2, old1, ancient]             # جدید → قدیمی
+    bot = types.User(id=400, first_name="SomeBot", bot=True)
+    me = types.User(id=ME, first_name="Me", is_self=True)
+    stale = types.User(id=300, first_name="Sara")
+    c.dialogs = [_dialog(me), _dialog(bot), _dialog(c.users[PEER]), _dialog(stale, hours_ago=200)]
+    c._ids = (old1.id, old2.id, svc.id, ancient.id)
+
+
+def test_warmup_covers_messages_from_before_restart():
+    async def go():
+        c, ps, on_new, cache = await make_with_history(setup=_history_setup)
+        old1, old2, svc, ancient = c._ids
+        assert c.history_calls == [PEER], c.history_calls   # نه ربات، نه خودم، نه چت قدیمی
+        assert cache.get(old1) and cache.get(old2)
+        assert cache.get(svc) is None and cache.get(ancient) is None
+        assert c.rpc["get_entity"] == 0                      # نام‌ها از خود دیالوگ‌ها
+        await ps[0]._on_delete(DelEv([old1]))
+        await settle(c)
+        t = c.sent[-1][2]
+        assert "📥 از: Ali Rezaei (@ali_r)" in t and t.endswith("📝 متن:\nقبل از ری‌استارت ۱")
+        # پیام‌هایی که حذف نشده‌اند گزارش نمی‌شوند
+        assert len(c.sent) == 1
+        assert cache.warm_stats["state"] == "انجام شد"
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+def test_warmup_never_overrides_live_record():
+    async def go():
+        c = FakeClient()
+        uid = 9000 + Msg._next
+        ad = AD.AntiDeletePlugin(c, uid)
+        ae = AE.AntiEditPlugin(c, uid)
+        # بازخوانی را عقب می‌اندازیم تا پیام زنده اول برسد
+        old_delay = pv_cache.WARMUP_DELAY
+        pv_cache.WARMUP_DELAY = (0.3, 0.3)
+        try:
+            await ad.start()
+            await ae.start()
+            on_new = next(cb for cb, ev in c.handlers if isinstance(ev, events.NewMessage))
+            live = Msg(PEER, PEER, "متن اصلی")
+            await on_new(NewEv(live, PEER))
+            await ae._on_edit(EditEv(Msg(PEER, PEER, "متن ویرایش‌شده", mid=live.id)))
+            c.history[PEER] = [Msg(PEER, PEER, "متن ویرایش‌شده", mid=live.id)]
+            c.dialogs = [_dialog(c.users[PEER])]
+            await asyncio.wait_for(ad._cache._warm_task, 10)
+        finally:
+            pv_cache.WARMUP_DELAY = old_delay
+        await settle(c)
+        c.sent.clear()
+        await ad._on_delete(DelEv([live.id]))
+        await settle(c)
+        assert c.sent[-1][2].endswith("📝 متن:\nمتن اصلی")   # متن قبل از ویرایش حفظ شد
+        await ad.stop()
+        await ae.stop()
+    run(go())
+
+
+def test_warmup_stops_on_long_floodwait():
+    async def go():
+        def setup(c):
+            c.dialogs = [_dialog(c.users[PEER]), _dialog(c.users[300])]
+            c.history_error = FloodWaitError(request=None, capture=120)
+        c, ps, on_new, cache = await make_with_history(setup=setup)
+        assert c.history_calls == [PEER]                     # بعد از اولی متوقف شد
+        assert "محدودیت" in cache.warm_stats["state"]
+        # کش زنده همچنان کار می‌کند
+        m = Msg(PEER, PEER, "زنده")
+        await on_new(NewEv(m, PEER))
+        await ps[0]._on_delete(DelEv([m.id]))
+        await settle(c)
+        assert "زنده" in c.sent[-1][2]
+        for p in ps:
+            await p.stop()
+    run(go())
+
+
+def test_warmup_vault_budget_newest_first():
+    async def go():
+        old_budget = pv_cache.PV_WARMUP_VAULT_FILES
+        pv_cache.PV_WARMUP_VAULT_FILES = 2
+        try:
+            def setup(c):
+                voices = [Msg(PEER, PEER, "", media=voice_media()) for _ in range(5)]
+                c.history[PEER] = list(reversed(voices))
+                c.dialogs = [_dialog(c.users[PEER])]
+                c._voices = voices
+            c, ps, on_new, cache = await make_with_history(setup=setup)
+            await asyncio.sleep(0.2)
+            assert c.downloads == 2, c.downloads
+            assert set(cache.vault._files) == {c._voices[-1].id, c._voices[-2].id}
+            for p in ps:
+                await p.stop()
+        finally:
+            pv_cache.PV_WARMUP_VAULT_FILES = old_budget
+    run(go())
+
+
+def test_warmup_adds_media_when_anti_delete_enabled_later():
+    async def go():
+        def setup(c):
+            c.history[PEER] = [Msg(PEER, PEER, "کپشن", media=photo_media())]
+            c.dialogs = [_dialog(c.users[PEER])]
+        c, ps, on_new, cache = await make_with_history(("anti_edit",), setup=setup)
+        mid = c.history[PEER][0].id
+        assert cache.get(mid).ref is None                     # فقط ضدویرایش → بدون مدیا
+        ad = AD.AntiDeletePlugin(c, ps[0].user_id)
+        await ad.start()                                      # حالا ضدحذف روشن شد
+        await asyncio.wait_for(cache._warm_task, 10)
+        assert isinstance(cache.get(mid).ref, types.InputPhoto)
+        await ad.stop()
+        for p in ps:
+            await p.stop()
     run(go())
 
 

@@ -66,6 +66,9 @@ def _make_client(session_string: str = "", user_db_id: int | None = None) -> Tel
     session = StringSession(session_string)
     client = TelegramClient(session, **_CLIENT_KWARGS)
     client._sb_user = user_db_id
+    # ثبت حذف/ویرایش‌های خود سلف‌بات (جلوگیری از گزارش کاذب ضدحذف/ضدویرایش)
+    from core import self_actions
+    self_actions.install(client)
     return client
 
 

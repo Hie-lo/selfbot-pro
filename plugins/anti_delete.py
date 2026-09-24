@@ -24,7 +24,7 @@ from telethon import events
 from telethon.errors import FloodWaitError
 
 from config import PV_BURST_THRESHOLD, PV_CACHE_MAX_AGE_HOURS
-from core import metrics, outbox, pv_cache
+from core import metrics, outbox, pv_cache, self_actions
 from core.media import send_media_clean
 from database import db
 from plugins.base import BasePlugin
@@ -73,12 +73,20 @@ class AntiDeletePlugin(BasePlugin):
         if event.chat_id is not None:
             return
         now = time.monotonic()
+        wall = time.time()
         got = False
         for mid in event.deleted_ids or []:
             rec = self._cache.take(mid)
-            if rec is not None:
-                self._batch.append(rec)
-                got = True
+            if rec is None:
+                continue
+            # حذف‌هایی که «حذف کاربر» نیستند → گزارش نمی‌شوند:
+            #  • خود سلف‌بات پاکش کرده (پیام دستور مثل .راهنما، .استیکر)
+            #  • تایمر «حذف خودکار» چت منقضی شده
+            if self_actions.deleted_by_self(self.client, mid) or rec.auto_expired(wall):
+                self._cache.vault.remove(mid)
+                continue
+            self._batch.append(rec)
+            got = True
         if not got:
             return
         if not self._batch_first:

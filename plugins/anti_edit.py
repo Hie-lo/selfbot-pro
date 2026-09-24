@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from telethon import events
 
-from core import metrics, outbox, pv_cache
+from core import metrics, outbox, pv_cache, self_actions
 from database import db
 from plugins.base import BasePlugin
 
@@ -52,10 +52,12 @@ class AntiEditPlugin(BasePlugin):
         original_text = rec.text
         new_text = msg.text or ""
         if original_text == new_text:
-            return          # ری‌اکشن/تغییر غیرمتنی
+            return          # ری‌اکشن/پیش‌نمایش لینک/تغییر غیرمتنی
         self._cache.update_text(rec, new_text)
         if not original_text:
             return          # مثل قبل: فقط پیام‌هایی که متن داشتند
+        if self_actions.edited_by_self(self.client, msg.id):
+            return          # ویرایش خود سلف‌بات (انیمیشن .قلب، .پنل، ...)
 
         edited_at = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
         self._outbox.submit(
