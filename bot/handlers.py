@@ -1544,9 +1544,14 @@ async def register_handlers(app: Application):
     # ⚠️ این‌جا باید الگو (pattern) داشته باشیم: در PTB در هر گروه فقط یک
     # هندلر اجرا می‌شود، پس یک هندلر «همه‌گیر» (TypeHandler(Update)) بقیه‌ی
     # دکمه‌ها و پیام‌ها را می‌بلعد و ربات به هیچ‌چیز جواب نمی‌دهد.
-    app.add_handler(CallbackQueryHandler(route_ai_callbacks, pattern=r"^ai:"))
+    # گروه ۱ (نه ۰): حتی اگر بعداً کسی هندلر همه‌گیری در گروه ۰ اضافه کند،
+    # این دکمه‌ها مستقل می‌مانند — و برعکس، این‌ها هم چیزی را نمی‌بلعند.
+    # تست tests/test_bot_dispatch.py همین را چک می‌کند.
+    app.add_handler(CallbackQueryHandler(route_ai_callbacks, pattern=r"^ai:"),
+                    group=1)
     app.add_handler(CallbackQueryHandler(route_ai_callbacks,
-                                        pattern=r"^ai_(send|edit|drop):"))
+                                         pattern=r"^ai_(send|edit|drop):"),
+                    group=1)
 
     # منوی اصلی
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))

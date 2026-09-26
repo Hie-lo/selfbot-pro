@@ -139,9 +139,16 @@ async def main():
         results.append((f"آپدیت «{data}» به هندلر AI نمی‌رود",
                         got != "route_ai_callbacks", f"got={got}"))
 
+    # ۳.۵) هندلرهای AI باید در گروه جدا باشند (نه گروه ۰)
+    ai_groups = [g for g, hs in app.handlers.items()
+                 if any(getattr(getattr(h, "callback", None), "__name__", "") == "route_ai_callbacks"
+                        for h in hs)]
+    results.append(("دکمه‌های AI در گروه جدا هستند (ضد بلعیده‌شدن)",
+                    ai_groups == [1], f"groups={ai_groups}"))
+
     # ۴) تعداد هندلرهای گروه اصلی تغییری نکرده باشد (ضد حذف ناخواسته)
     n_main = sum(len(app.handlers[g]) for g in app.handlers if g >= 0)
-    results.append(("تعداد هندلرهای گروه اصلی ≥ ۶۰", n_main >= 60, str(n_main)))
+    results.append(("تعداد هندلرهای گروه ≥ ۶۰", n_main >= 60, str(n_main)))
 
     ok = sum(1 for _, o, _ in results if o)
     for name, passed, extra in results:

@@ -50,6 +50,20 @@ async def post_init(app: Application):
 
     await init_db()
     await startup()
+
+    # خلاصه‌ی وضعیت — یک خط، برای این‌که در journalctl سریع بشود فهمید
+    # همه‌چیز سالم بالا آمده یا نه.
+    try:
+        from core.plugin_manager import ALWAYS_ON_PLUGINS, TOGGLEABLE_PLUGINS
+        from core import ai_providers
+        n_providers = len(ai_providers.load_providers())
+        logger.info(
+            f"Startup OK — plugins: {len(ALWAYS_ON_PLUGINS)} همیشه‌روشن + "
+            f"{len(TOGGLEABLE_PLUGINS)} قابل‌تنظیم | AI providers: {n_providers}"
+        )
+    except Exception as e:
+        logger.warning(f"startup summary failed: {e}")
+
     logger.info("Bot is running!")
 
 
