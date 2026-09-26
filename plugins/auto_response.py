@@ -10,6 +10,7 @@
   .بس                    — توقف اسپم
 """
 
+import html
 import json
 import random
 import re
@@ -52,7 +53,9 @@ class AutoResponsePlugin(BasePlugin):
         self._enemies: dict[int, dict] = {}
         self._cooldowns: dict[int, float] = {}
         self._spam_tasks: dict[int, asyncio.Task] = {}
+        self._spam_targets: dict[int, dict] = {}   # chat_id → {id, name} برای اعلان توقف
         self._my_id = None
+        self._owner_tg: int | None = None          # آیدی تلگرامی صاحب اکانت (پیوی ربات)
 
     async def start(self):
         try:
@@ -62,6 +65,13 @@ class AutoResponsePlugin(BasePlugin):
             # خطای موقت شبکه نباید باعث شود کل پلاگین (و دستورهای دشمن) بالا نیاید
             self.logger.warning(f"get_me failed: {e}")
             self._my_id = None
+
+        # آیدی تلگرامی صاحب اکانت — اعلان‌ها به پیوی ربات کنترلی می‌روند
+        try:
+            owner = await db.get_user_by_db_id(self.user_id)
+            self._owner_tg = (owner or {}).get("telegram_id")
+        except Exception as e:
+            self.logger.warning(f"owner lookup failed: {e}")
 
         await self._load_rules()
 
@@ -115,14 +125,25 @@ class AutoResponsePlugin(BasePlugin):
             chat_id = event.chat_id
             await event.delete()
 
+            target_name = self._name_of(target_id)
+
             # اگه قبلاً اسپم فعاله، اول متوقف کن
             task_key = chat_id
             if task_key in self._spam_tasks:
                 self._spam_tasks[task_key].cancel()
 
             # شروع اسپم
+            self._spam_targets[chat_id] = {"id": target_id, "name": target_name}
             self._spam_tasks[task_key] = asyncio.create_task(
                 self._spam_loop(chat_id, reply.id, target_id)
+            )
+
+            chat_line = ""
+            if not event.is_private:
+                chat_line = f"\n📍 چت: <b>{await self._chat_label(chat_id)}</b>"
+            await self._notify(
+                f"🔥 <b>{target_name}</b> رفت زیر کیر — اسپم شروع شد."
+                f"{chat_line}\n⏹ توقف: <code>.بس</code>"
             )
 
             self.logger.info(f"Spam started on {target_id} in {chat_id}")
@@ -142,10 +163,12 @@ class AutoResponsePlugin(BasePlugin):
             if chat_id in self._spam_tasks:
                 self._spam_tasks[chat_id].cancel()
                 del self._spam_tasks[chat_id]
-                await self.client.send_message(chat_id, "⏹ اسپم متوقف شد.")
+                info = self._spam_targets.get(chat_id) or {}
+                name = info.get("name") or str(info.get("id") or "طرف")
+                await self._notify(f"⏹ اسپم روی <b>{name}</b> متوقف شد.")
                 self.logger.info(f"Spam stopped in {chat_id}")
             else:
-                await self.client.send_message(chat_id, "❌ اسپمی فعال نیست.")
+                await self._notify("ℹ️ اسپمی فعال نبود که متوقف شود.")
 
         self._add_handler(
             stop_spam,
@@ -183,6 +206,34 @@ class AutoResponsePlugin(BasePlugin):
 
         self.logger.info("loaded")
 
+    # ── اعلان‌ها ──
+
+    async def _notify(self, text: str) -> None:
+        """
+        اعلان‌های دشمن/اسپم در همان چت فرستاده نمی‌شوند تا چت تمیز بماند.
+        اول پیوی ربات کنترلی، اگر نشد (کاربر ربات را استارت نکرده) سیو مسیج.
+        """
+        from core import runtime
+        if self._owner_tg and await runtime.notify_user(self._owner_tg, text):
+            return
+        try:
+            await self.client.send_message("me", text, parse_mode="html")
+        except Exception as e:
+            self.logger.error(f"notify failed: {e}")
+
+    def _name_of(self, target_id: int) -> str:
+        """نام نمایشی طرف — از لیست دشمن، وگرنه آیدی"""
+        return html.escape(str((self._enemies.get(target_id) or {}).get("name") or target_id))
+
+    async def _chat_label(self, chat_id) -> str:
+        try:
+            chat = await self.client.get_entity(chat_id)
+            title = (getattr(chat, "title", None)
+                     or getattr(chat, "first_name", None) or chat_id)
+            return html.escape(str(title))
+        except Exception:
+            return str(chat_id)
+
     # ── اسپم loop ──
 
     async def _spam_loop(self, chat_id, reply_msg_id, target_id):
@@ -210,11 +261,12 @@ class AutoResponsePlugin(BasePlugin):
                         if wait > MAX_FLOOD_SLEEP:
                             self.logger.warning(
                                 f"Spam stopped in {chat_id}: flood wait {wait}s too long")
-                            await self.client.send_message(
-                                chat_id,
-                                f"⏹ اسپم متوقف شد — تلگرام {wait} ثانیه محدودیت داده "
-                                f"(بعداً دوباره <code>.بکنش</code>).",
-                                parse_mode="html",
+                            name = (self._spam_targets.get(chat_id) or {}).get("name") \
+                                or str(target_id)
+                            await self._notify(
+                                f"⏹ اسپم روی <b>{name}</b> خودکار متوقف شد — "
+                                f"تلگرام {wait} ثانیه محدودیت داده.\n"
+                                f"بعداً دوباره <code>.بکنش</code> بزن."
                             )
                             break
                         self.logger.warning(f"Spam flood, waiting {wait}s")
@@ -235,6 +287,7 @@ class AutoResponsePlugin(BasePlugin):
             self.logger.info(f"Spam cancelled in {chat_id}")
         finally:
             self._spam_tasks.pop(chat_id, None)
+            self._spam_targets.pop(chat_id, None)
 
     # ── مدیریت دشمن ──
 
@@ -308,8 +361,10 @@ class AutoResponsePlugin(BasePlugin):
         }
 
         await event.delete()
-        await self.client.send_message(
-            event.chat_id, f"😈 {target_name} به لیست دشمنان اضافه شد!"
+        await self._notify(
+            f"😈 <b>{html.escape(str(target_name))}</b> به لیست دشمن اضافه شد.\n"
+            f"🆔 <code>{target_id}</code>\n"
+            f"🔥 برای شروع اسپم: ریپلای روی پیامش → <code>.بکنش</code>"
         )
         self.logger.info(f"Enemy added: {target_name} ({target_id})")
 
@@ -339,8 +394,8 @@ class AutoResponsePlugin(BasePlugin):
             except Exception as e:
                 self.logger.error(f"Delete rule failed: {e}")
             await event.delete()
-            await self.client.send_message(
-                event.chat_id, f"✅ {name} از لیست حذف شد."
+            await self._notify(
+                f"✅ <b>{html.escape(str(name))}</b> از لیست دشمن حذف شد."
             )
             self.logger.info(f"Enemy removed: {name}")
         else:
@@ -348,17 +403,19 @@ class AutoResponsePlugin(BasePlugin):
             await self.client.send_message(event.chat_id, "❌ در لیست نیست.")
 
     async def _list_enemies(self, event):
+        await event.delete()
+
         if not self._enemies:
-            await event.delete()
-            await self.client.send_message(event.chat_id, "📭 لیست خالیه.")
+            await self._notify("📭 لیست دشمن خالیه.")
             return
 
-        text = "😈 **لیست دشمنان:**\n\n"
+        text = "😈 <b>لیست دشمنان:</b>\n\n"
         for i, (uid, info) in enumerate(self._enemies.items(), 1):
-            text += f"{i}. {info['name']} (`{uid}`)\n"
+            name = html.escape(str(info.get("name") or uid))
+            text += f"{i}. <b>{name}</b> — <code>{uid}</code>\n"
+        text += f"\n👥 تعداد: {len(self._enemies)}"
 
-        await event.delete()
-        await self.client.send_message(event.chat_id, text)
+        await self._notify(text)
 
     async def _load_rules(self):
         """خواندن لیست دشمنان از دیتابیس — هیچ خطایی نباید پلاگین را از کار بیندازد"""
