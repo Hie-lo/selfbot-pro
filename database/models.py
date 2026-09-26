@@ -347,4 +347,57 @@ CREATE INDEX IF NOT EXISTS idx_fwc_job
     ON forward_cache(job_id);
 CREATE INDEX IF NOT EXISTS idx_fwc_pending
     ON forward_cache(job_id, src_msg_id) WHERE sent_at IS NULL;
+
+
+-- ═══════════════════════════════════
+-- AI Reply (پاسخ هوشمند)
+-- ═══════════════════════════════════
+
+-- پروفایل هر مخاطب: جایگاهش در زندگی + رفتار من با او
+CREATE TABLE IF NOT EXISTS ai_profiles (
+    id              SERIAL PRIMARY KEY,
+    user_id         INT REFERENCES users(id) ON DELETE CASCADE,
+    target_id       BIGINT NOT NULL,
+    target_name     VARCHAR(255) DEFAULT '',
+    relationship    VARCHAR(30) DEFAULT 'familiar',   -- spouse/family/close_friend/...
+    intimacy        INT DEFAULT 3,                    -- ۱ تا ۵
+    tone_level      INT DEFAULT -1,                   -- -۱ = از جایگاه ارث ببر
+    reply_length    VARCHAR(20) DEFAULT '',           -- '' = پیش‌فرض جایگاه
+    emoji_level     VARCHAR(20) DEFAULT '',
+    nickname        VARCHAR(80) DEFAULT '',           -- من او را چطور صدا می‌زنم
+    red_lines       TEXT DEFAULT '',
+    notes           TEXT DEFAULT '',
+    auto_mode       BOOLEAN DEFAULT FALSE,            -- ارسال خودکار بدون تایید من
+    enabled         BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_profiles_user
+    ON ai_profiles(user_id);
+
+-- حافظه: پیام خام (msg) + خلاصه‌ی سبک‌شده (note) + فکت (fact)
+CREATE TABLE IF NOT EXISTS ai_memory (
+    id              SERIAL PRIMARY KEY,
+    user_id         INT REFERENCES users(id) ON DELETE CASCADE,
+    target_id       BIGINT NOT NULL,
+    kind            VARCHAR(10) NOT NULL,             -- msg | note | fact
+    content         TEXT NOT NULL,
+    -- msg: is_out=من فرستادم؟ | fact: منبع و وضعیت تایید
+    is_out          BOOLEAN DEFAULT TRUE,
+    source          VARCHAR(120) DEFAULT '',
+    status          VARCHAR(12) DEFAULT 'approved',   -- approved | pending | rejected
+    pinned          BOOLEAN DEFAULT FALSE,
+    importance      INT DEFAULT 1,
+    msg_id          BIGINT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_mem_lookup
+    ON ai_memory(user_id, target_id, kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_mem_pinned
+    ON ai_memory(user_id, target_id) WHERE pinned;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_ai_msg
+    ON ai_memory(user_id, target_id, msg_id) WHERE kind = 'msg' AND msg_id IS NOT NULL;
 """

@@ -1071,3 +1071,328 @@ async def update_forward_job_phase(
                 WHERE id = ${len(vals) + 1}""",
             *vals, job_id,
         )
+
+
+# ═══════ AI Reply — پروفایل مخاطب ═══════
+
+
+async def get_ai_profile(user_id: int, target_id: int) -> dict | None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM ai_profiles WHERE user_id = $1 AND target_id = $2",
+            user_id, target_id,
+        )
+        return dict(row) if row else None
+
+
+async def list_ai_profiles(user_id: int, limit: int = 200) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM ai_profiles WHERE user_id = $1
+               ORDER BY updated_at DESC LIMIT $2""",
+            user_id, limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def upsert_ai_profile(user_id: int, target_id: int, **fields) -> None:
+    """ذخیره/به‌روزرسانی پروفایل مخاطب (فقط فیلدهای داده‌شده)"""
+    allowed = (
+        "target_name", "relationship", "intimacy", "tone_level", "reply_length",
+        "emoji_level", "nickname", "red_lines", "notes", "auto_mode", "enabled",
+    )
+    # ترتیب ستون‌ها ثابت است تا شماره‌ی پارامترها با مقادیر جابه‌جا نشود
+    cols = [c for c in allowed if fields.get(c) is not None]
+    vals = [user_id, target_id] + [fields[c] for c in cols]
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if not cols:
+            await conn.execute(
+                """INSERT INTO ai_profiles (user_id, target_id)
+                   VALUES ($1, $2) ON CONFLICT (user_id, target_id) DO NOTHING""",
+                user_id, target_id,
+            )
+            return
+
+        insert_cols = ", ".join(["user_id", "target_id"] + cols)
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(vals)))
+        update_sets = ", ".join(f"{c} = ${i + 3}" for i, c in enumerate(cols))
+        await conn.execute(
+            f"""
+            INSERT INTO ai_profiles ({insert_cols})
+            VALUES ({placeholders})
+            ON CONFLICT (user_id, target_id) DO UPDATE
+                SET {update_sets}, updated_at = NOW()
+            """,
+            *vals,
+        )
+
+
+async def set_ai_auto_mode(user_id: int, target_id: int, auto: bool) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO ai_profiles (user_id, target_id, auto_mode)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (user_id, target_id) DO UPDATE
+                   SET auto_mode = $3, updated_at = NOW()""",
+            user_id, target_id, auto,
+        )
+
+
+async def delete_ai_profile(user_id: int, target_id: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM ai_profiles WHERE user_id = $1 AND target_id = $2",
+            user_id, target_id,
+        )
+
+
+# ═══════ AI Reply — حافظه ═══════
+
+
+async def add_ai_message(user_id: int, target_id: int, content: str,
+                         is_out: bool, msg_id: int | None = None) -> None:
+    """ثبت پیام خام در حافظه (تکراری‌ها نادیده گرفته می‌شوند)"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ai_memory (user_id, target_id, kind, content, is_out, msg_id)
+            VALUES ($1, $2, 'msg', $3, $4, $5)
+            ON CONFLICT DO NOTHING
+            """,
+            user_id, target_id, content[:4000], is_out, msg_id,
+        )
+
+
+async def get_ai_messages(user_id: int, target_id: int, limit: int = 20,
+                          before_id: int | None = None) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if before_id:
+            rows = await conn.fetch(
+                """SELECT * FROM ai_memory
+                   WHERE user_id = $1 AND target_id = $2 AND kind = 'msg' AND id < $3
+                   ORDER BY id DESC LIMIT $4""",
+                user_id, target_id, before_id, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT * FROM ai_memory
+                   WHERE user_id = $1 AND target_id = $2 AND kind = 'msg'
+                   ORDER BY id DESC LIMIT $3""",
+                user_id, target_id, limit,
+            )
+        return [dict(r) for r in reversed(rows)]
+
+
+async def count_ai_memory(user_id: int, target_id: int) -> dict:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT kind, COUNT(*) AS n FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 GROUP BY kind""",
+            user_id, target_id,
+        )
+        out = {r["kind"]: r["n"] for r in rows}
+        out.setdefault("msg", 0)
+        out.setdefault("note", 0)
+        out.setdefault("fact", 0)
+        return out
+
+
+async def add_ai_note(user_id: int, target_id: int, content: str,
+                      source: str = "", importance: int = 1) -> None:
+    """خلاصه‌ی سبک‌شده از پیام‌های قدیمی"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO ai_memory (user_id, target_id, kind, content, source, importance)
+               VALUES ($1, $2, 'note', $3, $4, $5)""",
+            user_id, target_id, content[:4000], source[:120], importance,
+        )
+
+
+async def add_ai_fact(user_id: int, target_id: int, content: str,
+                      source: str = "", status: str = "approved",
+                      importance: int = 1) -> None:
+    """فکت — با وضعیت تایید (pending = منتظر تایید کاربر)"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO ai_memory (user_id, target_id, kind, content, source, status, importance)
+               VALUES ($1, $2, 'fact', $3, $4, $5, $6)""",
+            user_id, target_id, content[:1000], source[:120], status, importance,
+        )
+
+
+async def get_ai_notes(user_id: int, target_id: int, limit: int = 12) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 AND kind = 'note'
+               ORDER BY id DESC LIMIT $3""",
+            user_id, target_id, limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_ai_facts(user_id: int, target_id: int, limit: int = 40,
+                       statuses: tuple = ("approved",)) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 AND kind = 'fact'
+                 AND status = ANY($3::text[])
+               ORDER BY pinned DESC, importance DESC, id DESC LIMIT $4""",
+            user_id, target_id, list(statuses), limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def update_ai_memory(mem_id: int, user_id: int, **fields) -> bool:
+    """ویرایش فکت/خلاصه (متن، سنجاق، وضعیت تایید)"""
+    allowed = {"content", "status", "pinned", "importance"}
+    sets, vals = [], []
+    for col, val in fields.items():
+        if col in allowed and val is not None:
+            vals.append(val)
+            sets.append(f"{col} = ${len(vals)}")
+    if not sets:
+        return False
+    vals += [mem_id, user_id]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            f"UPDATE ai_memory SET {', '.join(sets)} WHERE id = ${len(vals) - 1} AND user_id = ${len(vals)}",
+            *vals,
+        )
+    return res.endswith("1")
+
+
+async def delete_ai_memory(user_id: int, target_id: int,
+                           kind: str | None = None, mem_id: int | None = None) -> int:
+    """حذف حافظه: یک رکورد خاص، یک نوع، یا همه‌ی یک مخاطب"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if mem_id:
+            res = await conn.execute(
+                "DELETE FROM ai_memory WHERE id = $1 AND user_id = $2", mem_id, user_id,
+            )
+        elif kind:
+            res = await conn.execute(
+                "DELETE FROM ai_memory WHERE user_id = $1 AND target_id = $2 AND kind = $3",
+                user_id, target_id, kind,
+            )
+        else:
+            res = await conn.execute(
+                "DELETE FROM ai_memory WHERE user_id = $1 AND target_id = $2",
+                user_id, target_id,
+            )
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0
+
+
+async def get_ai_msgs_older_than(user_id: int, target_id: int, keep: int) -> tuple[list[dict], int]:
+    """
+    پیام‌های خامی که باید سبک‌سازی شوند (همه به‌جز `keep` پیام آخر).
+    خروجی: (پیام‌های قدیمی از قدیم به جدید، id آخرین پیام سبک‌سازی‌شده)
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 AND kind = 'msg'
+               ORDER BY id DESC OFFSET $3 LIMIT 1""",
+            user_id, target_id, keep,
+        )
+        if not row:
+            return [], 0
+        cutoff = row["id"]
+        rows = await conn.fetch(
+            """SELECT * FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 AND kind = 'msg' AND id <= $3
+               ORDER BY id ASC""",
+            user_id, target_id, cutoff,
+        )
+        return [dict(r) for r in rows], cutoff
+
+
+async def delete_ai_msgs_upto(user_id: int, target_id: int, upto_id: int) -> int:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            """DELETE FROM ai_memory
+               WHERE user_id = $1 AND target_id = $2 AND kind = 'msg' AND id <= $3""",
+            user_id, target_id, upto_id,
+        )
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0
+
+
+async def search_ai_memory(user_id: int, target_id: int, query: str,
+                           limit: int = 8, exclude_id: int | None = None,
+                           kinds: tuple = ("msg", "note", "fact")) -> list[dict]:
+    """
+    جست‌وجو در حافظه (پیام‌های خام + خلاصه‌ها + فکت‌ها).
+    بدون embeddings: تطبیق کلمه‌ای + وزن تازگی/سنجاق.
+    exclude_id: برای وقتی که می‌خواهیم «آیا از قبل چیزی می‌دانستم؟» را
+    بفهمیم و پیام تازه‌ی خودِ سؤال نباید جواب را خراب کند.
+    """
+    words = [w for w in query.replace("؟", " ").replace("!", " ").split() if len(w) > 1][:6]
+    if not words:
+        return []
+    patterns = [f"%{w}%" for w in words]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM ai_memory
+            WHERE user_id = $1 AND target_id = $2
+              AND kind = ANY($3::text[])
+              AND (kind = 'note' OR status <> 'rejected')
+              AND content ILIKE ANY($4::text[])
+              AND ($5::bigint IS NULL OR id <> $5)
+            ORDER BY (kind = 'fact') DESC, pinned DESC, id DESC
+            LIMIT $6
+            """,
+            user_id, target_id, list(kinds), patterns, exclude_id, limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def list_ai_chats(user_id: int) -> list[dict]:
+    """چت‌هایی که حافظه دارند (برای پنل)"""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT m.target_id,
+                   COUNT(*) FILTER (WHERE m.kind = 'msg')  AS msgs,
+                   COUNT(*) FILTER (WHERE m.kind = 'note') AS notes,
+                   COUNT(*) FILTER (WHERE m.kind = 'fact') AS facts,
+                   COALESCE(p.target_name, '') AS name,
+                   COALESCE(p.enabled, TRUE)   AS enabled,
+                   COALESCE(p.auto_mode, FALSE) AS auto_mode
+            FROM ai_memory m
+            LEFT JOIN ai_profiles p
+                   ON p.user_id = m.user_id AND p.target_id = m.target_id
+            WHERE m.user_id = $1
+            GROUP BY m.target_id, p.target_name, p.enabled, p.auto_mode
+            ORDER BY MAX(m.created_at) DESC
+            LIMIT 100
+            """,
+            user_id,
+        )
+        return [dict(r) for r in rows]

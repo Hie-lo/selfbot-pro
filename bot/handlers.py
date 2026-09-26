@@ -912,6 +912,15 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_2fa_input(update, context)
         return
 
+    # اولویت ۶: پنل هوش مصنوعی (پرسونا / ویرایش پیش‌نویس)
+    if (context.user_data.get("awaiting_ai_persona")
+            or context.user_data.get("awaiting_ai_draft_edit")
+            or context.user_data.get("awaiting_ai_fact_edit")):
+        from bot.ai_panel import handle_ai_text
+        user = await get_or_create_user(update)
+        if await handle_ai_text(update, context, user["id"]):
+            return
+
     # هیچ state ای نیست → نادیده بگیر
     return
 
@@ -1476,7 +1485,38 @@ async def ban_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
-def register_handlers(app: Application):
+
+async def route_ai_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    مسیریاب callback های «ai:*» (پنل هوش مصنوعی) و پیش‌نویس‌ها.
+    TypeHandler است تا ترتیب هندلرهای دیگر را به‌هم نزند و اگر مربوط
+    نبود، سریع رد شود.
+    """
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    data = q.data
+    if not (data.startswith("ai:") or data.startswith("ai_send:")
+            or data.startswith("ai_edit:") or data.startswith("ai_drop:")):
+        return
+
+    user = await get_or_create_user(update)
+    try:
+        if data.startswith("ai:"):
+            from bot.ai_panel import cb_ai
+            await cb_ai(update, context, user["id"])
+        else:
+            from bot.ai_panel import cb_ai_draft
+            await cb_ai_draft(update, context, user["id"])
+    except Exception as e:
+        logger.error(f"AI panel callback failed: {type(e).__name__}: {e}")
+        try:
+            await q.answer("خطا در پنل هوش مصنوعی", show_alert=True)
+        except Exception:
+            pass
+
+
+async def register_handlers(app: Application):
     """ثبت همه هندلرها با اولویت درست"""
 
     # ── 0. مسدودی (group=-1 → قبل از همه) ──
@@ -1499,6 +1539,11 @@ def register_handlers(app: Application):
     async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
     app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
+
+    # ── ۵.۵ پنل هوش مصنوعی (ai:*) و پیش‌نویس‌های پاسخ (ai_send/ai_edit/ai_drop) ──
+    # الگوهای این callback با بقیه‌ی دکمه‌ها تداخل ندارند؛ هندلر فقط
+    # callback_dataهای ai را برمی‌دارد و بقیه را رد می‌کند.
+    app.add_handler(TypeHandler(Update, route_ai_callbacks))
 
     # منوی اصلی
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))

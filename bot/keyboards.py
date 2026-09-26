@@ -18,6 +18,9 @@ def main_menu_kb(has_account: bool = False, is_admin: bool = False) -> InlineKey
             InlineKeyboardButton("📂 ذخیره‌سازی", callback_data="storage"),
         ])
         buttons.append([
+            InlineKeyboardButton("🧠 هوش مصنوعی", callback_data="ai:menu"),
+        ])
+        buttons.append([
             InlineKeyboardButton("📥 فوروارد محتوا", callback_data="fwd_start"),
         ])
         buttons.append([
@@ -106,6 +109,7 @@ TOGGLEABLE_FEATURES = [
     ("anti_edit", "✏️ ضد ویرایش", ".ضدویرایش"),
     ("channel_monitor", "📡 مانیتور کانال", ".مانیتور"),
     ("auto_response", "💬 پاسخ خودکار", ".دشمن"),
+    ("ai_reply", "🧠 پاسخ هوشمند AI", ".ai"),
 ]
 
 # همه قابلیت‌ها

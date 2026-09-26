@@ -35,6 +35,7 @@ FEATURE_NAMES = {
     "anti_edit": "✏️ ضد ویرایش",
     "auto_response": "💬 دشمن",
     "typing_animation": "✍️ انیمیشن تایپ",
+    "ai_reply": "🧠 پاسخ هوشمند",
     "channel_monitor": "📡 مانیتور",
 }
 
@@ -61,6 +62,9 @@ _MANUAL_NAMES = {
     "ضد ویرایش": "anti_edit",
     "دشمن": "auto_response",
     "پاسخ خودکار": "auto_response",
+    "هوش مصنوعی": "ai_reply",
+    "ai": "ai_reply",
+    "پاسخ هوشمند": "ai_reply",
     "مانیتور": "channel_monitor",
 }
 
@@ -248,6 +252,29 @@ class PanelPlugin(BasePlugin):
                 pattern=r"^\.(دشمن|لیست دشمن|بکنش|بس)",
                 outgoing=True,
             ),
+        )
+
+        # ── راهنمای قابلیت خاموش (هوش مصنوعی) ──
+        async def ai_off_hint(event):
+            if not event.out:
+                return
+            from core.plugin_manager import get_active_plugins
+            if "ai_reply" in get_active_plugins(self.user_id):
+                return
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            await self.client.send_message(
+                event.chat_id,
+                "⚠️ قابلیت «🧠 پاسخ هوشمند» خاموش است.\n"
+                "برای فعال‌سازی: <code>.روشن هوش مصنوعی</code>",
+                parse_mode="html",
+            )
+
+        self._add_handler(
+            ai_off_hint,
+            events.NewMessage(pattern=r"^\.(ai|تنظیم)", outgoing=True),
         )
 
         # ── .وضعیت ──

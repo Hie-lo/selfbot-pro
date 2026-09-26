@@ -20,6 +20,48 @@ from bot import help_content as H  # noqa: E402
 PATTERN_RE = re.compile(r'pattern\s*=\s*\(?\s*r"\^\\\.([^"]+)"')
 
 
+def _top_alternatives(body: str) -> list[str] | None:
+    """
+    اگر الگو با یک گروه شروع شود، گزینه‌های آن را برمی‌گرداند.
+    پرانتزهای تودرتو (مثل (?:مود|سطح)) درست حساب می‌شوند.
+    """
+    if not body.startswith("("):
+        return None
+    start = 3 if body.startswith("(?:") else 1
+    depth = 1
+    i = start
+    alts: list[str] = []
+    current = ""
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\":
+            current += body[i:i + 2]
+            i += 2
+            continue
+        if body.startswith("(?:", i):
+            depth += 1
+            current += "(?:"
+            i += 3
+            continue
+        if ch == "(":
+            depth += 1
+            current += ch
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                alts.append(current)
+                return [a for a in alts if a]
+            current += ch
+        elif ch == "|" and depth == 1:
+            # فقط جداکننده‌های سطح بالا؛ | داخل گروه‌های تودرتو حساب نمی‌شود
+            alts.append(current)
+            current = ""
+        else:
+            current += ch
+        i += 1
+    return None
+
+
 def _plugin_commands() -> set[str]:
     """اولین کلمه(های) ثابت هر الگوی دستور در plugins/"""
     cmds: set[str] = set()
@@ -33,10 +75,20 @@ def _plugin_commands() -> set[str]:
             if not line.lstrip().startswith("#")
         )
         for body in PATTERN_RE.findall(src):
-            if body.startswith("("):
-                # ^\.(دشمن|لیست دشمن)
-                group = body[1:body.index(")")]
-                cmds.update(g.strip() for g in group.split("|"))
+            alts = _top_alternatives(body)
+            if alts is not None:
+                # ^\.(دشمن|لیست دشمن)   یا   ^\.(?:ai|تنظیم\s+(?:مود|سطح))
+                for alt in alts:
+                    words = []
+                    for tok in re.split(r"\\s[+*]", alt):
+                        lit = re.match(r"[^\\()\[$?]+", tok)
+                        if not lit:
+                            break
+                        words.append(lit.group(0).strip())
+                        if lit.group(0) != tok:
+                            break
+                    if words:
+                        cmds.add(" ".join(w for w in words if w))
                 continue
             # ^\.فوروارد\s+حذف\s*$  →  «فوروارد حذف»
             words = []

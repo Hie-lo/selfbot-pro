@@ -8,6 +8,7 @@ from database import db
 
 from plugins.dice import DicePlugin
 from plugins.typing import TypingPlugin
+from plugins.ai_reply import AiReplyPlugin
 from plugins.heart import HeartPlugin
 from plugins.panel import PanelPlugin
 from plugins.save_from_link import SaveFromLinkPlugin
@@ -41,6 +42,7 @@ TOGGLEABLE_PLUGINS = {
     "anti_edit": AntiEditPlugin,
     "auto_response": AutoResponsePlugin,
     "channel_monitor": ChannelMonitorPlugin,
+    "ai_reply": AiReplyPlugin,
 }
 
 # پلاگین‌های فعال هر کاربر
