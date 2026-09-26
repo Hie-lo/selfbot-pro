@@ -531,17 +531,23 @@ async def save_message_record(
 
 async def save_auto_response_rule(
     user_id: int, target_user_id: int, response_list: list,
+    target_name: str | None = None,
 ) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
+        # upsert: افزودن دوباره‌ی همان دشمن باید لیست پاسخ‌ها را به‌روز کند،
+        # نه اینکه بی‌صدا نادیده گرفته شود (قبلاً ON CONFLICT DO NOTHING بود)
         await conn.execute(
             """
             INSERT INTO auto_response_rules
-                (user_id, target_user_id, response_list)
-            VALUES ($1, $2, $3::jsonb)
-            ON CONFLICT DO NOTHING
+                (user_id, target_user_id, response_list, trigger_value, is_active)
+            VALUES ($1, $2, $3::jsonb, $4, TRUE)
+            ON CONFLICT (user_id, target_user_id) DO UPDATE
+                SET response_list = EXCLUDED.response_list,
+                    trigger_value = COALESCE(EXCLUDED.trigger_value, auto_response_rules.trigger_value),
+                    is_active     = TRUE
             """,
-            user_id, target_user_id, json.dumps(response_list),
+            user_id, target_user_id, json.dumps(response_list), target_name,
         )
 
 

@@ -124,8 +124,17 @@ CREATE TABLE IF NOT EXISTS auto_response_rules (
 CREATE INDEX IF NOT EXISTS idx_rule_user
     ON auto_response_rules(user_id);
 
--- بدون این index، ON CONFLICT DO NOTHING در
--- save_auto_response_rule() بی‌اثر است
+-- نسخه‌های قدیمی این index را نداشتند و هر بار افزودن یک «دشمن» ردیف
+-- تکراری می‌ساخت؛ پاک‌سازی لازم است وگرنه ساخت index یکتا شکست می‌خورد
+-- و کل برنامه بالا نمی‌آمد.
+DELETE FROM auto_response_rules a
+ USING auto_response_rules b
+ WHERE a.user_id = b.user_id
+   AND a.target_user_id = b.target_user_id
+   AND a.id < b.id;
+
+-- بدون این index، ON CONFLICT ... DO UPDATE در
+-- save_auto_response_rule() کار نمی‌کند
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_auto_response
     ON auto_response_rules(user_id, target_user_id);
 

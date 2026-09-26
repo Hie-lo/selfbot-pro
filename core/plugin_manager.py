@@ -7,6 +7,7 @@ from telethon import TelegramClient
 from database import db
 
 from plugins.dice import DicePlugin
+from plugins.typing import TypingPlugin
 from plugins.heart import HeartPlugin
 from plugins.panel import PanelPlugin
 from plugins.save_from_link import SaveFromLinkPlugin
@@ -29,6 +30,7 @@ ALWAYS_ON_PLUGINS = {
     "forward_channel": ForwardChannelPlugin,
     "sticker_convert": StickerConvertPlugin,
     "panel": PanelPlugin,
+    "typing_animation": TypingPlugin,
 }
 
 

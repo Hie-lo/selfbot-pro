@@ -10,12 +10,18 @@
   .بس                    — توقف اسپم
 """
 
+import json
 import random
+import re
 import time
 import asyncio
 from telethon import events
 from plugins.base import BasePlugin
 from database import db
+
+# «A wait of 123 seconds is required» / «FLOOD_WAIT_123» → 123
+_WAIT_RE = re.compile(r"FLOOD_WAIT_(\d+)|wait of (\d+)\s*second", re.I)
+MAX_FLOOD_SLEEP = 900          # بیش از این، اسپم در همین چت خودکار می‌ایستد
 
 
 DEFAULT_RESPONSES = [
@@ -49,8 +55,13 @@ class AutoResponsePlugin(BasePlugin):
         self._my_id = None
 
     async def start(self):
-        me = await self.client.get_me()
-        self._my_id = me.id
+        try:
+            me = await self.client.get_me()
+            self._my_id = me.id if me else None
+        except Exception as e:
+            # خطای موقت شبکه نباید باعث شود کل پلاگین (و دستورهای دشمن) بالا نیاید
+            self.logger.warning(f"get_me failed: {e}")
+            self._my_id = None
 
         await self._load_rules()
 
@@ -191,12 +202,21 @@ class AutoResponsePlugin(BasePlugin):
                 except Exception as e:
                     err = str(e).lower()
                     if "flood" in err:
-                        # FloodWait
-                        wait = 30
-                        try:
-                            wait = int("".join(filter(str.isdigit, str(e)))) or 30
-                        except Exception:
-                            pass
+                        # FloodWait — «A wait of 123 seconds...» یا FLOOD_WAIT_123
+                        # (قبلاً همه‌ی رقم‌های پیام خوانده می‌شد و عددی مثل
+                        #  4203600 ساخته می‌شد → اسپم تا روزها خواب می‌رفت)
+                        m = _WAIT_RE.search(str(e))
+                        wait = int(next(g for g in m.groups() if g)) if m else 30
+                        if wait > MAX_FLOOD_SLEEP:
+                            self.logger.warning(
+                                f"Spam stopped in {chat_id}: flood wait {wait}s too long")
+                            await self.client.send_message(
+                                chat_id,
+                                f"⏹ اسپم متوقف شد — تلگرام {wait} ثانیه محدودیت داده "
+                                f"(بعداً دوباره <code>.بکنش</code>).",
+                                parse_mode="html",
+                            )
+                            break
                         self.logger.warning(f"Spam flood, waiting {wait}s")
                         await asyncio.sleep(wait)
                         continue
@@ -260,11 +280,28 @@ class AutoResponsePlugin(BasePlugin):
 
         if target_id == self._my_id:
             await event.delete()
+            await self.client.send_message(
+                event.chat_id, "❌ این پیام مال خودته — روی پیام طرف مقابل ریپلای کن."
+            )
             return
 
-        await db.save_auto_response_rule(
-            self.user_id, target_id, DEFAULT_RESPONSES,
-        )
+        try:
+            await db.save_auto_response_rule(
+                self.user_id, target_id, DEFAULT_RESPONSES, target_name,
+            )
+        except Exception as e:
+            # خطای دیتابیس نباید بی‌صدا باشد (قبلاً فقط در لاگ می‌ماند و
+            # کاربر فکر می‌کرد دستور کار نمی‌کند)
+            self.logger.error(f"Save rule failed: {e}")
+            await event.delete()
+            await self.client.send_message(
+                event.chat_id,
+                f"❌ ذخیره نشد: <code>{type(e).__name__}</code>\n"
+                f"<i>{str(e)[:200]}</i>",
+                parse_mode="html",
+            )
+            return
+
         self._enemies[target_id] = {
             "name": target_name,
             "responses": DEFAULT_RESPONSES,
@@ -297,7 +334,10 @@ class AutoResponsePlugin(BasePlugin):
 
         if target_id and target_id in self._enemies:
             name = self._enemies.pop(target_id, {}).get("name", str(target_id))
-            await db.delete_auto_response_rule(self.user_id, target_id)
+            try:
+                await db.delete_auto_response_rule(self.user_id, target_id)
+            except Exception as e:
+                self.logger.error(f"Delete rule failed: {e}")
             await event.delete()
             await self.client.send_message(
                 event.chat_id, f"✅ {name} از لیست حذف شد."
@@ -321,19 +361,31 @@ class AutoResponsePlugin(BasePlugin):
         await self.client.send_message(event.chat_id, text)
 
     async def _load_rules(self):
-        rules = await db.get_auto_response_rules(self.user_id)
+        """خواندن لیست دشمنان از دیتابیس — هیچ خطایی نباید پلاگین را از کار بیندازد"""
+        try:
+            rules = await db.get_auto_response_rules(self.user_id)
+        except Exception as e:
+            self.logger.error(f"Load rules failed: {e}")
+            return
+
         for r in rules:
-            tid = r["target_user_id"]
-            responses = r.get("response_list", DEFAULT_RESPONSES)
-            if isinstance(responses, str):
-                import json
-                responses = json.loads(responses)
-            self._enemies[tid] = {
-                "name": str(tid),
-                "responses": responses,
-            }
-        if rules:
-            self.logger.info(f"loaded {len(rules)} enemies")
+            try:
+                tid = r.get("target_user_id")
+                if tid is None:
+                    continue
+                responses = r.get("response_list") or DEFAULT_RESPONSES
+                if isinstance(responses, str):
+                    responses = json.loads(responses)
+                if not isinstance(responses, list) or not responses:
+                    responses = DEFAULT_RESPONSES
+                # نام ذخیره‌شده (قبلاً ذخیره نمی‌شد و فقط آیدی نمایش داده می‌شد)
+                name = (r.get("trigger_value") or "").strip() or str(tid)
+                self._enemies[int(tid)] = {"name": name, "responses": responses}
+            except Exception as e:
+                self.logger.warning(f"Skipped bad rule {r.get('id')}: {e}")
+
+        if self._enemies:
+            self.logger.info(f"loaded {len(self._enemies)} enemies")
 
     async def stop(self):
         for task in self._spam_tasks.values():

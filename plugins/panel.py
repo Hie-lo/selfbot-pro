@@ -34,13 +34,15 @@ FEATURE_NAMES = {
     "anti_delete": "🗑 ضد حذف",
     "anti_edit": "✏️ ضد ویرایش",
     "auto_response": "💬 دشمن",
+    "typing_animation": "✍️ انیمیشن تایپ",
     "channel_monitor": "📡 مانیتور",
 }
 
 # قابلیت‌های همیشه روشن که به کاربر نمایش داده می‌شوند.
 # باید با core.plugin_manager.ALWAYS_ON_PLUGINS یکی باشد (پنل خودش نمایش
 # داده نمی‌شود) — تست tests/test_help_coverage.py این را چک می‌کند.
-ALWAYS_ON = {"dice", "heart_animation", "save_from_link", "sticker_convert", "forward_channel"}
+ALWAYS_ON = {"dice", "heart_animation", "save_from_link", "sticker_convert",
+             "forward_channel", "typing_animation"}
 
 # نام‌های دستی برای .روشن / .خاموش
 _MANUAL_NAMES = {
@@ -216,6 +218,36 @@ class PanelPlugin(BasePlugin):
         self._add_handler(
             disable_cmd,
             events.NewMessage(pattern=r"^\.خاموش\s+(.+)$", outgoing=True),
+        )
+
+        # ── راهنمای قابلیت خاموش (دشمن) ──
+        # اگر پلاگین دشمن روشن نباشد، دستورهایش بی‌صدا هیچ کاری نمی‌کردند و
+        # به‌نظر «خراب» می‌آمدند؛ اینجا علت را می‌گوید.
+        async def off_hint(event):
+            if not event.out:
+                return
+
+            from core.plugin_manager import get_active_plugins
+            if "auto_response" in get_active_plugins(self.user_id):
+                return          # پلاگین روشن است → دستور خودش اجرا می‌شود
+
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            await self.client.send_message(
+                event.chat_id,
+                "⚠️ قابلیت «💬 دشمن» خاموش است.\n"
+                "برای فعال‌سازی: <code>.روشن دشمن</code>",
+                parse_mode="html",
+            )
+
+        self._add_handler(
+            off_hint,
+            events.NewMessage(
+                pattern=r"^\.(دشمن|لیست دشمن|بکنش|بس)",
+                outgoing=True,
+            ),
         )
 
         # ── .وضعیت ──
