@@ -18,9 +18,9 @@ from plugins.base import BasePlugin
 from plugins.heart import EditPacer, play_frames
 
 CURSOR = "▌"                  # نشانگر تایپ
-MAX_FRAMES = 14               # سقف ویرایش‌ها (تلگرام روی ویرایش سریع محدودیت می‌گذارد)
-MIN_DELAY = 0.55              # کف فاصله‌ی فریم‌ها — جلوگیری از FloodWait
-TOTAL_SECONDS = 6.0           # مدت کل انیمیشن
+MAX_FRAMES = 9                # سقف ویرایش‌ها (تلگرام روی ویرایش سریع محدودیت می‌گذارد)
+MIN_DELAY = 0.16              # کف فاصله‌ی فریم‌ها — جلوگیری از FloodWait
+TOTAL_SECONDS = 1.5          # مدت کل انیمیشن (قبلاً ۶ ثانیه بود و کند به‌نظر می‌رسید)
 MAX_ANIM_CHARS = 3000         # بیشتر از این، انیمیشن بی‌معنی است
 
 
@@ -58,7 +58,7 @@ def build_frames(text: str) -> list[tuple[str, float]]:
         return [(CURSOR, 0.0)]
 
     n = len(units)
-    frames_count = min(MAX_FRAMES, max(4, n // 3 + 1))
+    frames_count = min(MAX_FRAMES, max(4, n // 4 + 1))
     step = max(1, math.ceil(n / frames_count))
 
     texts = [CURSOR]

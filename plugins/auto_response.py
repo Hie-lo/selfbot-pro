@@ -25,22 +25,72 @@ _WAIT_RE = re.compile(r"FLOOD_WAIT_(\d+)|wait of (\d+)\s*second", re.I)
 MAX_FLOOD_SLEEP = 900          # بیش از این، اسپم در همین چت خودکار می‌ایستد
 
 
-DEFAULT_RESPONSES = [
-    "🤡", "😂", "خفه", "برو بابا", "😑",
-    "حوصلتو ندارم", "🖕", "بیکاری؟", "😒",
-    "گمشو", "🤮", "چرت نگو", "😤",
+# ─────────────── پیام‌ها ───────────────
+# فقط فحش‌های سنگین اینجا می‌مانند؛ جمله‌های ساده‌لوحانه (برو بابا، خفه شو،
+# خر، احمق، آشغال، بی‌کاری؟، چرت نگو ...) حذف شده‌اند.
+#
+# ➕ هر خط سنگین‌تری خواستی اضافه کنی، فقط به همین لیست اضافه کن؛ نه ایمپورت
+#    جایی عوض می‌شود نه چیز دیگری. انتخاب پیام‌ها با «کیسه‌ی شافل» است، یعنی
+#    هر جمله قبل از تکرار دوباره‌ی خودش، همه‌ی جمله‌های دیگر یک‌بار می‌آیند —
+#    با لیست بزرگ‌تر، تنوع به‌شکل خودکار بیشتر می‌شود.
+HEAVY_MESSAGES = [
+    "کیرم تو کص ننت",
+    "مادرجنده",
+    "ننت جنده",
+    "بچه کونی",
+    "کصخل",
+    "کونی",
+    "کص ننت",
+    "بیا اینو بخور 🍆",
+    "بی‌ناموس",
+    "بی‌شرف",
+    "حرومزاده",
+    "خایه‌مال",
+    "سیکتیر",
 ]
 
-SPAM_MESSAGES = [
-    "🤡🤡🤡", "خفه شو", "گمشو بابا", "😂😂😂",
-    "کصخل", "🖕🖕", "خر", "احمق",
-    "بی‌ناموس", "کیرم تو کص ننت", "مادرجنده",
-    "بیا اینو بخور 🍆", "ننت جنده",
-    "کونی", "چاقال", "بی‌شرف", "حرومزاده",
-    "🤮🤮🤮", "ببند دهنتو", "آشغال",
-    "کص ننت", "برو گمشو", "🖕🖕🖕",
-    "خایه‌مال", "بچه کونی", "سیکتیر",
+# چاشنی‌های تصادفی — از همین جمله‌ها ترکیب‌های تازه می‌سازند تا تکراری کم شود
+FLAVORS = [
+    " 🤡", " 🖕", " 🖕🖕🖕", " 🤮", " 🍆", " 🤡🤡🤡",
 ]
+
+# جمله‌ی اول، پاسخ خودکار به دشمن هم همین‌ها است (قبلاً یه لیست جدا و
+# بی‌رنگ داشت: 🤡 😂 خفه برو بابا ...)
+DEFAULT_RESPONSES = HEAVY_MESSAGES
+
+
+class ShuffledBag:
+    """
+    قرعه‌کشی بدون تکرار: تا وقتی همه‌ی گزینه‌ها مصرف نشده‌اند هیچ‌کدام دوباره
+    برنمی‌گردد و بین دو دور هم جمله‌ی آخر تکرار نمی‌شود.
+    """
+
+    def __init__(self, items):
+        self._items = list(items)
+        self._bag: list = []
+        self._last_base: str | None = None   # جمله‌ی پایه‌ی پیام قبلی (بدون چاشنی)
+
+    def next(self) -> str:
+        if not self._bag:
+            self._bag = list(self._items)
+            random.shuffle(self._bag)
+            # اولین جمله‌ی دور جدید نباید همان جمله‌ی پایه‌ی دور قبل باشد
+            if len(self._bag) > 1 and self._bag[-1] == self._last_base:
+                self._bag[0], self._bag[-1] = self._bag[-1], self._bag[0]
+
+        item = self._bag.pop()
+        base = item
+        # گاهی دو جمله‌ی سنگین با هم ترکیب می‌شوند → پیام‌های متنوع‌تر
+        if self._bag and random.random() < 0.35:
+            extra = self._bag.pop()
+            if len(item) + len(extra) + 1 <= 90:
+                item = f"{item} {extra}"
+            else:
+                self._bag.append(extra)
+        if random.random() < 0.5:
+            item += random.choice(FLAVORS)
+        self._last_base = base
+        return item
 
 
 class AutoResponsePlugin(BasePlugin):
@@ -54,6 +104,9 @@ class AutoResponsePlugin(BasePlugin):
         self._cooldowns: dict[int, float] = {}
         self._spam_tasks: dict[int, asyncio.Task] = {}
         self._spam_targets: dict[int, dict] = {}   # chat_id → {id, name} برای اعلان توقف
+        # کیسه‌ی پیام هر چت: تا همه‌ی جمله‌ها مصرف نشوند تکراری نمی‌آید
+        self._spam_bags: dict[int, ShuffledBag] = {}
+        self._reply_bags: dict[int, ShuffledBag] = {}   # هر دشمن کیسه‌ی خودش را دارد
         self._my_id = None
         self._owner_tg: int | None = None          # آیدی تلگرامی صاحب اکانت (پیوی ربات)
 
@@ -191,10 +244,12 @@ class AutoResponsePlugin(BasePlugin):
                 return
             self._cooldowns[sender_id] = now
 
-            responses = self._enemies[sender_id].get(
-                "responses", DEFAULT_RESPONSES
-            )
-            response = random.choice(responses)
+            # کیسه‌ی مخصوص همین دشمن → جواب پشت‌سرهم تکراری نمی‌شود
+            bag = self._reply_bags.get(sender_id)
+            if bag is None:
+                responses = self._enemies[sender_id].get("responses") or HEAVY_MESSAGES
+                bag = self._reply_bags[sender_id] = ShuffledBag(responses)
+            response = bag.next()
 
             try:
                 await event.reply(response)
@@ -238,10 +293,11 @@ class AutoResponsePlugin(BasePlugin):
 
     async def _spam_loop(self, chat_id, reply_msg_id, target_id):
         """ارسال پیام‌های اسپم با ریپلای"""
+        bag = self._spam_bags.setdefault(chat_id, ShuffledBag(HEAVY_MESSAGES))
         try:
             count = 0
             while True:
-                msg_text = random.choice(SPAM_MESSAGES)
+                msg_text = bag.next()
 
                 try:
                     await self.client.send_message(
@@ -288,6 +344,7 @@ class AutoResponsePlugin(BasePlugin):
         finally:
             self._spam_tasks.pop(chat_id, None)
             self._spam_targets.pop(chat_id, None)
+            self._spam_bags.pop(chat_id, None)
 
     # ── مدیریت دشمن ──
 
@@ -430,13 +487,25 @@ class AutoResponsePlugin(BasePlugin):
                 tid = r.get("target_user_id")
                 if tid is None:
                     continue
-                responses = r.get("response_list") or DEFAULT_RESPONSES
+                # نام ذخیره‌شده (قبلاً ذخیره نمی‌شد و فقط آیدی نمایش داده می‌شد)
+                name = (r.get("trigger_value") or "").strip() or str(tid)
+
+                responses = r.get("response_list") or HEAVY_MESSAGES
                 if isinstance(responses, str):
                     responses = json.loads(responses)
                 if not isinstance(responses, list) or not responses:
-                    responses = DEFAULT_RESPONSES
-                # نام ذخیره‌شده (قبلاً ذخیره نمی‌شد و فقط آیدی نمایش داده می‌شد)
-                name = (r.get("trigger_value") or "").strip() or str(tid)
+                    responses = HEAVY_MESSAGES
+                # لیست ذخیره‌شده‌ی قدیمی (همان جمله‌های ساده‌لوحانه) با لیست
+                # جدید سنگین عوض می‌شود تا تغییر واقعاً روی دشمن‌های قبلی هم بیاید
+                if sorted(map(str, responses)) != sorted(HEAVY_MESSAGES):
+                    responses = HEAVY_MESSAGES
+                    try:
+                        await db.save_auto_response_rule(
+                            self.user_id, int(tid), HEAVY_MESSAGES, name
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Rule refresh failed ({tid}): {e}")
+
                 self._enemies[int(tid)] = {"name": name, "responses": responses}
             except Exception as e:
                 self.logger.warning(f"Skipped bad rule {r.get('id')}: {e}")
@@ -448,6 +517,8 @@ class AutoResponsePlugin(BasePlugin):
         for task in self._spam_tasks.values():
             task.cancel()
         self._spam_tasks.clear()
+        self._spam_bags.clear()
+        self._reply_bags.clear()
         self._enemies.clear()
         self._cooldowns.clear()
         await super().stop()
