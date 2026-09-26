@@ -1541,9 +1541,12 @@ async def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(cb_noop, pattern="^noop$"))
 
     # ── ۵.۵ پنل هوش مصنوعی (ai:*) و پیش‌نویس‌های پاسخ (ai_send/ai_edit/ai_drop) ──
-    # الگوهای این callback با بقیه‌ی دکمه‌ها تداخل ندارند؛ هندلر فقط
-    # callback_dataهای ai را برمی‌دارد و بقیه را رد می‌کند.
-    app.add_handler(TypeHandler(Update, route_ai_callbacks))
+    # ⚠️ این‌جا باید الگو (pattern) داشته باشیم: در PTB در هر گروه فقط یک
+    # هندلر اجرا می‌شود، پس یک هندلر «همه‌گیر» (TypeHandler(Update)) بقیه‌ی
+    # دکمه‌ها و پیام‌ها را می‌بلعد و ربات به هیچ‌چیز جواب نمی‌دهد.
+    app.add_handler(CallbackQueryHandler(route_ai_callbacks, pattern=r"^ai:"))
+    app.add_handler(CallbackQueryHandler(route_ai_callbacks,
+                                        pattern=r"^ai_(send|edit|drop):"))
 
     # منوی اصلی
     app.add_handler(CallbackQueryHandler(cb_back_main, pattern="^back_main$"))

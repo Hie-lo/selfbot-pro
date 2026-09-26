@@ -22,9 +22,25 @@ import logging
 import os
 import time
 
-import httpx
-
 logger = logging.getLogger("ai_providers")
+
+_httpx = None
+
+
+def _http():
+    """
+    httpx فقط وقتی AI واقعاً استفاده شود ایمپورت می‌شود.
+    اگر نصب نباشد، کل ربات نمی‌خوابد؛ فقط قابلیت AI پیام راهنما می‌دهد.
+    """
+    global _httpx
+    if _httpx is None:
+        try:
+            import httpx as _m
+            _httpx = _m
+        except ImportError:
+            logger.error("httpx نصب نیست — دستور: pip install -r requirements.txt")
+            _httpx = False
+    return _httpx or None
 
 REQUEST_TIMEOUT = 45.0          # ثانیه
 COOLDOWN_AFTER_ERROR = 90       # ثانیه — چقدر یک کلید/سرویس خطادار کنار برود
@@ -225,7 +241,10 @@ async def _call_provider(p: Provider, key: str, messages: list[dict],
         payload = _openai_payload(p, messages, max_tokens, temperature)
         headers = _openai_headers(p, key)
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+    hx = _http()
+    if hx is None:
+        return None
+    async with hx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         resp = await client.post(url, json=payload, headers=headers)
 
     if resp.status_code in (429, 500, 502, 503, 504):
@@ -276,11 +295,13 @@ async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
                 if text:
                     logger.info(f"AI reply via {p.name} ({p.model})")
                     return text, p.name
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                logger.warning(f"{p.name}: network error ({type(e).__name__})")
-                p.cooldown(key, 45)
             except Exception as e:
-                logger.error(f"{p.name}: {type(e).__name__}: {e}")
+                hx = _http()
+                if hx and isinstance(e, (hx.TimeoutException, hx.TransportError)):
+                    logger.warning(f"{p.name}: network error ({type(e).__name__})")
+                    p.cooldown(key, 45)
+                else:
+                    logger.error(f"{p.name}: {type(e).__name__}: {e}")
         if attempts >= MAX_ATTEMPTS:
             break
 

@@ -6,23 +6,42 @@ import logging
 from telethon import TelegramClient
 from database import db
 
-from plugins.dice import DicePlugin
-from plugins.typing import TypingPlugin
-from plugins.ai_reply import AiReplyPlugin
-from plugins.heart import HeartPlugin
-from plugins.panel import PanelPlugin
-from plugins.save_from_link import SaveFromLinkPlugin
-from plugins.forward_channel import ForwardChannelPlugin
-from plugins.sticker_convert import StickerConvertPlugin
-from plugins.banner import BannerPlugin
-from plugins.timed_saver import TimedSaverPlugin
-from plugins.anti_delete import AntiDeletePlugin
-from plugins.anti_edit import AntiEditPlugin
-from plugins.auto_response import AutoResponsePlugin
-
-from plugins.channel_monitor import ChannelMonitorPlugin
-
 logger = logging.getLogger("plugin_manager")
+
+
+def _safe_import(module: str, cls_name: str):
+    """
+    ایمپورت پلاگین‌ها به‌صورت ایمن: اگر یک پلاگین (یا وابستگی‌اش) خراب باشد،
+    بقیه‌ی ربات باید بالا بیاید و فقط همان قابلیت غیرفعال شود — قبلاً یک
+    خطای ایمپورت، کل برنامه را از کار می‌انداخت.
+    """
+    try:
+        mod = __import__(module, fromlist=[cls_name])
+        return getattr(mod, cls_name)
+    except Exception as e:                      # noqa: BLE001
+        logger.error(f"plugin import failed: {module}.{cls_name}: {type(e).__name__}: {e}")
+        return None
+
+
+_PLUGIN_IMPORTS = {
+    "DicePlugin": ("plugins.dice", "DicePlugin"),
+    "TypingPlugin": ("plugins.typing", "TypingPlugin"),
+    "AiReplyPlugin": ("plugins.ai_reply", "AiReplyPlugin"),
+    "HeartPlugin": ("plugins.heart", "HeartPlugin"),
+    "PanelPlugin": ("plugins.panel", "PanelPlugin"),
+    "SaveFromLinkPlugin": ("plugins.save_from_link", "SaveFromLinkPlugin"),
+    "ForwardChannelPlugin": ("plugins.forward_channel", "ForwardChannelPlugin"),
+    "StickerConvertPlugin": ("plugins.sticker_convert", "StickerConvertPlugin"),
+    "BannerPlugin": ("plugins.banner", "BannerPlugin"),
+    "TimedSaverPlugin": ("plugins.timed_saver", "TimedSaverPlugin"),
+    "AntiDeletePlugin": ("plugins.anti_delete", "AntiDeletePlugin"),
+    "AntiEditPlugin": ("plugins.anti_edit", "AntiEditPlugin"),
+    "AutoResponsePlugin": ("plugins.auto_response", "AutoResponsePlugin"),
+    "ChannelMonitorPlugin": ("plugins.channel_monitor", "ChannelMonitorPlugin"),
+}
+
+_loaded = {name: _safe_import(*path) for name, path in _PLUGIN_IMPORTS.items()}
+globals().update(_loaded)
 
 ALWAYS_ON_PLUGINS = {
     "dice": DicePlugin,
@@ -45,6 +64,10 @@ TOGGLEABLE_PLUGINS = {
     "ai_reply": AiReplyPlugin,
 }
 
+# پلاگین‌هایی که ایمپورت نشدند کنار گذاشته می‌شوند (به‌جای کرش برنامه)
+ALWAYS_ON_PLUGINS = {k: v for k, v in ALWAYS_ON_PLUGINS.items() if v is not None}
+TOGGLEABLE_PLUGINS = {k: v for k, v in TOGGLEABLE_PLUGINS.items() if v is not None}
+
 # پلاگین‌های فعال هر کاربر
 # key: user_db_id, value: {feature_name: plugin_instance}
 _active_plugins: dict[int, dict[str, object]] = {}
@@ -65,8 +88,13 @@ async def load_plugins_for_user(user_db_id: int, client: TelegramClient):
     # 1) همیشه روشن‌ها
     for name, PluginClass in ALWAYS_ON_PLUGINS.items():
         if name not in _active_plugins[user_db_id]:
-            plugin = PluginClass(client, user_db_id)
-            await plugin.start()
+            try:
+                plugin = PluginClass(client, user_db_id)
+                await plugin.start()
+            except Exception as e:
+                logger.error(f"User {user_db_id}: plugin {name} failed to start: "
+                             f"{type(e).__name__}: {e}")
+                continue
             _active_plugins[user_db_id][name] = plugin
             loaded.append(name)
 
@@ -76,8 +104,13 @@ async def load_plugins_for_user(user_db_id: int, client: TelegramClient):
 
     for name, PluginClass in TOGGLEABLE_PLUGINS.items():
         if name in enabled_set and name not in _active_plugins[user_db_id]:
-            plugin = PluginClass(client, user_db_id)
-            await plugin.start()
+            try:
+                plugin = PluginClass(client, user_db_id)
+                await plugin.start()
+            except Exception as e:
+                logger.error(f"User {user_db_id}: plugin {name} failed to start: "
+                             f"{type(e).__name__}: {e}")
+                continue
             _active_plugins[user_db_id][name] = plugin
             loaded.append(name)
 
@@ -109,8 +142,13 @@ async def enable_plugin(user_db_id: int, feature_name: str, client: TelegramClie
     if feature_name in _active_plugins[user_db_id]:
         return True
 
-    plugin = PluginClass(client, user_db_id)
-    await plugin.start()
+    try:
+        plugin = PluginClass(client, user_db_id)
+        await plugin.start()
+    except Exception as e:
+        logger.error(f"User {user_db_id}: enable {feature_name} failed: "
+                     f"{type(e).__name__}: {e}")
+        return False
     _active_plugins[user_db_id][feature_name] = plugin
 
     logger.info(f"User {user_db_id}: enabled {feature_name}")
