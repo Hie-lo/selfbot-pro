@@ -1035,14 +1035,17 @@ async def main():
     await _save_ai_config(uid, {"draft_only": False, "quiet_hours": "",
                                 "owner_idle_seconds": 15, "rpm": 20,
                                 "rph": 240, "rpd": 1500})
+    check("مکث پیش‌فرض قابل تغییر است (اینجا ۱۵ برای تست)",
+          int(((await _ai_config(uid)).get("owner_idle_seconds")) or 0) == 15)
     ar = pm.get_active_plugins(uid)["ai_reply"]
     await ar._load_config()
     await db.set_ai_auto_mode(uid, PEER, True)
     ai_providers.chat = _back          # سرویس جعلیِ موفق (نه تابع واقعی بدون provider)
 
-    check("مکث پیش‌فرض بعد از پیام خودم ۱۵ ثانیه است",
-          int(ar._cfg.get("owner_idle_seconds", 0)) == 15,
-          str(ar._cfg.get("owner_idle_seconds")))
+    from plugins.ai_reply import DEFAULT_CONFIG as _DC2
+    check("مکث پیش‌فرض کد ۹۰ ثانیه است",
+          int(_DC2.get("owner_idle_seconds", 0)) == 90,
+          str(_DC2.get("owner_idle_seconds")))
 
     ar._usage_chat.clear(); ar._usage.clear()
     await sim.fire(client, "خودم جوابش را می‌دهم", out=True, mid=9810)
@@ -1064,17 +1067,57 @@ async def main():
     # دستور مکث
     await sim.fire(client, ".ai مکث 5", out=True, mid=9813)
     await asyncio.sleep(0.7)
-    await ar._load_config()
-    check("«.ai مکث ‹ثانیه›» ذخیره می‌شود",
-          int(ar._cfg.get("owner_idle_seconds")) == 5,
-          str(ar._cfg.get("owner_idle_seconds")))
+    _pm = await db.get_ai_profile(uid, PEER)
+    check("«.ai مکث ‹ثانیه›» برای همین مخاطب ذخیره می‌شود",
+          int(_pm.get("idle_seconds", -99)) == 5, str(_pm.get("idle_seconds")))
     await sim.fire(client, ".ai مکث خاموش", out=True, mid=9814)
     await asyncio.sleep(0.7)
+    _pm = await db.get_ai_profile(uid, PEER)
+    check("«.ai مکث خاموش» برای همین مخاطب مکث را برمی‌دارد",
+          int(_pm.get("idle_seconds", -99)) == 0, str(_pm.get("idle_seconds")))
+    await sim.fire(client, ".ai مکث پیش‌فرض", out=True, mid=9817)
+    await asyncio.sleep(0.7)
+    _pm = await db.get_ai_profile(uid, PEER)
+    check("«.ai مکث پیش‌فرض» برمی‌گرداند به پیش‌فرض کلی",
+          int(_pm.get("idle_seconds", -99)) == -1, str(_pm.get("idle_seconds")))
+    await _save_ai_config(uid, {"owner_idle_seconds": 90})
     await ar._load_config()
-    check("«.ai مکث خاموش» مکث را برمی‌دارد",
-          int(ar._cfg.get("owner_idle_seconds") or 0) == 0)
-    await _save_ai_config(uid, {"owner_idle_seconds": 15})
+
+    # ── ۱۵.۲۰.۵) مکث اختصاصی هر مخاطب (جدا از پیش‌فرض کلی) ──
+    await db.upsert_ai_profile(uid, PEER, idle_seconds=-1)
     await ar._load_config()
+    await sim.fire(client, ".ai مکث 5", out=True, mid=9815)
+    await asyncio.sleep(0.7)
+    _p5 = await db.get_ai_profile(uid, PEER)
+    check("«.ai مکث ‹ثانیه›» برای همین مخاطب ذخیره می‌شود",
+          int(_p5.get("idle_seconds", -99)) == 5, str(_p5.get("idle_seconds")))
+    _eff, _src = ar._idle_for(PEER, _p5)
+    check("مکث مؤثر این مخاطب اختصاصی است", _eff == 5 and "اختصاصی" in _src,
+          f"{_eff} / {_src}")
+    _eff2, _src2 = ar._idle_for(4242, {"idle_seconds": -1})
+    _def_now = int(ar._cfg.get("owner_idle_seconds", 0) or 0)
+    check("بقیه‌ی مخاطبین روی پیش‌فرض کلی می‌مانند",
+          _eff2 == _def_now and "پیش‌فرض" in _src2, f"{_eff2} / {_src2}")
+    await sim.fire(client, ".ai مکث پیش‌فرض", out=True, mid=9816)
+    await asyncio.sleep(0.7)
+    _p6 = await db.get_ai_profile(uid, PEER)
+    check("«.ai مکث پیش‌فرض» برگشت به پیش‌فرض کلی",
+          int(_p6.get("idle_seconds", -99)) == -1, str(_p6.get("idle_seconds")))
+
+    # ═══ ۳) صف پیام‌ها: پیام‌های وسط پاسخ دور ریخته نشوند ═══
+    ar._last_activity.clear()          # پیام‌های قبلیِ خودم باعث مکث نشوند
+    ar._usage_chat.clear(); ar._usage.clear()
+    _before_q = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "پیام صف یک", out=False, mid=9850)
+    await asyncio.sleep(0.05)
+    await sim.fire(client, "پیام صف دو", out=False, mid=9851)
+    await asyncio.sleep(0.05)
+    await sim.fire(client, "پیام صف سه", out=False, mid=9852)
+    await asyncio.sleep(9.0)
+    _after_q = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    check("پیام‌های رسیده وسط پاسخ دور ریخته نمی‌شوند",
+          _after_q - _before_q >= 2, f"{_before_q} → {_after_q}")
+    check("صف پس از پردازش خالی می‌شود", not ar._queued.get(PEER))
 
     # ── ۱۵.۲۱) سقف مختص هر چت (چت پرحرف بقیه را ساکت نمی‌کند) ──
     other = 6060
@@ -1082,6 +1125,7 @@ async def main():
     await db.set_ai_auto_mode(uid, other, True)
     await _save_ai_config(uid, {"rpm": 1, "quota_wait_max": 0})
     await ar._load_config()
+    ar._last_activity.clear()
     ar._usage_chat.clear(); ar._usage_day_chat.clear()
     ar._usage.clear(); ar._usage_day.clear()
 

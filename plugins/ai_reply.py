@@ -53,9 +53,10 @@ DEFAULT_CONFIG = {
     "rpm": 20, "rph": 240, "rpd": 1500,
     # سقف کل اکانت (ایمنی ضدبن) — همه‌ی چت‌ها روی هم
     "global_rpm": 60, "global_rph": 1200, "global_rpd": 9000,
-    # چند ثانیه بعد از این‌که خودم در چت حرف زدم، AI دوباره وارد شود.
-    # قبلاً هاردکد ۹۰ ثانیه بود و کاربر فکر می‌کرد «ربات خوابش می‌برد».
-    "owner_idle_seconds": 15,
+    # پیش‌فرض کلی: چند ثانیه بعد از این‌که خودم در چت حرف زدم، AI دوباره
+    # وارد شود. برای هر مخاطب می‌شود جداگانه عوضش کرد (`.ai مکث 30` یا پنل).
+    # ۰ = بی‌مکث.
+    "owner_idle_seconds": 90,
     "quiet_hours": "1-8",    # ساعاتی که جواب نمی‌دهد (به وقت خودت)
     # ⚠️ منطقه‌ی زمانی برای «ساعت سکوت». سرور جای دیگری است؛ اگر این را
     # نگذاری، «۱ تا ۸» به وقت سرور حساب می‌شود و ممکن است وسط روزِ تو
@@ -130,6 +131,7 @@ class AiReplyPlugin(BasePlugin):
         self._skip_notice: dict[tuple, float] = {}   # جلوگیری از اسپم اعلان‌ها
         self._pending_retry: dict[int, dict] = {}    # پیام‌هایی که باید دوباره تلاش شوند
         self._tasks: set[asyncio.Task] = set()       # تسک‌های پس‌زمینه (برای لغو در stop)
+        self._queued: dict[int, list] = {}           # پیام‌هایی که وسط پاسخ رسیده‌اند
         self._my_id: int | None = None
         self._owner_tg: int | None = None
         self._paused: set[int] = set()        # چت‌هایی که با .ai بس ساکت شده‌اند
@@ -150,6 +152,60 @@ class AiReplyPlugin(BasePlugin):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    def _enqueue(self, chat_id: int, event) -> None:
+        """پیام‌های رسیده در حین پاسخ‌دهی را نگه می‌دارد (چندتایی، سقف ۵)"""
+        Queue = self._queued.setdefault(chat_id, [])
+        Queue.append(event)
+        if len(Queue) > 5:
+            del Queue[:-5]
+        self.logger.info(f"queued message in {chat_id} (Queue={len(Queue)})")
+
+    async def _drain_queue(self, chat_id: int) -> None:
+        """
+        بعد از تمام شدن پاسخ، پیام‌های صف‌شده را پردازش می‌کند:
+        متن همه در حافظه ثبت می‌شود و به آخرین پیام یک پاسخ داده می‌شود
+        (کاربر: «اگر چند پیام پشت سر هم آمد، جواب را کامل بده، نه نصفه»).
+        """
+        await asyncio.sleep(0.7)          # کمی صبر تا قفل قبلی آزاد شود
+        items = self._queued.pop(chat_id, [])
+        if not items or chat_id in self._paused:
+            return
+        # پیام‌های خیلی قدیمی (بیش از ۵ دقیقه) دیگر ارزش جواب ندارند
+        now = time.time()
+        fresh = [ev for ev in items
+                 if now - (getattr(ev.message, "date", None).timestamp()
+                           if getattr(ev.message, "date", None) else now) < 300]
+        items = fresh or items[-1:]
+        *earlier, last = items
+        try:
+            for ev in earlier:            # پیام‌های میانی در حافظه می‌مانند
+                txt = (ev.raw_text or "").strip()
+                if txt:
+                    await db.add_ai_message(self.user_id, chat_id, txt,
+                                            is_out=False, msg_id=ev.message.id)
+            if len(items) > 1:
+                self.logger.info(f"draining {len(items)} queued messages in {chat_id}")
+            await self._handle_incoming(last)
+        except Exception as e:            # noqa: BLE001
+            self.logger.error(f"queue drain failed: {type(e).__name__}: {e}")
+
+    def _idle_for(self, chat_id: int, profile: dict | None = None) -> tuple[int, str]:
+        """
+        مکث مؤثر این چت: (ثانیه، منبع)
+        اول تنظیم اختصاصی همان مخاطب، بعد پیش‌فرض کلی.
+        idle_seconds = -۱ در پروفایل یعنی «مثل بقیه».
+        """
+        default = int(self._cfg.get("owner_idle_seconds", 90) or 0)
+        if profile:
+            own = profile.get("idle_seconds")
+            try:
+                own = int(own) if own is not None else -1
+            except (TypeError, ValueError):
+                own = -1
+            if own >= 0:
+                return own, "اختصاصی این مخاطب"
+        return default, "پیش‌فرض کلی"
 
     def _release_busy(self, chat_id: int) -> None:
         self._busy.discard(chat_id)
@@ -211,6 +267,7 @@ class AiReplyPlugin(BasePlugin):
         self._busy.clear()
         self._busy_since.clear()
         self._pending_retry.clear()
+        self._queued.clear()
         await super().stop()
 
     # ═══════════ تنظیمات ═══════════
@@ -435,18 +492,23 @@ class AiReplyPlugin(BasePlugin):
 
         if chat_id in self._paused:
             return          # خودم با #ساکت خاموشش کردم — اعلان لازم نیست
+
+        # پروفایل این چت (برای گاردها و ادامه‌ی کار لازم است)
+        profile = await db.get_ai_profile(self.user_id, chat_id)
+
         if chat_id in self._busy:
             # اگر قفل چت بیش از حد معمول مانده (گیر کرده)، آزادش کن.
             # قبلاً این حالت فقط با ری‌استارت ربات درست می‌شد و کاربر فکر
             # می‌کرد «AI خراب شده».
             if time.time() - self._busy_since.get(chat_id, 0) > BUSY_TIMEOUT:
                 self.logger.warning(f"stale busy lock for {chat_id} — releasing")
-                self._busy.discard(chat_id)
-                self._busy_since.pop(chat_id, None)
+                self._release_busy(chat_id)
             else:
-                return      # دارد روی همان پیام کار می‌کند
+                # دارد روی پیام قبلی کار می‌کند → این پیام را دور نریز؛
+                # به صف بگذار تا بعد از تمام‌شدن پاسخ، سراغش برویم.
+                self._enqueue(chat_id, event)
+                return
 
-        profile = await db.get_ai_profile(self.user_id, chat_id)
         if not self._chat_enabled(event, profile):
             return
 
@@ -463,10 +525,16 @@ class AiReplyPlugin(BasePlugin):
             if not (me_mention or reply_to_me):
                 return
 
-        # اگر همین حالا خودم در این چت فعال بودم، AI کمی صبر کند
-        # (پیش‌فرض ۱۵ ثانیه — قبلاً ۹۰ ثانیه‌ی هاردکد بود و حس «خواب» می‌داد)
-        idle_gate = int(self._cfg.get("owner_idle_seconds", 15) or 0)
+        # اگر همین حالا خودم در این چت فعال بودم، AI کمی صبر کند.
+        # مکث هر مخاطب می‌تواند جداگانه باشد (پنل یا `.ai مکث 30`).
+        idle_gate, idle_src = self._idle_for(chat_id, profile)
         if idle_gate > 0 and time.time() - self._last_activity.get(chat_id, 0) < idle_gate:
+            left = int(idle_gate - (time.time() - self._last_activity.get(chat_id, 0))) + 1
+            self._notify_skip(
+                chat_id, f"خودم تازه در این چت پیام دادم ({idle_src}: {idle_gate} ثانیه)",
+                f"{left} ثانیه دیگر خودم برمی‌گردم سر گفت‌وگو. "
+                "تغییر برای همین شخص: <code>.ai مکث 15</code> · "
+                "برای همه: پنل → «✋ مکث»")
             return
 
         # همزیستی با «دشمن»: اگر آن پلاگین روی این شخص فعال است، AI ساکت می‌ماند
@@ -523,6 +591,8 @@ class AiReplyPlugin(BasePlugin):
         ok_quota, quota_reason = self._quota_ok(chat_id)
         if not ok_quota:
             self._release_busy(chat_id)
+            if self._queued.get(chat_id):
+                self._spawn(self._drain_queue(chat_id))
             self._notify_skip(chat_id, quota_reason,
                               "برای افزایش: <code>.ai سقف 30 400 3000</code> "
                               "(یا سقف کل: <code>.ai سقف کل 60 1200 9000</code>)")
@@ -556,6 +626,8 @@ class AiReplyPlugin(BasePlugin):
             self._note_usage(chat_id)
         finally:
             self._release_busy(chat_id)
+            if self._queued.get(chat_id):
+                self._spawn(self._drain_queue(chat_id))
             if self._raw_count_needed(profile):
                 self._spawn(self._maybe_compact(chat_id))
 
@@ -686,7 +758,7 @@ class AiReplyPlugin(BasePlugin):
         if chat_id in self._paused or not self._quota_ok(chat_id)[0]:
             return
         # اگر خودم در این فاصله در چت حرف زدم، دیگر جواب دیرهنگام نرود
-        idle_gate = int(self._cfg.get("owner_idle_seconds", 15) or 0)
+        idle_gate, _ = self._idle_for(chat_id, profile)
         if idle_gate and time.time() - self._last_activity.get(chat_id, 0) < idle_gate:
             return
         if chat_id in self._busy:
@@ -1105,7 +1177,7 @@ class AiReplyPlugin(BasePlugin):
         elif sub in ("سقف", "limit", "limits"):
             await self._cmd_set_limits(event, arg)
         elif sub in ("مکث", "فاصله", "idle"):
-            await self._cmd_set_idle(event, arg)
+            await self._cmd_set_idle(event, arg, profile, chat_id)
         elif sub in ("منطقه", "تایم‌زون", "timezone"):
             await self._cmd_set_timezone(event, arg)
         elif sub in ("همه", "همه‌ی پیوی", "allprivate"):
@@ -1283,17 +1355,22 @@ class AiReplyPlugin(BasePlugin):
         if not ok_q:
             lines.append(f"• 🚦 {self._esc(why_q)}")
             blocked.append(why_q)
-        # فعالیت خودم (مکث قابل تنظیم — قبلاً ۹۰ ثانیه‌ی هاردکد بود)
-        idle_gate = int(self._cfg.get("owner_idle_seconds", 15) or 0)
+        # فعالیت خودم (مکث هر مخاطب جدا از پیش‌فرض کلی)
+        idle_gate, idle_src = self._idle_for(chat_id, profile)
         idle = time.time() - self._last_activity.get(chat_id, 0)
         if idle_gate and idle < idle_gate:
             left = int(idle_gate - idle) + 1
             lines.append(f"• ✋ خودم {int(idle)} ثانیه پیش در چت پیام دادم "
                          f"→ {left} ثانیه دیگر وارد می‌شوم "
-                         f"(مکث = {idle_gate} ثانیه · تغییر: <code>.ai مکث 5</code>)")
+                         f"(مکث = {idle_gate} ثانیه · {self._esc(idle_src)} · "
+                         "تغییر: <code>.ai مکث 5</code>)")
             blocked.append("خودم تازه پیام داده‌ام")
-        elif idle_gate == 0:
-            lines.append("• ✋ مکث بعد از پیام خودم: خاموش")
+        else:
+            lines.append(f"• ✋ مکث بعد از پیام خودم: {idle_gate} ثانیه "
+                         f"({self._esc(idle_src)})")
+        if self._queued.get(chat_id):
+            lines.append(f"• 📥 {len(self._queued[chat_id])} پیام در صف — "
+                         "بعد از این پاسخ، خودکار جوابشان را می‌دهم")
         # سرویس‌ها
         providers = ai_providers.load_providers(self._cfg)
         lines.append(f"• 🔑 سرویس‌ها: {len(providers)}"
@@ -1392,35 +1469,53 @@ class AiReplyPlugin(BasePlugin):
             f"🚦 سقف <b>{title}</b> شد: دقیقه {rpm} · ساعت {rph} · روز {rpd}"
             + ("\n(سقف کل اکانت فقط برای ایمنی ضدبن است)" if scope == "global" else ""))
 
-    async def _cmd_set_idle(self, event, arg):
+    async def _cmd_set_idle(self, event, arg, profile, chat_id):
         """
-        «.ai مکث ‹ثانیه›» — بعد از این‌که خودم در چت حرف زدم، چند ثانیه AI صبر
-        کند. پیش‌فرض ۱۵ ثانیه (قبلاً ۹۰ ثانیه‌ی هاردکد بود و حس «خواب» می‌داد).
-        «.ai مکث خاموش» = هیچ مکثی، بلافاصله جواب بده.
+        «.ai مکث 90»  → مکث مخصوص همین مخاطب
+        «.ai مکث پیش‌فرض» → برگشت به پیش‌فرض کلی
+        «.ai مکث خاموش» → بی‌مکث برای همین مخاطب
         """
         raw = (arg or "").strip()
-        cur = int(self._cfg.get("owner_idle_seconds", 15) or 0)
+        eff, src = self._idle_for(chat_id, profile)
+        default = int(self._cfg.get("owner_idle_seconds", 90) or 0)
         if not raw:
+            own = (profile or {}).get("idle_seconds")
             await self._reply_notify(
-                f"✋ <b>مکث بعد از پیام خودم:</b> {cur} ثانیه\n\n"
-                "• <code>.ai مکث 5</code> — سریع‌تر برگرد سر گفت‌وگو\n"
-                "• <code>.ai مکث خاموش</code> — هیچ مکثی نکن\n\n"
-                "💡 این مکث فقط برای وقتی است که <b>خودت</b> در چت پیام داده باشی؛ "
-                "پاسخ‌های خود AI هیچ‌وقت باعث سکوت نمی‌شوند.")
+                f"✋ <b>مکث این مخاطب:</b> {eff} ثانیه ({self._esc(src)})\n"
+                f"• پیش‌فرض کلی: {default} ثانیه\n"
+                + (f"• تنظیم اختصاصی این شخص: {own} ثانیه\n"
+                   if own is not None and int(own) >= 0 else "")
+                + "\n• <code>.ai مکث 30</code> — فقط برای همین شخص\n"
+                "• <code>.ai مکث خاموش</code> — بی‌مکث برای همین شخص\n"
+                "• <code>.ai مکث پیش‌فرض</code> — برگشت به پیش‌فرض کلی\n\n"
+                "💡 مکث یعنی بعد از این‌که <b>خودت</b> در چت پیام دادی، AI چند "
+                "ثانیه بعد وارد شود. پاسخ‌های خود AI مکث نمی‌سازند.")
             return
+
+        if raw in ("پیش‌فرض", "پیش‌فرض کلی", "default", "خودکار"):
+            await db.upsert_ai_profile(self.user_id, chat_id, idle_seconds=-1)
+            await self._reply_notify(
+                f"↩️ مکث این مخاطب شد «مثل بقیه» ({default} ثانیه).")
+            return
+
         if raw in ("خاموش", "off", "0", "-"):
-            await self._save_config(owner_idle_seconds=0)
-            await self._reply_notify("✋ مکث برداشته شد — بلافاصله جواب می‌دهم.")
+            await db.upsert_ai_profile(self.user_id, chat_id, idle_seconds=0)
+            await self._reply_notify(
+                "✋ برای همین شخص مکث را برداشتم — بلافاصله جواب می‌دهم.")
             return
+
         try:
             secs = int(raw)
         except ValueError:
-            await self._reply_notify("❓ مثال: <code>.ai مکث 15</code> یا <code>.ai مکث خاموش</code>")
+            await self._reply_notify(
+                "❓ مثال: <code>.ai مکث 30</code> · <code>.ai مکث خاموش</code> · "
+                "<code>.ai مکث پیش‌فرض</code>")
             return
-        secs = max(5, min(secs, 600))
-        await self._save_config(owner_idle_seconds=secs)
+        secs = max(0, min(secs, 3600))
+        await db.upsert_ai_profile(self.user_id, chat_id, idle_seconds=secs)
         await self._reply_notify(
-            f"✋ از این به بعد، {secs} ثانیه بعد از پیام خودم، دوباره جواب می‌دهم.")
+            f"✋ برای <b>همین مخاطب</b> مکث {secs} ثانیه شد. "
+            "(پیش‌فرض کلی برای بقیه دست‌نخورده است)")
 
     async def _cmd_set_timezone(self, event, arg):
         """«.ai منطقه Asia/Tehran» — مبنای ساعت سکوت"""

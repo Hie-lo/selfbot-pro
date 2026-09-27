@@ -27,14 +27,14 @@ def _esc(text) -> str:
 def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
                emoji_level: int = 1, all_private: bool = False,
                quiet: str = "", fallback: bool = False,
-               idle: int = 15) -> InlineKeyboardMarkup:
+               idle: int = 90) -> InlineKeyboardMarkup:
     send_label = ("📤 حالت ارسال: پیشنهاد به من" if draft_only
                   else "📤 حالت ارسال: خودکار ⚡")
     quiet_label = ("😴 ساعت سکوت: خاموش" if not quiet
                    else f"😴 ساعت سکوت: {quiet}")
     fb_label = ("🆘 پاسخ جانشین: روشن" if fallback
                 else "🆘 پاسخ جانشین: خاموش")
-    idle_len = "خاموش" if not idle else str(idle)
+    idle_len = "خاموش" if not idle else f"{idle} ثانیه"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✍️ شخصیت من (پرسونا)", callback_data="ai:persona")],
         [InlineKeyboardButton("🎭 مود", callback_data="ai:modes"),
@@ -46,7 +46,7 @@ def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
             callback_data="ai:allpvt"),
          InlineKeyboardButton(quiet_label, callback_data="ai:quiet")],
         [InlineKeyboardButton(fb_label, callback_data="ai:fallback"),
-         InlineKeyboardButton(f"✋ مکث: {idle_len} ثانیه", callback_data="ai:idle")],
+         InlineKeyboardButton(f"✋ مکث پیش‌فرض: {idle_len}", callback_data="ai:idle_global")],
         [InlineKeyboardButton("👥 مخاطبین و حافظه", callback_data="ai:contacts"),
          InlineKeyboardButton("🔑 سرویس‌ها", callback_data="ai:providers")],
         [InlineKeyboardButton("🧪 تست پاسخ", callback_data="ai:test"),
@@ -148,12 +148,45 @@ def contacts_kb(contacts: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def chat_kb(target_id: int) -> InlineKeyboardMarkup:
+async def render_chat_page(q, user_id: int, target: int, cfg: dict) -> None:
+    """صفحه‌ی یک مخاطب: جایگاه، ارسال، مکث و حافظه (هم برای نمایش هم بعد از تغییر)"""
+    prof = await db.get_ai_profile(user_id, target) or {}
+    counts = await db.count_ai_memory(user_id, target)
+    rel = E.RELATIONSHIPS.get(prof.get("relationship", "familiar"), {})
+    name = prof.get("target_name") or str(target)
+    own_idle = prof.get("idle_seconds")
+    try:
+        own_idle = int(own_idle) if own_idle is not None else -1
+    except (TypeError, ValueError):
+        own_idle = -1
+    default_idle = int(cfg.get("owner_idle_seconds", 90) or 0)
+    if own_idle >= 0:
+        idle_txt = ("خاموش (اختصاصی)" if own_idle == 0
+                    else f"{own_idle} ثانیه (اختصاصی)")
+    else:
+        idle_txt = ("خاموش (پیش‌فرض کلی)" if default_idle == 0
+                    else f"{default_idle} ثانیه (پیش‌فرض کلی)")
+    await q.edit_message_text(
+        f"👤 <b>{_esc(name)}</b>\n\n"
+        f"جایگاه: <b>{_esc(rel.get('label', '—'))}</b>\n"
+        f"صمیمیت: {prof.get('intimacy', '—')}/۵\n"
+        f"ارسال: {'⚡ خودکار' if prof.get('auto_mode') else '👤 پیشنهاد به من'}\n"
+        f"✋ مکث بعد از پیام خودم: {_esc(idle_txt)}\n"
+        f"حافظه: {counts['msg']} پیام · {counts['note']} خلاصه · {counts['fact']} فکت",
+        reply_markup=chat_kb(
+            target,
+            idle=("خاموش" if own_idle == 0 else str(own_idle)) if own_idle >= 0 else ""),
+        parse_mode="HTML")
+
+
+def chat_kb(target_id: int, idle: str = "") -> InlineKeyboardMarkup:
+    idle_label = f"✋ مکث: {idle}" if idle else "✋ مکث این مخاطب"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📌 فکت‌ها", callback_data=f"ai:facts:{target_id}"),
          InlineKeyboardButton("📝 خلاصه‌ها", callback_data=f"ai:notes:{target_id}")],
         [InlineKeyboardButton("🔀 جایگاه", callback_data=f"ai:rel:{target_id}"),
          InlineKeyboardButton("⚡ خودکار/دستی", callback_data=f"ai:auto:{target_id}")],
+        [InlineKeyboardButton(idle_label, callback_data=f"ai:idle:{target_id}")],
         [InlineKeyboardButton("🗑 پاک کردن حافظه", callback_data=f"ai:wipe:{target_id}")],
         [InlineKeyboardButton("📛 نام این مخاطب", callback_data=f"ai:editname:{target_id}")],
         [InlineKeyboardButton("⬅️ بازگشت", callback_data="ai:contacts")],
@@ -227,7 +260,8 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         + (f" · فقط: {_esc(allow)}" if allow else "") + "\n"
         f"📤 <b>حالت ارسال:</b> {_esc(draft)}\n"
         f"🌍 <b>همه‌ی پیوی‌ها:</b> {'روشن' if cfg.get('all_private') else 'خاموش'}\n"
-        f"✋ <b>مکث بعد از پیام خودم:</b> {_esc(('خاموش' if not int(cfg.get('owner_idle_seconds', 15) or 0) else str(int(cfg.get('owner_idle_seconds', 15) or 0)) + ' ثانیه'))}\n"
+        f"✋ <b>مکث پیش‌فرض (همه):</b> {_esc(('خاموش' if not int(cfg.get('owner_idle_seconds', 90) or 0) else str(int(cfg.get('owner_idle_seconds', 90) or 0)) + ' ثانیه'))} "
+        f"(هر مخاطب می‌تواند جدا داشته باشد — از «👥 مخاطبین»)\n"
         f"🚦 <b>سقف این چت:</b> {_esc(str(cfg.get('rpm', 20)) + '/' + str(cfg.get('rph', 240)) + '/' + str(cfg.get('rpd', 1500)))}\n"
         f"🆘 <b>پاسخ جانشین:</b> {'روشن (بدون سرویس هم می‌فرستد)' if cfg.get('fallback_replies') else 'خاموش (اگر سرویس خطا داد چیزی نمی‌فرستد)'}\n"
         f"😴 <b>ساعت سکوت:</b> {_esc(cfg.get('quiet_hours') or 'خاموش')} "
@@ -242,7 +276,7 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     all_private=bool(cfg.get("all_private")),
                     quiet=str(cfg.get("quiet_hours") or ""),
                     fallback=bool(cfg.get("fallback_replies")),
-                    idle=int(cfg.get("owner_idle_seconds", 15) or 0))
+                    idle=int(cfg.get("owner_idle_seconds", 90) or 0))
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -393,19 +427,29 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return True
 
     if action == "chat":
+        await render_chat_page(q, user_id, int(arg), cfg)
+        await q.answer()
+        return True
+
+    # مکث اختصاصی همین مخاطب: پیش‌فرض کلی → ۹۰ → ۳۰ → ۱۵ → ۰ → برگشت
+    if action == "idle":
         target = int(arg)
         prof = await db.get_ai_profile(user_id, target) or {}
-        counts = await db.count_ai_memory(user_id, target)
-        rel = E.RELATIONSHIPS.get(prof.get("relationship", "familiar"), {})
-        name = prof.get("target_name") or str(target)
-        await q.edit_message_text(
-            f"👤 <b>{_esc(name)}</b>\n\n"
-            f"جایگاه: <b>{_esc(rel.get('label', '—'))}</b>\n"
-            f"صمیمیت: {prof.get('intimacy', '—')}/۵\n"
-            f"ارسال: {'⚡ خودکار' if prof.get('auto_mode') else '👤 پیشنهاد به من'}\n"
-            f"حافظه: {counts['msg']} پیام · {counts['note']} خلاصه · {counts['fact']} فکت",
-            reply_markup=chat_kb(target), parse_mode="HTML")
-        await q.answer()
+        own = prof.get("idle_seconds")
+        try:
+            own = int(own) if own is not None else -1
+        except (TypeError, ValueError):
+            own = -1
+        default_idle = int(cfg.get("owner_idle_seconds", 90) or 0)
+        cur = own if own >= 0 else default_idle
+        cycle = [90, 60, 30, 15, 5, 0]
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else 90
+        await db.upsert_ai_profile(user_id, target, idle_seconds=nxt)
+        await q.answer(
+            ("برای این مخاطب مکث برداشته شد — بلافاصله جواب می‌دهم ✅" if not nxt
+             else f"برای این مخاطب: {nxt} ثانیه بعد از پیام خودم وارد می‌شوم ✅")
+            + "\n(بقیه‌ی مخاطبین دست‌نخورده‌اند)")
+        await render_chat_page(q, user_id, target, cfg)
         return True
 
     if action == "rel":
@@ -549,8 +593,8 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await show_ai_menu(update, context, user_id, edit=True)
         return True
 
-    if action == "idle":
-        cycle = [15, 30, 5, 60, 0]
+    if action == "idle_global":
+        cycle = [90, 60, 30, 15, 5, 0]
         cur = int(cfg.get("owner_idle_seconds", 15) or 0)
         nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else 15
         await _save_ai_config(user_id, {"owner_idle_seconds": nxt})

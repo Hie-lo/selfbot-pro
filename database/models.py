@@ -377,6 +377,11 @@ CREATE TABLE IF NOT EXISTS ai_profiles (
 CREATE INDEX IF NOT EXISTS idx_ai_profiles_user
     ON ai_profiles(user_id);
 
+-- مکث اختصاصی هر مخاطب: -۱ = از پیش‌فرض کلی استفاده کن، ۰ = بی‌مکث،
+-- عدد مثبت = چند ثانیه بعد از پیام خودم دوباره وارد شوم.
+-- (برای دیتابیس‌های قدیمی که این ستون را ندارند)
+ALTER TABLE ai_profiles ADD COLUMN IF NOT EXISTS idle_seconds INT DEFAULT -1;
+
 -- حافظه: پیام خام (msg) + خلاصه‌ی سبک‌شده (note) + فکت (fact)
 CREATE TABLE IF NOT EXISTS ai_memory (
     id              SERIAL PRIMARY KEY,

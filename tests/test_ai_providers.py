@@ -223,6 +223,76 @@ async def main():
 
     STATE["mode"] = "ok"
     srv.shutdown()
+    # ── مسیر واقعی HTTP: مدل استدلالی که متن نهایی خالی می‌دهد ──
+    calls = []
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(json)
+            if len(calls) == 1:
+                return _FakeResp({"choices": [{
+                    "message": {"content": "", "reasoning_content": "فکر کردن..."},
+                    "finish_reason": "length"}]})
+            return _FakeResp({"choices": [{
+                "message": {"content": "سلام خوبم"}, "finish_reason": "stop"}]})
+
+    class _FakeHX:
+        AsyncClient = _FakeClient
+        TimeoutException = type("TimeoutException", (Exception,), {})
+        TransportError = type("TransportError", (Exception,), {})
+
+    _real_http = ap._http
+    ap._http = lambda: _FakeHX
+    _adv = ap.Provider(name="fake-adv", kind="openai",
+                                 base_url="https://x/v1", model="m", keys=["k"])
+    _out = await ap._call_provider(
+        _adv, "k", [{"role": "user", "content": "سلام"}], 200, 0.7)
+    check("پاسخ خالی/استدلالی → درخواست دوباره‌ی تمیز", _out == "سلام خوبم", str(_out))
+    check("متن خام استدلال به‌عنوان پاسخ برنمی‌گردد", "فکر کردن" not in str(_out))
+    check("دو درخواست HTTP زده شد", len(calls) == 2, str(len(calls)))
+    check("درخواست دوم با بودجه‌ی بیشتر",
+          int(calls[1]["max_tokens"]) > int(calls[0]["max_tokens"]),
+          f"{calls[0]['max_tokens']} → {calls[1]['max_tokens']}")
+    check("پیام «فقط متن نهایی» به درخواست دوم اضافه شد",
+          "فقط متن نهایی" in str(calls[1].get("messages", [])))
+
+    # ── خطای داخل بدنه (۲۰۰ ولی error) نباید جواب حساب شود ──
+    class _ErrClient(_FakeClient):
+        async def post(self, url, json=None, headers=None):
+            return _FakeResp({"error": {"message": "model not found"}})
+
+    class _ErrHX(_FakeHX):
+        AsyncClient = _ErrClient
+
+    ap._http = lambda: _ErrHX
+    _adv2 = ap.Provider(name="fake-err", kind="openai",
+                                  base_url="https://x/v1", model="m", keys=["k"])
+    _out2 = await ap._call_provider(
+        _adv2, "k", [{"role": "user", "content": "x"}], 200, 0.7)
+    check("خطای داخل بدنه‌ی پاسخ جواب حساب نمی‌شود", _out2 is None, str(_out2))
+    check("و پیام خطا برای کاربر ذخیره می‌شود",
+          "model not found" in (_adv2.last_error or ""), _adv2.last_error)
+    ap._http = _real_http
+
     print(f"\n{'─' * 40}\n{PASS}/{PASS + FAIL} تست موفق")
     if FAIL:
         raise SystemExit(1)

@@ -1125,6 +1125,7 @@ async def upsert_ai_profile(user_id: int, target_id: int, **fields) -> None:
     allowed = (
         "target_name", "relationship", "intimacy", "tone_level", "reply_length",
         "emoji_level", "nickname", "red_lines", "notes", "auto_mode", "enabled",
+        "idle_seconds",
     )
     # ترتیب ستون‌ها ثابت است تا شماره‌ی پارامترها با مقادیر جابه‌جا نشود
     cols = [c for c in allowed if fields.get(c) is not None]
@@ -1436,6 +1437,7 @@ async def list_ai_chats(user_id: int) -> list[dict]:
                    COALESCE(p.enabled, TRUE)               AS enabled,
                    COALESCE(p.auto_mode, FALSE)            AS auto_mode,
                    COALESCE(p.relationship, '')            AS relationship,
+                   COALESCE(p.idle_seconds, -1)            AS idle_seconds,
                    GREATEST(COALESCE(m.last_seen, to_timestamp(0)),
                             COALESCE(p.updated_at, to_timestamp(0))) AS last_active
             FROM ai_profiles p
