@@ -197,7 +197,7 @@ class PanelPlugin(BasePlugin):
                 plugin = get_active_plugins(self.user_id).get("ai_reply")
                 if plugin is not None:
                     try:
-                        await plugin._cmd_enable(event, None, event.chat_id)
+                        await plugin.enable_chat(event, event.chat_id)
                     except Exception as e:                  # noqa: BLE001
                         self.logger.error(f"ai chat enable failed: {type(e).__name__}: {e}")
                         await event.edit(
@@ -301,8 +301,8 @@ class PanelPlugin(BasePlugin):
                                        "ai_reply -> ON (auto bootstrap in chat)")
                     try:
                         if "همه" in text:
-                            await plugin._cmd_all_private(event, "روشن")
-                        await plugin._cmd_enable(event, None, chat_id)
+                            await plugin.set_all_private(event, "روشن")
+                        await plugin.enable_chat(event, chat_id)
                     except Exception as e:      # noqa: BLE001
                         self.logger.error(f"ai bootstrap failed: {type(e).__name__}: {e}")
                         await self.client.send_message(

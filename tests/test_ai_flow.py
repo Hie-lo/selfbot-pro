@@ -680,9 +680,17 @@ async def main():
 
     # د) سقف که پر شد، دلیلش را می‌گوید (نه سکوت بی‌دلیل)
     ar5 = pm.get_active_plugins(uid)["ai_reply"]
-    ar5._usage = [time.time()] * int(ar5._cfg.get("rpm", 20))
-    ok_q, why_q = ar5._quota_ok()
+    now_t = time.time()
+    ar5._usage_chat[PEER] = [now_t] * int(ar5._cfg.get("rpm", 20))
+    ar5._usage = [now_t] * int(ar5._cfg.get("rpm", 20))
+    ok_q, why_q = ar5._quota_ok(PEER)
     check("سقف پر شده تشخیص داده می‌شود", not ok_q and "سقف" in why_q, why_q)
+    # سقف کل اکانت لایه‌ی جداگانه‌ای است
+    ar5._usage = [now_t] * int(ar5._cfg.get("global_rpm", 60))
+    ar5._usage_chat.clear()
+    ok_all, why_all = ar5._quota_ok(PEER)
+    check("سقف کل اکانت هم جداگانه تشخیص داده می‌شود",
+          (not ok_all) and "کل اکانت" in why_all, why_all)
     check("وضعیت مصرف خوانا است", "دقیقه" in ar5._quota_state(), ar5._quota_state())
     reset_limits(uid)
 
@@ -1022,6 +1030,150 @@ async def main():
     check("پیام دستور بعد از ارسال جواب پاک می‌شود (چت شلوغ/لو نرفتن)",
           len([x for x in SENT if x[0] == "delete"]) > before_del,
           str([x for x in SENT if x[0] == "delete"][-1:]))
+
+    # ── ۱۵.۲۰) مکث بعد از پیام خودم (۱۵ ثانیه، نه ۹۰) ──
+    await _save_ai_config(uid, {"draft_only": False, "quiet_hours": "",
+                                "owner_idle_seconds": 15, "rpm": 20,
+                                "rph": 240, "rpd": 1500})
+    ar = pm.get_active_plugins(uid)["ai_reply"]
+    await ar._load_config()
+    await db.set_ai_auto_mode(uid, PEER, True)
+    ai_providers.chat = _back          # سرویس جعلیِ موفق (نه تابع واقعی بدون provider)
+
+    check("مکث پیش‌فرض بعد از پیام خودم ۱۵ ثانیه است",
+          int(ar._cfg.get("owner_idle_seconds", 0)) == 15,
+          str(ar._cfg.get("owner_idle_seconds")))
+
+    ar._usage_chat.clear(); ar._usage.clear()
+    await sim.fire(client, "خودم جوابش را می‌دهم", out=True, mid=9810)
+    await asyncio.sleep(0.5)
+    ar._usage_chat.clear(); ar._usage.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "پیام فوری بعد از پیام من", out=False, mid=9811)
+    await asyncio.sleep(1.5)
+    check("بلافاصله بعد از پیام خودم وارد نمی‌شود",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before)
+    ar._last_activity[PEER] = time.time() - 20        # ۲۰ ثانیه گذشته
+    ar._usage_chat.clear(); ar._usage.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "بعد از مکث", out=False, mid=9812)
+    await asyncio.sleep(2.0)
+    check("بعد از گذشت مکث، دوباره جواب می‌دهد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+
+    # دستور مکث
+    await sim.fire(client, ".ai مکث 5", out=True, mid=9813)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("«.ai مکث ‹ثانیه›» ذخیره می‌شود",
+          int(ar._cfg.get("owner_idle_seconds")) == 5,
+          str(ar._cfg.get("owner_idle_seconds")))
+    await sim.fire(client, ".ai مکث خاموش", out=True, mid=9814)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("«.ai مکث خاموش» مکث را برمی‌دارد",
+          int(ar._cfg.get("owner_idle_seconds") or 0) == 0)
+    await _save_ai_config(uid, {"owner_idle_seconds": 15})
+    await ar._load_config()
+
+    # ── ۱۵.۲۱) سقف مختص هر چت (چت پرحرف بقیه را ساکت نمی‌کند) ──
+    other = 6060
+    await db.upsert_ai_profile(uid, other, target_name="مخاطب جدا", enabled=True)
+    await db.set_ai_auto_mode(uid, other, True)
+    await _save_ai_config(uid, {"rpm": 1, "quota_wait_max": 0})
+    await ar._load_config()
+    ar._usage_chat.clear(); ar._usage_day_chat.clear()
+    ar._usage.clear(); ar._usage_day.clear()
+
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "چت اول", out=False, mid=9820)
+    await asyncio.sleep(1.8)
+    check("چت اول با سقف ۱ جواب گرفت",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    ok_first, why_first = ar._quota_ok(PEER)
+    ok_second, _ = ar._quota_ok(other)
+    check("سقف چت اول پر شده ولی سقف چت دوم دست‌نخورده است",
+          (not ok_first) and ok_second, f"{why_first} | چت دوم={ok_second}")
+
+    ar._last_activity.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "چت دوم", out=False, sender_id=other, chat=other, mid=9821)
+    await asyncio.sleep(1.8)
+    check("و چت دوم با این‌حال جواب می‌گیرد (سقف‌ها مشترک نیستند)",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    check("وضعیت مصرف هر چت جداگانه گزارش می‌شود",
+          "این چت" in ar._quota_state(PEER) and "کل اکانت" in ar._quota_state())
+
+    # سقف کل اکانت جدا از سقف چت است
+    await sim.fire(client, ".ai سقف 30 400 3000", out=True, mid=9822)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("«.ai سقف» سقف همین چت را می‌گذارد",
+          (int(ar._cfg.get("rpm")), int(ar._cfg.get("rph"))) == (30, 400),
+          f"{ar._cfg.get('rpm')}/{ar._cfg.get('rph')}")
+    await sim.fire(client, ".ai سقف کل 90 2000 12000", out=True, mid=9823)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("«.ai سقف کل» سقف کل اکانت را می‌گذارد",
+          int(ar._cfg.get("global_rpm")) == 90 and int(ar._cfg.get("global_rpd")) == 12000,
+          f"{ar._cfg.get('global_rpm')}/{ar._cfg.get('global_rpd')}")
+    await _save_ai_config(uid, {"global_rpm": 60, "global_rph": 1200,
+                                "global_rpd": 9000, "quota_wait_max": 45})
+    await ar._load_config()
+
+    # ── ۱۵.۲۲) منطقه‌ی زمانی ──
+    await sim.fire(client, ".ai منطقه Europe/Berlin", out=True, mid=9830)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("«.ai منطقه» منطقه‌ی زمانی را عوض می‌کند",
+          ar._cfg.get("timezone") == "Europe/Berlin", str(ar._cfg.get("timezone")))
+    pv_x = len(PV)
+    await sim.fire(client, ".ai منطقه Asia/Berlin", out=True, mid=9831)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+    check("منطقه‌ی نامعتبر رد می‌شود و تنظیم قبلی می‌ماند",
+          ar._cfg.get("timezone") == "Europe/Berlin"
+          and "شناخته نشد" in "\n".join(t for _, t in PV[pv_x:]))
+    await sim.fire(client, ".ai منطقه Asia/Tehran", out=True, mid=9832)
+    await asyncio.sleep(0.7)
+    await ar._load_config()
+
+    # ── ۱۵.۲۳) استدلال مدل هرگز به‌عنوان پیام فرستاده نمی‌شود ──
+    _rdata = {"choices": [{"message": {"content": "",
+                                       "reasoning_content": "دارم فکر می‌کنم"},
+                           "finish_reason": "length"}]}
+    check("متن استدلال به‌عنوان پاسخ برگردانده نمی‌شود",
+          ai_providers._openai_text(_rdata) == "")
+    check("ولی وجودش تشخیص داده می‌شود",
+          ai_providers._openai_reasoning(_rdata).startswith("دارم فکر"))
+
+    # ── ۱۵.۲۴) کلیدهای داخلی در دیتابیس ذخیره نمی‌شوند ──
+    ar._cfg["_chat_labels"] = {"1": "تست"}
+    await ar._save_config()
+    _feats = {f["feature_name"]: f for f in await db.get_features(uid)}
+    _saved = _feats["ai_reply"].get("config_json") or {}
+    if isinstance(_saved, str):
+        import json as _json
+        _saved = _json.loads(_saved)
+    check("کش‌های داخلی در config_json ذخیره نمی‌شوند",
+          "_chat_labels" not in _saved,
+          str([k for k in _saved if str(k).startswith("_")])[:60])
+
+    # ── ۱۵.۲۵) «.روشن هوش مصنوعی» قابلیت را روشن و همین چت را فعال می‌کند ──
+    # (قبلاً فقط قابلیت روشن می‌شد و کاربر فکر می‌کرد «اینجا جواب نمی‌دهد»)
+    from core.plugin_manager import disable_plugin as _disable
+    await db.set_feature(uid, "ai_reply", False)
+    await _disable(uid, "ai_reply")
+    await asyncio.sleep(0.3)
+    check("برای تست، قابلیت خاموش شد", "ai_reply" not in pm.get_active_plugins(uid))
+    await db.upsert_ai_profile(uid, PEER, enabled=False)
+    await sim.fire(client, ".روشن هوش مصنوعی", out=True, mid=9840)
+    await asyncio.sleep(1.2)
+    check("«.روشن هوش مصنوعی» قابلیت را روشن می‌کند",
+          "ai_reply" in pm.get_active_plugins(uid))
+    _prof_after = await db.get_ai_profile(uid, PEER)
+    check("و همین چت را هم فعال می‌کند", bool(_prof_after and _prof_after.get("enabled")),
+          str((_prof_after or {}).get("enabled")))
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

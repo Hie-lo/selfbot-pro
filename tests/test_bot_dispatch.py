@@ -66,6 +66,7 @@ EXPECTED = {
     "callback:ai:allpvt": ("^ai:", "route_ai_callbacks"),
     "callback:ai:quiet": ("^ai:", "route_ai_callbacks"),
     "callback:ai:fallback": ("^ai:", "route_ai_callbacks"),
+    "callback:ai:idle": ("^ai:", "route_ai_callbacks"),
     "callback:ai_send:7": (r"^ai_(send|edit|drop):", "route_ai_callbacks"),
     "callback:ai_drop:7": (r"^ai_(send|edit|drop):", "route_ai_callbacks"),
     "text:سلام": (None, "handle_text_router"),
@@ -83,6 +84,7 @@ DATA = {
     "callback:ai:allpvt": "ai:allpvt",
     "callback:ai:quiet": "ai:quiet",
     "callback:ai:fallback": "ai:fallback",
+    "callback:ai:idle": "ai:idle",
     "callback:ai_send:7": "ai_send:7",
     "callback:ai_drop:7": "ai_drop:7",
 }

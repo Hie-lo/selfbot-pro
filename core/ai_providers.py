@@ -127,7 +127,7 @@ class Provider:
     """یک سرویس + کلیدهایش"""
 
     def __init__(self, name: str, kind: str, base_url: str, model: str,
-                 keys: list[str], priority: int = 0, max_tokens: int = 400,
+                 keys: list[str], priority: int = 0, max_tokens: int = 700,
                  temperature: float = 0.8, extra: dict | None = None):
         self.name = clean_value(name) or "provider"
         self.kind = (clean_value(kind) or "openai").lower()
@@ -185,7 +185,7 @@ def _from_dict(d: dict) -> Provider | None:
             model=d.get("model") or "",
             keys=keys,
             priority=int(d.get("priority", 0)),
-            max_tokens=int(d.get("max_tokens", 400)),
+            max_tokens=int(d.get("max_tokens", 700)),
             temperature=float(d.get("temperature", 0.8)),
             extra=d.get("extra") or {},
         )
@@ -305,12 +305,24 @@ _REASONING_KEYS = ("reasoning_content", "reasoning", "thinking", "analysis")
 
 
 def _openai_text(data: dict) -> str:
-    """
-    متن پاسخ را از جواب سرویس بیرون می‌کشد.
+    """متن نهایی پاسخ (فقط content — استدلال هرگز به‌عنوان پیام نمی‌رود)"""
+    try:
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+    except Exception:
+        msg = {}
+    if not isinstance(msg, dict):
+        return ""
+    return (msg.get("content") or "").strip()
 
-    ⚠️ مدل‌های استدلالی (reasoning) وقتی سقف توکن تمام شود، content را خالی و
-    فقط reasoning می‌فرستند. قبلاً همین باعث می‌شد «همه‌ی سرویس‌ها جواب
-    ندادند» و پاسخ جانشین بیاید، در حالی که سرویس سالم بود.
+
+def _openai_reasoning(data: dict) -> str:
+    """
+    بخش استدلال (reasoning) مدل‌های فکری.
+
+    ⚠️ مدل‌های reasoning وقتی سقف توکن تمام شود، content را خالی و فقط
+    reasoning می‌فرستند → آدم فکر می‌کرد «سرویس خراب است».
+    این متن هرگز مستقیم برای طرف مقابل فرستاده نمی‌شود؛ فقط سیگنال این است
+    که «مدل جواب داشت ولی جا کم آورد» تا با بودجه‌ی بیشتر از نو پرسیده شود.
     """
     try:
         msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -318,14 +330,10 @@ def _openai_text(data: dict) -> str:
         msg = {}
     if not isinstance(msg, dict):
         return ""
-    text = (msg.get("content") or "").strip()
-    if text:
-        return text
     for k in _REASONING_KEYS:
         val = msg.get(k)
         if isinstance(val, str) and val.strip():
-            # آخرین جمله‌های استدلال را برمی‌داریم (جواب معمولاً آخرش است)
-            return val.strip()[-1200:]
+            return val.strip()
     return ""
 
 
@@ -435,17 +443,30 @@ async def _call_provider(p: Provider, key: str, messages: list[dict],
     text = _gemini_text(data) if p.kind == "gemini" else _openai_text(data)
     if not text:
         finish = _openai_finish_reason(data) if p.kind != "gemini" else ""
-        if finish in ("length", "max_tokens") and max_tokens < 3000:
-            # سقف توکن تمام شد (معمولاً مدل استدلالی، فکر کردن همه‌اش را خورد)
-            # → یک‌بار با بودجه‌ی بیشتر
-            bigger = min(max(max_tokens * 4, 800), 3000)
-            logger.warning(f"{p.name}: پاسخ خالی (finish_reason={finish}) — تلاش با {bigger} توکن")
+        reasoning = _openai_reasoning(data) if p.kind != "gemini" else ""
+        budget_short = finish in ("length", "max_tokens")
+        if (budget_short or reasoning) and max_tokens < 3000:
+            # مدل جواب داشت ولی جا (یا متن نهایی) کم آمد → یک‌بار از نو
+            # می‌پرسیم، این بار با بودجه‌ی بیشتر و تأکید بر «فقط جواب نهایی».
+            bigger = min(max(max_tokens * 4, 1000), 3000)
+            logger.warning(
+                f"{p.name}: پاسخ خالی (finish={finish or '؟'}، "
+                f"reasoning={'دارد' if reasoning else 'ندارد'}) → تلاش با {bigger} توکن")
+            nudge = list(messages) + [{
+                "role": "system",
+                "content": ("فقط متن نهایی پیام را بنویس — کوتاه، بدون توضیح و "
+                            "بدون توضیح مراحل فکر کردن."),
+            }]
             try:
-                return await _call_provider(p, key, messages, bigger, temperature)
+                retry_text = await _call_provider(p, key, nudge, bigger, temperature)
+                if retry_text:
+                    return retry_text
             except Exception as e:                       # noqa: BLE001
                 logger.error(f"{p.name}: retry after empty reply failed: {e}")
-        msg = (f"سرویس جواب خالی داد (finish_reason={finish or '؟'})"
-               if finish else "سرویس جواب خالی داد (متن پاسخ خالی بود)")
+        msg = ("مدل فقط استدلال داد و متن نهایی خالی بود (سقف توکن کم است)"
+               if reasoning and not finish
+               else (f"پاسخ خالی (finish_reason={finish})" if finish
+                     else "سرویس جواب خالی داد (متن پاسخ خالی بود)"))
         p.last_error = msg
         set_last_error(p.name, msg)
         return None
