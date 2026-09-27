@@ -103,6 +103,192 @@ TONE_LABELS = {
     3: "بی‌سقف — فحش‌های رکیک بدون محدودیت (مثل لیست خودم)",
 }
 
+# ─────────────── ایموجی ───────────────
+# سطح‌بندی + لیست ایموجی‌های خودم. سطح را دستی می‌شود عوض کرد
+# (`.تنظیم ایموجی ۰` تا `.تنظیم ایموجی ۳`) و لیست را هم خودم می‌دهم
+# (`.ai ایموجی 😂❤️🙏`) تا AI فقط از ایموجی‌های من استفاده کند.
+
+EMOJI_LEVELS = {
+    0: "بدون ایموجی — حتی یک ایموجی هم نگذار",
+    1: "خیلی کم — بیشتر وقت‌ها هیچ، نهایتاً یکی",
+    2: "متوسط — یکی-دو تا، طبیعی",
+    3: "آزاد — چند تا هم اشکالی ندارد",
+}
+
+EMOJI_RULES = {
+    0: ("ایموجی: هیچ. حتی یک ایموجی هم نگذار — نه 😂، نه ❤️، نه 🙂 — "
+        "هیچ کاراکتر تزئینی و شکلی."),
+    1: ("ایموجی: تقریباً هیچ. در بیشتر پیام‌ها صفر ایموجی؛ اگر واقعاً لازم بود، "
+        "فقط *یک* ایموجی ساده."),
+    2: "ایموجی: کم و طبیعی — حداکثر دو ایموجی در پیام، و همیشه مرتبط با همان جمله.",
+    3: "ایموجی: آزاد — می‌توانی چند ایموجی بگذاری، ولی نه پشت سر هم و نه بی‌ربط.",
+}
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U00002B00-\U00002BFF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002190-\U000021FF"
+    "\U0000200D\U00002B50\U00002764\U0000203C\U00002049"
+    "\U0001F3FB-\U0001F3FF"
+    "]+"
+)
+
+_EMOJI_STRIP_RE = re.compile(r"[\s\u200c]+")
+
+
+def pick_value(*values):
+    """
+    اولین مقدار «واقعاً داده‌شده» را برمی‌گرداند.
+    ستون‌های متنی دیتابیس وقتی خالی‌اند رشته‌ی توخالی می‌دهند (نه None) و
+    همین باعث می‌شد تنظیم کلی (مثلاً ایموجی) روی هیچ چتی اثر نکند.
+    """
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        return v
+    return None
+
+
+def _as_int(value, default: int) -> int:
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    fa = "۰۱۲۳۴۵۶۷۸۹"
+    if isinstance(value, str) and any(ch in fa for ch in value):
+        try:
+            n = int("".join(str(fa.index(ch)) if ch in fa else ch for ch in value.strip()))
+        except ValueError:
+            return default
+    return n
+
+
+def norm_emoji_level(value, default: int = 1) -> int:
+    """«۰»/«کم»/2/None → عدد ۰ تا ۳"""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return min(3, max(0, value))
+    v = str(value).strip()
+    fa = "۰۱۲۳۴۵۶۷۸۹"
+    v = "".join(str(fa.index(ch)) if ch in fa else ch for ch in v)
+    if v.isdigit():
+        return min(3, max(0, int(v)))
+    words = {
+        "هیچ": 0, "بدون": 0, "صفر": 0, "no": 0, "none": 0, "off": 0,
+        "کم": 1, "خیلی کم": 1, "low": 1, "کمی": 1,
+        "متوسط": 2, "معمولی": 2, "normal": 2, "medium": 2, "mid": 2,
+        "زیاد": 3, "زیادی": 3, "آزاد": 3, "high": 3, "full": 3, "همه": 3,
+    }
+    return words.get(v, default)
+
+
+# کاراکترهایی که «چسبیده» به ایموجی قبلی‌اند و ایموجی جدید حساب نمی‌شوند
+_EMOJI_ATTACH = {"\ufe0e", "\ufe0f"} | {chr(c) for c in range(0x1F3FB, 0x1F400)}
+
+
+def split_emojis(text: str) -> list[str]:
+    """
+    ایموجی‌های چسبیده را از هم جدا می‌کند: «😂❤️🙏» → ['😂','❤️','🙏']
+    (بدون این، سه ایموجی پشت‌سرهم یک تکه شمرده می‌شدند.)
+    """
+    out: list[str] = []
+    for run in _EMOJI_RE.findall(text or ""):
+        cur = ""
+        i = 0
+        while i < len(run):
+            ch = run[i]
+            if cur and ch == "\u200d":          # ترکیب ZWJ: با قبلی می‌ماند
+                cur += ch
+                i += 1
+                if i < len(run):
+                    cur += run[i]
+                    i += 1
+                continue
+            if cur and ch in _EMOJI_ATTACH:       # تغییر رنگ/تنوع
+                cur += ch
+                i += 1
+                continue
+            if cur:
+                out.append(cur)
+            cur = ch
+            i += 1
+        if cur:
+            out.append(cur)
+    return out
+
+
+def parse_emoji_list(value) -> list[str]:
+    """لیست ایموجی‌های مجاز را از ورودی کاربر در می‌آورد (فقط کاراکترهای ایموجی)"""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [e for e in value if e]
+    out: list[str] = []
+    for e in split_emojis(str(value)):
+        if e not in out:
+            out.append(e)
+    return out
+
+
+def emoji_count(text: str) -> int:
+    return len(split_emojis(text or ""))
+
+
+_MAX_KEEP = {0: 0, 1: 1, 2: 2, 3: 6}
+
+
+def strip_emoji(text: str, level: int = 1, allowed=None) -> str:
+    """
+    فیلتر واقعی (نه فقط توصیه در پرامپت) — مدل‌ها همیشه حرف‌گوش‌کن نیستند:
+
+      سطح ۰ → همه‌ی ایموجی‌ها حذف
+      سطح ۱ → نهایتاً یکی
+      سطح ۲ → نهایتاً دو تا  (یکی-دو تای طبیعی)
+      سطح ۳ → آزاد
+
+    اگر لیست مجاز `allowed` بدهی، هر ایموجی خارج از آن هم حذف می‌شود —
+    این‌طور AI فقط از ایموجی‌های خودِ من استفاده می‌کند.
+    """
+    if not text:
+        return ""
+    lvl = int(level or 0)
+    max_keep = _MAX_KEEP.get(lvl, _MAX_KEEP[3])
+    allow = set(allowed or [])
+    kept = [0]                          # تعداد ایموجی‌های باقی‌مانده (تکراری هم می‌شمارد)
+
+    def keep_it(e: str) -> bool:
+        if allow and e not in allow:
+            return False
+        if kept[0] >= max_keep:
+            return False
+        kept[0] += 1
+        return True
+
+    out = []
+    pos = 0
+    for m in _EMOJI_RE.finditer(text):
+        out.append(text[pos:m.start()])
+        for e in split_emojis(m.group(0)):
+            if keep_it(e):
+                out.append(e)
+        pos = m.end()
+    out.append(text[pos:])
+
+    cleaned = "".join(out)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    return cleaned.strip()
+
+
 LENGTH_HINT = {
     "یک‌کلمه": "فقط ۱ تا ۳ کلمه. نقطه هم نگذار.",
     "خیلی کوتاه": "حداکثر ۵ کلمه.",
@@ -135,7 +321,7 @@ CONTACT_HEAD = """—— این شخص کیه ——
 لحن من با او: {style}
 سطح آزادی بیان: {tone_label}
 طول پیام معمول من: {length}
-ایموجی: {emoji}
+{emoji_rule}
 {extra}"""
 
 KNOWLEDGE_HEAD = """—— دانسته‌های من (فقط همین‌ها را به‌عنوان حافظه دارم) ——
@@ -166,24 +352,32 @@ def norm_relationship(name: str) -> str | None:
 
 
 def effective_settings(profile: dict | None, default_mode: str = "عادی",
-                       default_tone: int = 2) -> dict:
+                       default_tone: int = 2, global_emoji=None,
+                       allowed_emojis=None) -> dict:
     """ترکیب پیش‌فرض‌های جایگاه با تنظیمات دستی کاربر"""
     prof = profile or {}
     rel_key = prof.get("relationship") or "familiar"
     rel = RELATIONSHIPS.get(rel_key, RELATIONSHIPS["familiar"])
 
-    tone = prof.get("tone_level")
-    if tone is None or int(tone) < 0:
+    tone = _as_int(pick_value(prof.get("tone_level")), -1)
+    if tone < 0:
         tone = rel["tone"]
-    intimacy = prof.get("intimacy") or rel["intimacy"]
+    intimacy = _as_int(pick_value(prof.get("intimacy")), rel["intimacy"])
 
     return {
         "relationship": rel_key,
         "rel": rel,
         "tone": int(tone),
         "intimacy": int(intimacy),
-        "length": prof.get("reply_length") or rel["length"],
-        "emoji": prof.get("emoji_level") or rel["emoji"],
+        "length": pick_value(prof.get("reply_length")) or rel["length"],
+        # سطح ایموجی: تنظیم دستی همین چت → تنظیم کلی من → پیش‌فرض جایگاه
+        "emoji_level": norm_emoji_level(
+            pick_value(prof.get("emoji_level"), global_emoji),
+            default=norm_emoji_level(rel["emoji"], 1),
+        ),
+        "allowed_emojis": parse_emoji_list(
+            pick_value(allowed_emojis, prof.get("allowed_emojis")) or ""
+        ),
         "reply_chance": rel["reply_chance"],
         "nickname": (prof.get("nickname") or "").strip(),
         "red_lines": (prof.get("red_lines") or "").strip(),
@@ -217,6 +411,16 @@ def build_knowledge(notes: list[dict], facts: list[dict], pending: list[dict] | 
     return "\n".join(lines) if lines else "(هیچ دانسته‌ای از این شخص ندارم — تازه‌آشنا هستیم)"
 
 
+def _emoji_rule_text(prof: dict) -> str:
+    lvl = norm_emoji_level(prof.get("emoji_level"), 1)
+    rule = EMOJI_RULES.get(lvl, EMOJI_RULES[1])
+    allow = prof.get("allowed_emojis") or []
+    if allow:
+        rule += ("\n⚠️ فقط و فقط از این ایموجی‌ها استفاده کن: " + " ".join(allow) +
+                 " — هیچ ایموجی دیگری (هیچ!) نگذار. اگر ایموجی لازم نداری، هیچ‌کدام را نگذار.")
+    return rule
+
+
 def build_messages(*, my_name: str, persona: str, mode: str,
                    settings: dict, notes: list[dict], facts: list[dict],
                    pending: list[dict] | None, history: list[dict],
@@ -243,7 +447,7 @@ def build_messages(*, my_name: str, persona: str, mode: str,
             style=rel["style"],
             tone_label=TONE_LABELS.get(int(prof.get("tone", 2)), TONE_LABELS[2]),
             length=prof.get("length", "کوتاه"),
-            emoji=prof.get("emoji", "کم"),
+            emoji_rule=_emoji_rule_text(prof),
             extra=(" ".join(extra_bits) or ""),
         ),
         KNOWLEDGE_HEAD.format(knowledge=build_knowledge(notes, facts, pending)),

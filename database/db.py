@@ -1131,6 +1131,17 @@ async def upsert_ai_profile(user_id: int, target_id: int, **fields) -> None:
         )
 
 
+async def set_ai_auto_mode_all(user_id: int, auto: bool) -> int:
+    """خودکار/پیشنهاد را برای همه‌ی چت‌های AI این کاربر عوض می‌کند"""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """UPDATE ai_profiles SET auto_mode = $2, updated_at = NOW()
+               WHERE user_id = $1 AND auto_mode <> $2
+               RETURNING target_id""",
+            user_id, auto)
+    return len(rows)
+
+
 async def set_ai_auto_mode(user_id: int, target_id: int, auto: bool) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:

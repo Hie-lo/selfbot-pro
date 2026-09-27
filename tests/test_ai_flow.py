@@ -89,7 +89,7 @@ async def main():
     await asyncio.sleep(0.2)
     await sim.fire(client, ".تنظیم سطح 3", out=True)
     await asyncio.sleep(0.2)
-    from bot.ai_panel import _ai_config
+    from bot.ai_panel import _ai_config, _save_ai_config
     cfg = await _ai_config(uid)
     check("مود playfull ذخیره شد", cfg.get("mode") == "playfull")
     prof3 = await db.get_ai_profile(uid, PEER)
@@ -231,7 +231,8 @@ async def main():
 
     # ── ۱۵) پنل پیوی ربات: پرسونا ──
     from bot import ai_panel
-    from bot.ai_panel import contacts_kb, modes_kb, tones_kb
+    from bot.ai_panel import (ai_menu_kb, build_emoji_text, contacts_kb, emoji_kb,
+                             modes_kb, tones_kb)
     check("کیبورد مودها ساخته می‌شود", "ai:mode:playfull" in str(modes_kb("playfull")))
     check("کیبورد سطح‌ها ساخته می‌شود", "ai:tone:3" in str(tones_kb(3)))
     check("کیبورد مخاطبین ساخته می‌شود", "ai:chat:" in str(contacts_kb(
@@ -277,6 +278,125 @@ async def main():
     check("عیب‌یابی آخرین خطا را نشان می‌دهد", "401" in bad_txt, bad_txt[:200])
     check("عیب‌یابی بدون سرویس، راهنمای .env می‌دهد",
           "AI_BASE_URL" in build_diag_text({"providers": []}))
+
+    # ── ۱۵.۸) ایموجی: سطح‌بندی + محدود کردن به ایموجی‌های خودم ──
+    check("سطح ایموجی: عدد و کلمه قبول است",
+          [E.norm_emoji_level(v) for v in ("۰", "هیچ", 2, "زیاد", "کم")] == [0, 0, 2, 3, 1])
+    check("ایموجی‌های چسبیده جدا می‌شوند",
+          E.parse_emoji_list("😂❤️🙏") == ["😂", "❤️", "🙏"], str(E.parse_emoji_list("😂❤️🙏")))
+
+    sample = "سلام چطوری 😂 خوبی ❤️😍"
+    check("سطح ۰: هیچ ایموجی نمی‌ماند", E.emoji_count(E.strip_emoji(sample, 0)) == 0)
+    check("سطح ۱: فقط یک ایموجی", E.emoji_count(E.strip_emoji(sample, 1)) == 1)
+    check("سطح ۲: حداکثر دو ایموجی", E.emoji_count(E.strip_emoji(sample, 2)) == 2)
+    check("متن بدون ایموجی دست‌نخورده می‌ماند",
+          E.strip_emoji("سلام چطوری", 0) == "سلام چطوری")
+    check("با لیست مجاز: ایموجی غیرمجاز حذف می‌شود",
+          E.strip_emoji("باشه 😍", 3, ["😂"]) == "باشه")
+    check("با لیست مجاز: ایموجی مجاز می‌ماند",
+          E.strip_emoji("باشه 😂", 3, ["😂"]) == "باشه 😂")
+    check("فاصله‌ی اضافه بعد از حذف ایموجی جمع می‌شود",
+          "  " not in E.strip_emoji("سلام  😂  خوبی", 0))
+
+    # پرامپت: قانون ایموجی بر اساس سطح و لیست
+    prof = {"relationship": "friend", "tone_level": 2, "emoji_level": 0,
+            "allowed_emojis": "", "length": "کوتاه"}
+    st = E.effective_settings(prof, "عادی", 2, global_emoji=1, allowed_emojis="")
+    check("سطح ایموجی چت بر سطح کلی اولویت دارد", st["emoji_level"] == 0)
+    st2 = E.effective_settings({}, "عادی", 2, global_emoji=3, allowed_emojis="😂❤️")
+    check("سطح کلی وقتی چت تنظیمی ندارد اعمال می‌شود", st2["emoji_level"] == 3)
+    check("لیست ایموجی‌های مجاز در تنظیمات می‌آید", st2["allowed_emojis"] == ["😂", "❤️"])
+    msgs = E.build_messages(my_name="من", persona="", mode="عادی", settings=st2,
+                            notes=[], facts=[], pending=[], history=[])
+    check("پرامپت سطح ۳ را می‌گوید", "ایموجی: آزاد" in msgs[0]["content"], msgs[0]["content"][-300:])
+    check("پرامپت لیست ایموجی‌های من را می‌گوید",
+          "فقط و فقط از این ایموجی‌ها" in msgs[0]["content"] and "😂" in msgs[0]["content"])
+    msgs0 = E.build_messages(my_name="من", persona="", mode="عادی",
+                             settings={**st2, "emoji_level": 0, "allowed_emojis": []},
+                             notes=[], facts=[], pending=[], history=[])
+    check("پرامپت سطح ۰ صریح «هیچ ایموجی» می‌گوید",
+          "ایموجی: هیچ" in msgs0[0]["content"], msgs0[0]["content"][-200:])
+
+    # دستور و ذخیره‌سازی
+    await sim.fire(client, ".تنظیم ایموجی 0", out=True)
+    await asyncio.sleep(0.3)
+    cfg_e = await _ai_config(uid)
+    check("«.تنظیم ایموجی 0» ذخیره می‌شود", E.norm_emoji_level(cfg_e.get("emoji_level"), -1) == 0,
+          str(cfg_e.get("emoji_level")))
+    await sim.fire(client, ".تنظیم ایموجی 😂❤️🙏", out=True)
+    await asyncio.sleep(0.3)
+    cfg_e = await _ai_config(uid)
+    check("لیست ایموجی‌های خودم ذخیره می‌شود",
+          cfg_e.get("allowed_emojis") == "😂❤️🙏", str(cfg_e.get("allowed_emojis")))
+    await sim.fire(client, ".تنظیم ایموجی هیچ", out=True)
+    await asyncio.sleep(0.3)
+    cfg_e = await _ai_config(uid)
+    check("«ایموجی هیچ» محدودیت را برمی‌دارد", not cfg_e.get("allowed_emojis"),
+          str(cfg_e.get("allowed_emojis")))
+    pv_before = len(PV)
+    await sim.fire(client, ".تنظیم ایموجی", out=True)
+    await asyncio.sleep(0.4)
+    check("«.تنظیم ایموجی» بدون آرگومان راهنما می‌دهد",
+          any("سطح ایموجی" in t for _, t in PV[pv_before:]),
+          str([t[:60] for _, t in PV[pv_before:]]))
+
+    # ── ۱۵.۸۵) رگرسیون باگ: مقدار خالی پروفایل نباید تنظیم کلی را بی‌اثر کند ──
+    rel_prof = {"relationship": "close_friend", "emoji_level": "",
+                "tone_level": "", "allowed_emojis": ""}
+    check("تنظیم کلی ایموجی روی پروفایل خالی اثر می‌کند",
+          E.effective_settings(rel_prof, "عادی", 2, global_emoji=3)["emoji_level"] == 3)
+    check("سطح صفر چت بر تنظیم کلی اولویت دارد",
+          E.effective_settings({**rel_prof, "emoji_level": 0}, "عادی", 2,
+                               global_emoji=3)["emoji_level"] == 0)
+    check("«هیچ» به‌عنوان سطح کلی درست تفسیر می‌شود",
+          E.effective_settings(rel_prof, "عادی", 2, global_emoji="هیچ")["emoji_level"] == 0)
+    st_empty = E.effective_settings({"tone_level": "", "intimacy": "", "relationship": "close_friend"},
+                                    "عادی", 2)
+    check("سطح خالی/نامعتبر خطا نمی‌دهد و از جایگاه می‌آید",
+          st_empty["tone"] == 3 and st_empty["intimacy"] == 5, str(st_empty["tone"]))
+    check("لیست ایموجی چت بر کلی اولویت دارد",
+          E.effective_settings({**rel_prof, "allowed_emojis": "😂"}, "عادی", 2,
+                               global_emoji=1, allowed_emojis="")["allowed_emojis"] == ["😂"])
+    check("شمارش ایموجی‌های تکراری درست است",
+          E.strip_emoji("😂😂😂", 1) == "😂" and E.emoji_count(E.strip_emoji("😂😂😂", 2)) == 2)
+
+    # ── ۱۵.۹) پنل: دکمه‌ی بازگشت + کلید draft ──
+    kb_menu = str(ai_menu_kb())
+    check("دکمه‌ی بازگشت در منوی AI هست", "back_main" in kb_menu)
+    check("دکمه‌ی ایموجی در منو هست", "ai:emoji" in kb_menu)
+    check("دکمه‌ی حالت ارسال (draft) در منو هست", "ai:draft" in kb_menu)
+    check("وضعیت ارسال در برچسب دکمه دیده می‌شود",
+          "پیشنهاد به من" in kb_menu or "خودکار" in kb_menu)
+    kb_emoji = str(emoji_kb(2, "😂"))
+    check("کیبورد ایموجی سطح‌ها را دارد", all(f"ai:setemoji:{i}" in kb_emoji for i in range(4)))
+    check("کیبورد ایموجی دکمه‌ی برداشتن محدودیت دارد", "allow_clear" in kb_emoji)
+    check("متن ایموجی لیست مجاز را نشان می‌دهد",
+          "😂" in build_emoji_text({"emoji_level": 2, "allowed_emojis": "😂"}))
+
+    before = bool((await _ai_config(uid)).get("draft_only", True))
+    await _save_ai_config(uid, {"draft_only": not before})
+    check("حالت draft از پنل قابل تغییر است",
+          bool((await _ai_config(uid)).get("draft_only", True)) is (not before))
+    await _save_ai_config(uid, {"draft_only": before})
+    n_off = await db.set_ai_auto_mode_all(uid, False)
+    check("خاموش‌کردن خودکار برای همه‌ی چت‌ها", n_off >= 1, str(n_off))
+    n_auto = await db.set_ai_auto_mode_all(uid, True)
+    check("خودکار کردن همه‌ی چت‌ها کار می‌کند", n_auto >= 1, str(n_auto))
+    prof_now = await db.get_ai_profile(uid, PEER)
+    check("چت هم خودکار شد", bool(prof_now.get("auto_mode")))
+
+    # «.ai خودکار» باید کلید کلی draft را هم باز کند وگرنه اثری ندارد
+    await _save_ai_config(uid, {"draft_only": True})
+    await db.set_ai_auto_mode(uid, PEER, False)
+    await sim.fire(client, ".ai خودکار", out=True)
+    await asyncio.sleep(0.4)
+    cfg_auto = await _ai_config(uid)
+    check("«.ai خودکار» کلید کلی را هم خودکار می‌کند",
+          cfg_auto.get("draft_only") is False, str(cfg_auto.get("draft_only")))
+    check("در همان چت هم خودکار شد",
+          bool((await db.get_ai_profile(uid, PEER)).get("auto_mode")))
+    await _save_ai_config(uid, {"draft_only": True})
+    await db.set_ai_auto_mode(uid, PEER, False)
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

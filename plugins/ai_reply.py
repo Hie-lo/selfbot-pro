@@ -41,6 +41,8 @@ DEFAULT_CONFIG = {
     "persona": "",
     "mode": "عادی",
     "tone_level": 2,
+    "emoji_level": 1,        # ۰ هیچ، ۱ خیلی کم، ۲ متوسط، ۳ آزاد
+    "allowed_emojis": "",    # لیست ایموجی‌های خودم: «😂❤️🙏»
     "draft_only": True,      # پیش‌فرض: پیشنهاد به من، نه ارسال خودکار
     "all_private": False,    # اگر True: همه‌ی پیوی‌ها (وگرنه فقط چت‌های روشن‌شده)
     "rpm": 6, "rph": 60, "rpd": 300,
@@ -130,7 +132,7 @@ class AiReplyPlugin(BasePlugin):
         self._add_handler(
             self._on_command,
             events.NewMessage(
-                pattern=r"^\.تنظیم\s+(?:مود|سطح)(?:\s+[\s\S]+)?$",
+                pattern=r"^\.تنظیم\s+(?:مود|سطح|ایموجی)(?:\s+[\s\S]+)?$",
                 outgoing=True,
             ),
         )
@@ -181,6 +183,9 @@ class AiReplyPlugin(BasePlugin):
 
     async def _on_incoming(self, event):
         try:
+            # تنظیمات را تازه بخوان: ممکن است از پنل پیوی ربات (دکمه‌ی حالت
+            # ارسال / ایموجی / پرسونا) عوض شده باشد و نسخه‌ی حافظه قدیمی باشد.
+            await self._load_config()
             await self._handle_incoming(event)
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds + 1)
@@ -340,8 +345,12 @@ class AiReplyPlugin(BasePlugin):
 
     async def _generate(self, event, profile: dict) -> str | None:
         chat_id = event.chat_id
-        settings = E.effective_settings(profile, self._cfg.get("mode", "عادی"),
-                                        int(self._cfg.get("tone_level", 2)))
+        settings = E.effective_settings(
+            profile, self._cfg.get("mode", "عادی"),
+            int(self._cfg.get("tone_level", 2)),
+            global_emoji=self._cfg.get("emoji_level"),
+            allowed_emojis=self._cfg.get("allowed_emojis"),
+        )
         settings["target_name"] = profile.get("target_name") or str(chat_id)
         history = await db.get_ai_messages(self.user_id, chat_id, limit=15)
         notes = await db.get_ai_notes(self.user_id, chat_id, limit=10)
@@ -384,6 +393,10 @@ class AiReplyPlugin(BasePlugin):
             )
 
         reply = E.clean_reply(reply)
+        # فیلتر ایموجی: سطح کاربر + لیست ایموجی‌های خودش (مدل‌ها همیشه
+        # حرف‌گوش‌کن نیستند، پس اجبار می‌کنیم)
+        reply = E.strip_emoji(reply, settings.get("emoji_level", 1),
+                              settings.get("allowed_emojis"))
         if not reply:
             return None
         self.logger.info(f"AI reply ({provider or 'fallback'}) in {chat_id}: {reply[:60]}")
@@ -473,6 +486,7 @@ class AiReplyPlugin(BasePlugin):
 
     async def _on_command(self, event):
         try:
+            await self._load_config()      # هم‌گام‌سازی با تغییرات پنل پیوی ربات
             await self._handle_command(event)
         except Exception as e:
             self.logger.error(f"command error: {type(e).__name__}: {e}")
@@ -490,6 +504,10 @@ class AiReplyPlugin(BasePlugin):
         m = re.match(r"^\.تنظیم\s+سطح(?:\s+(\d+))?$", text)
         if m:
             await self._cmd_set_tone(event, (m.group(1) or "").strip(), profile, chat_id)
+            return
+        m = re.match(r"^\.تنظیم\s+ایموجی(?:\s+([\s\S]+))?$", text)
+        if m:
+            await self._cmd_set_emoji(event, (m.group(1) or "").strip(), profile, chat_id)
             return
         m = re.match(r"^\.ai(?:\s+([\s\S]+))?$", text)
         if not m:
@@ -512,7 +530,14 @@ class AiReplyPlugin(BasePlugin):
             await self._cmd_relationship(event, arg, profile, chat_id)
         elif sub in ("خودکار", "auto"):
             await db.set_ai_auto_mode(self.user_id, chat_id, True)
-            await self._reply_notify("⚡ از این به بعد در این چت <b>خودکار</b> جواب می‌دم (بدون تایید).")
+            note = ""
+            if self._cfg.get("draft_only", True):
+                # کلید کلی «فقط پیش‌نویس» هم باید باز شود، وگرنه این دستور
+                # هیچ اثری ندارد و کاربر فکر می‌کند خودکار کار نمی‌کند.
+                await self._save_config(draft_only=False)
+                note = "\n(حالت کلی هم شد «خودکار» — از پنل پیوی ربات هم قابل تغییر است)"
+            await self._reply_notify(
+                "⚡ از این به بعد در این چت <b>خودکار</b> جواب می‌دم (بدون تایید)." + note)
         elif sub in ("دستی", "manual"):
             await db.set_ai_auto_mode(self.user_id, chat_id, False)
             await self._reply_notify("👤 برگشت به حالت <b>پیشنهاد</b>: اول به خودت نشون می‌دم.")
@@ -520,6 +545,8 @@ class AiReplyPlugin(BasePlugin):
             await self._cmd_set_mode(event, arg, profile, chat_id)
         elif sub in ("سطح", "level"):
             await self._cmd_set_tone(event, arg, profile, chat_id)
+        elif sub in ("ایموجی", "اموجی", "emoji"):
+            await self._cmd_set_emoji(event, arg, profile, chat_id)
         elif sub in ("سرچ", "search"):
             await self._cmd_search(event, arg, chat_id)
         elif sub in ("حافظه", "memory"):
@@ -531,7 +558,7 @@ class AiReplyPlugin(BasePlugin):
         elif sub in ("کلید", "provider", "سرویس"):
             await self._cmd_providers(event)
         else:
-            await self._reply_notify("❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، شخص، خودکار، دستی، مود، سطح، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
+            await self._reply_notify("❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، شخص، خودکار، دستی، مود، سطح، ایموجی، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
 
     async def _cmd_enable(self, event, profile, chat_id):
         self._paused.discard(chat_id)
@@ -603,6 +630,55 @@ class AiReplyPlugin(BasePlugin):
             await self._save_config(tone_level=level)
             where = "همه‌ی چت‌ها"
         await self._reply_notify(f"🌡 سطح {level} ({where}): {E.TONE_LABELS[level]}")
+
+    async def _cmd_set_emoji(self, event, arg, profile, chat_id):
+        """
+        سطح ایموجی را عوض می‌کند؛ اگر arg خودش ایموجی باشد، یعنی «فقط همین‌ها».
+
+          .تنظیم ایموجی ۰ | ۱ | ۲ | ۳   → سطح کلی (همه‌ی چت‌ها)
+          .تنظیم ایموجی 😂❤️🙏          → لیست ایموجی‌های مجاز من
+          .تنظیم ایموجی هیچ             → لیست را خالی کن (هر ایموجی مجاز می‌شود)
+        """
+        raw = (arg or "").strip()
+        if not raw:
+            cur = E.norm_emoji_level(self._cfg.get("emoji_level"), 1)
+            allow = self._cfg.get("allowed_emojis") or "—"
+            lines = "\n".join(f"<code>{k}</code> — {v}" for k, v in E.EMOJI_LEVELS.items())
+            await self._reply_notify(
+                f"😊 <b>سطح ایموجی:</b> {cur} — {E.EMOJI_LEVELS[cur]}\n"
+                f"😊 <b>ایموجی‌های من:</b> {self._esc(allow)}\n\n{lines}\n\n"
+                "مثال: <code>.تنظیم ایموجی 0</code> (بدون ایموجی)\n"
+                "برای محدود کردن به ایموجی‌های خودت: <code>.تنظیم ایموجی 😂❤️🙏</code>\n"
+                "برای برداشتن محدودیت: <code>.تنظیم ایموجی هیچ</code>")
+            return
+
+        emojis = E.parse_emoji_list(raw)
+        if emojis:
+            if len(emojis) > 20:
+                emojis = emojis[:20]
+            await self._save_config(allowed_emojis="".join(emojis))
+            await self._reply_notify(
+                f"😊 از این به بعد فقط از این ایموجی‌ها استفاده می‌کنم: {''.join(emojis)}\n"
+                f"هر ایموجی دیگری حذف می‌شود. (سطح فعلی: "
+                f"{E.norm_emoji_level(self._cfg.get('emoji_level'), 1)})")
+            return
+
+        if raw in ("هیچ", "خالی", "پاک", "بدون", "none", "clear", "off", "-"):
+            await self._save_config(allowed_emojis="")
+            await self._reply_notify("😊 محدودیت ایموجی برداشته شد (فقط سطح کلی اعمال می‌شود).")
+            return
+
+        if raw.isdigit() or raw in ("کم", "متوسط", "زیاد") or E.norm_emoji_level(raw, -1) >= 0:
+            level = E.norm_emoji_level(raw, -1)
+            if level < 0:
+                await self._reply_notify("😊 سطح باید بین ۰ تا ۳ باشد.")
+                return
+            await self._save_config(emoji_level=level)
+            await self._reply_notify(f"😊 سطح ایموجی شد <b>{level}</b> — {E.EMOJI_LEVELS[level]}")
+            return
+
+        await self._reply_notify(
+            "❓ مثال: <code>.تنظیم ایموجی 0</code> یا <code>.تنظیم ایموجی 😂❤️</code>")
 
     async def _cmd_search(self, event, arg, chat_id):
         if not arg:

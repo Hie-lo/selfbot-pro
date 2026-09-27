@@ -23,17 +23,59 @@ def _esc(text) -> str:
     return html.escape(str(text or ""))
 
 
-def ai_menu_kb(enabled: bool = True) -> InlineKeyboardMarkup:
+def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
+               emoji_level: int = 1) -> InlineKeyboardMarkup:
+    send_label = ("📤 حالت ارسال: پیشنهاد به من" if draft_only
+                  else "📤 حالت ارسال: خودکار ⚡")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✍️ شخصیت من (پرسونا)", callback_data="ai:persona")],
         [InlineKeyboardButton("🎭 مود", callback_data="ai:modes"),
          InlineKeyboardButton("🌡 سطح آزادی بیان", callback_data="ai:tones")],
+        [InlineKeyboardButton(f"😊 ایموجی ({emoji_level})", callback_data="ai:emoji"),
+         InlineKeyboardButton(send_label, callback_data="ai:draft")],
         [InlineKeyboardButton("👥 مخاطبین و حافظه", callback_data="ai:contacts"),
          InlineKeyboardButton("🔑 سرویس‌ها", callback_data="ai:providers")],
         [InlineKeyboardButton("🧪 تست پاسخ", callback_data="ai:test"),
          InlineKeyboardButton("🔍 عیب‌یابی", callback_data="ai:diag"),
          InlineKeyboardButton("🔄 بازخوانی", callback_data="ai:menu")],
+        [InlineKeyboardButton("⬅️ بازگشت به منوی ربات", callback_data="back_main")],
     ])
+
+
+def emoji_kb(current: int, allowed: str = "") -> InlineKeyboardMarkup:
+    rows = []
+    for lvl, label in E.EMOJI_LEVELS.items():
+        short = label.split("—")[0].strip()
+        rows.append([InlineKeyboardButton(
+            ("✅ " if lvl == current else "") + f"{lvl} — {short}",
+            callback_data=f"ai:setemoji:{lvl}",
+        )])
+    if allowed:
+        rows.append([InlineKeyboardButton("🗑 برداشتن محدودیت ایموجی‌ها",
+                                          callback_data="ai:setemoji:allow_clear")])
+    rows.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="ai:menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_emoji_text(cfg: dict) -> str:
+    cur = E.norm_emoji_level(cfg.get("emoji_level"), 1)
+    allow = (cfg.get("allowed_emojis") or "").strip()
+    lines = [
+        "😊 <b>ایموجی</b>\n",
+        f"سطح فعلی: <b>{cur}</b> — {_esc(E.EMOJI_LEVELS[cur])}\n",
+    ]
+    if allow:
+        lines.append(f"فقط این ایموجی‌ها مجازند: {_esc(allow)}")
+    else:
+        lines.append("ایموجی‌های مجاز: هر ایموجی (فقط سطح بالا اعمال می‌شود)")
+    lines.append(
+        "\n<b>سطح‌ها:</b>\n"
+        + "\n".join(f"<code>{k}</code> — {_esc(v)}" for k, v in E.EMOJI_LEVELS.items())
+        + "\n\n💡 برای اینکه فقط از ایموجی‌های <b>خودت</b> استفاده کنم، لیست را "
+          "در چت بفرست:\n<code>.تنظیم ایموجی 😂❤️🙏</code>\n"
+          "(هر ایموجی خارج از لیست و همچنین ایموجی‌های اضافه، خودکار حذف می‌شوند)"
+    )
+    return "\n".join(lines)
 
 
 MODE_ROWS = [["عادی", "خوشحال", "playfull"],
@@ -122,6 +164,17 @@ async def _ai_config(user_id: int) -> dict:
     return cfg
 
 
+async def _save_ai_config(user_id: int, changes: dict) -> dict:
+    """
+    تنظیمات AI را در دیتابیس ذخیره می‌کند (پرسونا/مود/سطح/ایموجی/حالت ارسال).
+    لیست ایموجی‌های مجاز به‌صورت رشته ذخیره می‌شود تا با JSON سازگار بماند.
+    """
+    cfg = await _ai_config(user_id)
+    cfg.update(changes)
+    await db.set_feature(user_id, "ai_reply", True, cfg)
+    return cfg
+
+
 async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
                        user_id: int, edit: bool = True):
     cfg = await _ai_config(user_id)
@@ -129,8 +182,11 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     persona_show = (persona[:200] + "…") if len(persona) > 200 else (persona or "— خالی —")
     mode = cfg.get("mode", "عادی")
     tone = int(cfg.get("tone_level", 2))
+    emoji_lvl = E.norm_emoji_level(cfg.get("emoji_level"), 1)
+    allow = (cfg.get("allowed_emojis") or "").strip()
     chats = await db.list_ai_chats(user_id)
-    draft = "پیشنهاد به من" if cfg.get("draft_only", True) else "خودکار (چت‌های علامت‌خورده)"
+    draft_only = bool(cfg.get("draft_only", True))
+    draft = "پیشنهاد به من (اول تأیید می‌کنی)" if draft_only else "خودکار ⚡ (خودم می‌فرستم)"
 
     text = (
         "🧠 <b>پاسخ هوشمند (AI)</b>\n\n"
@@ -138,11 +194,13 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         f"✍️ <b>شخصیت:</b> {_esc(persona_show)}\n"
         f"🎭 <b>مود:</b> {_esc(mode)}\n"
         f"🌡 <b>سطح آزادی بیان:</b> {tone} — {_esc(E.TONE_LABELS.get(tone, ''))}\n"
+        f"😊 <b>ایموجی:</b> {emoji_lvl} — {_esc(E.EMOJI_LEVELS[emoji_lvl])}"
+        + (f" · فقط: {_esc(allow)}" if allow else "") + "\n"
         f"📤 <b>حالت ارسال:</b> {_esc(draft)}\n"
         f"👥 <b>مخاطبین با حافظه:</b> {len(chats)}\n\n"
         "💡 برای فعال کردن در یک چت، از خود سلف‌بات <code>.ai روشن</code> را بفرست."
     )
-    kb = ai_menu_kb()
+    kb = ai_menu_kb(draft_only=draft_only, emoji_level=emoji_lvl)
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -422,6 +480,50 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "\"model\":\"meta-llama/llama-3.1-8b-instruct:free\",\"keys\":[\"sk-...\"]}]</code>",
             reply_markup=ai_menu_kb(), parse_mode="HTML")
         await q.answer()
+        return True
+
+    if action == "emoji":
+        await q.edit_message_text(build_emoji_text(cfg),
+                                  reply_markup=emoji_kb(
+                                      E.norm_emoji_level(cfg.get("emoji_level"), 1),
+                                      cfg.get("allowed_emojis") or ""),
+                                  parse_mode="HTML")
+        await q.answer()
+        return True
+
+    if action == "setemoji":
+        value = parts[2] if len(parts) > 2 else ""
+        if value == "allow_clear":
+            await _save_ai_config(user_id, {"allowed_emojis": ""})
+            await q.answer("محدودیت ایموجی‌ها برداشته شد ✅")
+        else:
+            lvl = E.norm_emoji_level(value, -1)
+            if lvl < 0:
+                await q.answer("مقدار نامعتبر", show_alert=True)
+                return True
+            await _save_ai_config(user_id, {"emoji_level": lvl})
+            await q.answer(f"سطح ایموجی شد {lvl} ✅")
+        cfg = await _ai_config(user_id)
+        await q.edit_message_text(build_emoji_text(cfg),
+                                  reply_markup=emoji_kb(
+                                      E.norm_emoji_level(cfg.get("emoji_level"), 1),
+                                      cfg.get("allowed_emojis") or ""),
+                                  parse_mode="HTML")
+        return True
+
+    if action == "draft":
+        new_state = not bool(cfg.get("draft_only", True))
+        await _save_ai_config(user_id, {"draft_only": new_state})
+        if new_state:
+            await q.answer("حالا اول پیش‌نویس را به تو نشان می‌دهم ✅")
+        else:
+            # وقتی «خودکار» می‌شود، چت‌های موجود هم خودکار می‌شوند تا واقعاً
+            # جواب دادن خودکار شروع شود (وگرنه تا وقتی .ai خودکار را نزنی
+            # فقط پیش‌نویس می‌ماند و کاربر فکر می‌کند کار نمی‌کند).
+            n = await db.set_ai_auto_mode_all(user_id, True)
+            await q.answer(f"حالا خودم خودکار جواب می‌دم ⚡ ({n} چت فعال شد)",
+                           show_alert=True)
+        await show_ai_menu(update, context, user_id, edit=True)
         return True
 
     if action == "diag":
