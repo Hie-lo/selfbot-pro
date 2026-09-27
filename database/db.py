@@ -305,11 +305,34 @@ async def set_feature(
     user_id: int,
     feature_name: str,
     is_enabled: bool,
-    config_json: dict = None,
+    config_json: dict | None = None,
 ) -> None:
+    """
+    روشن/خاموش کردن قابلیت + (اختیاری) ذخیره‌ی تنظیماتش.
+
+    ⚠️ مهم: اگر config_json داده نشود، تنظیمات ذخیره‌شده **پاک نمی‌شود**.
+    قبلاً این‌جا `json.dumps(config_json or {})` بود و هر دستور «.روشن/خاموش»
+    یا دکمه‌ی قابلیت‌ها، پرسونا/مود/سطح/ایموجی/نام مخاطبین کاربر را با {}
+    بازنویسی می‌کرد (تنظیمات «ریست» می‌شد).
+    """
     pool = get_pool()
-    cfg = json.dumps(config_json or {})
     async with pool.acquire() as conn:
+        if config_json is None:
+            # فقط وضعیت را عوض کن؛ تنظیمات موجود دست‌نخورده می‌مانند
+            await conn.execute(
+                """
+                INSERT INTO feature_toggles
+                    (user_id, feature_name, is_enabled, config_json)
+                VALUES ($1, $2, $3, '{}'::jsonb)
+                ON CONFLICT (user_id, feature_name) DO UPDATE
+                    SET is_enabled = $3,
+                        updated_at = NOW()
+                """,
+                user_id, feature_name, is_enabled,
+            )
+            return
+
+        cfg = json.dumps(config_json)
         await conn.execute(
             """
             INSERT INTO feature_toggles
@@ -1384,25 +1407,43 @@ async def search_ai_memory(user_id: int, target_id: int, query: str,
 
 
 async def list_ai_chats(user_id: int) -> list[dict]:
-    """چت‌هایی که حافظه دارند (برای پنل)"""
+    """
+    همه‌ی مخاطبین هوش مصنوعی: هر چتی که AI در آن روشن شده (پروفایل دارد)
+    به‌همراه چت‌هایی که حافظه/پیام دارند.
+
+    ⚠️ قبلاً فقط از ai_memory می‌خواند، پس چتی که تازه روشن شده بود ولی
+    هنوز پیامی نداشت در فهرست مخاطبین دیده نمی‌شد.
+    """
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT m.target_id,
-                   COUNT(*) FILTER (WHERE m.kind = 'msg')  AS msgs,
-                   COUNT(*) FILTER (WHERE m.kind = 'note') AS notes,
-                   COUNT(*) FILTER (WHERE m.kind = 'fact') AS facts,
-                   COALESCE(p.target_name, '') AS name,
-                   COALESCE(p.enabled, TRUE)   AS enabled,
-                   COALESCE(p.auto_mode, FALSE) AS auto_mode
-            FROM ai_memory m
-            LEFT JOIN ai_profiles p
-                   ON p.user_id = m.user_id AND p.target_id = m.target_id
-            WHERE m.user_id = $1
-            GROUP BY m.target_id, p.target_name, p.enabled, p.auto_mode
-            ORDER BY MAX(m.created_at) DESC
-            LIMIT 100
+            WITH mem AS (
+                SELECT user_id, target_id,
+                       COUNT(*) FILTER (WHERE kind = 'msg')  AS msgs,
+                       COUNT(*) FILTER (WHERE kind = 'note') AS notes,
+                       COUNT(*) FILTER (WHERE kind = 'fact') AS facts,
+                       MAX(created_at) AS last_seen
+                FROM ai_memory
+                WHERE user_id = $1
+                GROUP BY user_id, target_id
+            )
+            SELECT COALESCE(p.target_id, m.target_id)      AS target_id,
+                   COALESCE(m.msgs, 0)                     AS msgs,
+                   COALESCE(m.notes, 0)                    AS notes,
+                   COALESCE(m.facts, 0)                    AS facts,
+                   COALESCE(p.target_name, '')             AS name,
+                   COALESCE(p.enabled, TRUE)               AS enabled,
+                   COALESCE(p.auto_mode, FALSE)            AS auto_mode,
+                   COALESCE(p.relationship, '')            AS relationship,
+                   GREATEST(COALESCE(m.last_seen, to_timestamp(0)),
+                            COALESCE(p.updated_at, to_timestamp(0))) AS last_active
+            FROM ai_profiles p
+            FULL OUTER JOIN mem m
+                   ON m.user_id = p.user_id AND m.target_id = p.target_id
+            WHERE COALESCE(p.user_id, m.user_id) = $1
+            ORDER BY last_active DESC
+            LIMIT 200
             """,
             user_id,
         )

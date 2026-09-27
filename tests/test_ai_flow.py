@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ai_sim as sim                                    # noqa: E402
-from ai_sim import ME, PEER, PV, SENT                   # noqa: E402
+from ai_sim import GROUP, ME, PEER, PV, SENT                   # noqa: E402
 
 from core import ai_providers                           # noqa: E402
 from core import plugin_manager as pm                   # noqa: E402
@@ -528,6 +528,81 @@ async def main():
           "غلط املایی واضح" in sys_txt and "غلط تایپی طبیعی اشکالی ندارد" not in sys_txt)
     check("قاعده‌ی نام‌بردن هست", "اسم طرف را فقط همان‌طور" in sys_txt)
     check("پیام طرف در یادآوری پایان پرامپت می‌آید", "کجایی؟" in sys_txt.split("یادآوری آخر")[-1])
+
+    # ── ۱۵.۹۹) ماندگاری داده (رگرسیون باگ ریست‌شدن تنظیمات) ──
+    await _save_ai_config(uid, {"persona": "پرسونای ماندگار", "mode": "شوخ",
+                                "emoji_level": 2,
+                                "name_overrides": {str(PEER): "رضایی"}})
+    snapshot = {k: (await _ai_config(uid)).get(k)
+                for k in ("persona", "mode", "emoji_level", "name_overrides")}
+    # روشن/خاموش کردن قابلیت (هم دستور، هم دکمه‌ی پنل) نباید تنظیمات را پاک کند
+    await sim.fire(client, ".خاموش هوش مصنوعی", out=True)
+    await asyncio.sleep(0.4)
+    await sim.fire(client, ".روشن هوش مصنوعی", out=True)
+    await asyncio.sleep(0.4)
+    await db.set_feature(uid, "ai_reply", False)          # مسیر دکمه‌ی پنل
+    await db.set_feature(uid, "ai_reply", True)
+    after_toggle = {k: (await _ai_config(uid)).get(k) for k in snapshot}
+    check("خاموش/روشن کردن قابلیت تنظیمات را پاک نمی‌کند",
+          after_toggle == snapshot, f"{snapshot} → {after_toggle}")
+
+    # شبیه‌سازی ری‌استارت: نمونه‌ی تازه‌ی پلاگین همان تنظیمات را می‌خواند
+    from plugins.ai_reply import AiReplyPlugin
+    fresh = AiReplyPlugin(client, uid)
+    await fresh._load_config()
+    check("بعد از ری‌استارت تنظیمات همان می‌ماند",
+          all(fresh._cfg.get(k) == snapshot[k] for k in snapshot),
+          str({k: fresh._cfg.get(k) for k in snapshot}))
+    fresh.stop()
+    # تنظیمات سایر قابلیت‌ها هم نباید پاک شود
+    await db.set_feature(uid, "banner", True, {"seconds": 300})
+    await db.set_feature(uid, "banner", True)
+    feats = {f["feature_name"]: f for f in await db.get_features(uid)}
+    banner_cfg = feats["banner"]["config_json"] or {}
+    if isinstance(banner_cfg, str):
+        import json as _json
+        banner_cfg = _json.loads(banner_cfg or "{}")
+    check("تنظیمات قابلیت‌های دیگر هم حفظ می‌شود",
+          banner_cfg.get("seconds") == 300, str(banner_cfg))
+
+    # ── ۱۵.۱۰) مخاطبین: هر چتِ روشن‌شده + نام درست ──
+    await db.upsert_ai_profile(uid, 55555, target_name="حسن", enabled=True)
+    chats_all = await db.list_ai_chats(uid)
+    ids = {c["target_id"] for c in chats_all}
+    check("مخاطب جدید (بدون هیچ پیامی) در فهرست می‌آید", 55555 in ids, str(sorted(ids)))
+    check("چت‌های دارای حافظه هم می‌مانند", PEER in ids, str(sorted(ids)))
+    hassan = next((c for c in chats_all if c["target_id"] == 55555), {})
+    check("نام مخاطب در فهرست درست است", hassan.get("name") == "حسن", str(hassan))
+
+    # نام مخاطب نباید نام من باشد
+    me_name = await pm.get_active_plugins(uid)["ai_reply"]._my_name()
+    prof_self = next((c for c in chats_all if c["target_id"] == PEER), {})
+    check("نام مخاطب با نام خودم اشتباه نشده", prof_self.get("name") != me_name,
+          f"{prof_self.get('name')} vs {me_name}")
+
+    # نام خراب (id خام یا نام خودم) خودکار اصلاح می‌شود
+    await db.upsert_ai_profile(uid, PEER, target_name=me_name)
+    await _save_ai_config(uid, {"name_overrides": {}})
+    ar2 = pm.get_active_plugins(uid)["ai_reply"]
+    await ar2._repair_contact_names()
+    check("نام خرابِ ذخیره‌شده خودکار اصلاح می‌شود",
+          (await db.get_ai_profile(uid, PEER)).get("target_name") == "Ali",
+          str((await db.get_ai_profile(uid, PEER)).get("target_name")))
+    # نامِ گروه (که در شبیه‌ساز قابل حل است) به‌جای id خام
+    await db.upsert_ai_profile(uid, GROUP, target_name=str(abs(GROUP)))
+    await ar2._repair_contact_names()
+    fixed_group = (await db.get_ai_profile(uid, GROUP)).get("target_name")
+    check("نام عددی (id خام) خودکار با نام واقعی جایگزین می‌شود",
+          fixed_group == "گروه تست", str(fixed_group))
+
+    # نام دستی با اصلاح خودکار عوض نمی‌شود
+    await _save_ai_config(uid, {"name_overrides": {str(PEER): "رضایی"}})
+    await db.upsert_ai_profile(uid, PEER, target_name="رضایی")
+    hassan2 = await ar2._repair_contact_names()
+    check("نام دستی با اصلاح خودکار تغییر نمی‌کند",
+          (await db.get_ai_profile(uid, PEER)).get("target_name") == "رضایی")
+    await _save_ai_config(uid, {"name_overrides": {}, "persona": "من کم‌حرفم",
+                                "mode": "عادی", "emoji_level": 1})
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

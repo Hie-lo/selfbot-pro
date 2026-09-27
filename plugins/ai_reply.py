@@ -115,6 +115,8 @@ class AiReplyPlugin(BasePlugin):
             self.logger.warning(f"owner lookup failed: {e}")
 
         await self._load_config()
+        # نام‌های خراب (id خام یا نام خودم که اشتباهی ذخیره شده) را درست کن
+        asyncio.create_task(self._repair_contact_names())
 
         # ── پیام‌های ورودی: پاسخ هوشمند ──
         self._add_handler(self._on_incoming, events.NewMessage)
@@ -166,6 +168,93 @@ class AiReplyPlugin(BasePlugin):
         self._my_name_cache = name or "من"
         return self._my_name_cache
 
+    @staticmethod
+    def _extract_name(obj) -> str:
+        if obj is None:
+            return ""
+        first = (getattr(obj, "first_name", "") or "").strip()
+        last = (getattr(obj, "last_name", "") or "").strip()
+        full = f"{first} {last}".strip()
+        return (full or (getattr(obj, "title", "") or "").strip()
+                or (getattr(obj, "username", "") or "").strip())
+
+    async def _peer_name(self, chat_id, event=None) -> str:
+        """
+        نام **طرف مقابل** (نه فرستنده‌ی پیام).
+
+        ⚠️ باگ قبلی: نام از `event.get_sender()` خوانده می‌شد؛ چون دستور
+        «.ai روشن» را خودم می‌فرستم، فرستنده خودم بودم و اسم من روی مخاطب
+        می‌نشست.
+        """
+        is_private = True
+        if event is not None:
+            is_private = bool(getattr(event, "is_private", True))
+
+        if not is_private and event is not None:
+            # در گروه، «مخاطب» همان گروه است → نام گروه
+            try:
+                name = self._extract_name(await event.get_chat())
+                if name:
+                    return name
+            except Exception:
+                pass
+
+        try:
+            name = self._extract_name(await self.client.get_entity(chat_id))
+            if name:
+                return name
+        except Exception as e:
+            self.logger.debug(f"get_entity({chat_id}) failed: {type(e).__name__}")
+
+        if event is not None and not getattr(event, "out", True):
+            try:
+                name = self._extract_name(await event.get_sender())
+                if name:
+                    return name
+            except Exception:
+                pass
+        try:
+            name = self._extract_name(await event.get_chat())
+            if name:
+                return name
+        except Exception:
+            pass
+        return ""
+
+    async def _repair_contact_names(self, limit: int = 25) -> None:
+        """
+        نام‌های خرابِ ذخیره‌شده را سرِ استارت درست می‌کند:
+        نام عددی (id خام) یا نامِ خودم که اشتباهی روی مخاطب نشسته بود.
+        """
+        try:
+            await self._load_config()      # تنظیمات تازه (نام دستی ممکن است عوض شده باشد)
+            my_name = await self._my_name()
+            profiles = await db.list_ai_profiles(self.user_id, limit=200)
+        except Exception as e:
+            self.logger.warning(f"name repair skipped: {e}")
+            return
+        fixed = 0
+        for p in profiles:
+            tid = p.get("target_id")
+            name = (p.get("target_name") or "").strip()
+            if self._name_override(tid):
+                continue
+            bad = (not name) or name.lstrip("-").isdigit() or name == my_name
+            if not bad:
+                continue
+            try:
+                good = await self._peer_name(tid)
+            except Exception:
+                good = ""
+            if good and good != name:
+                await db.upsert_ai_profile(self.user_id, tid, target_name=good)
+                fixed += 1
+                self.logger.info(f"contact name repaired: {name!r} → {good!r}")
+            if fixed >= limit:
+                break
+        if fixed:
+            self.logger.info(f"repaired {fixed} contact names")
+
     def _name_override(self, chat_id) -> str:
         """نام دستی که خودم گذاشته‌ام (اگر باشد، اسم خودکار جای آن نمی‌نشیند)"""
         overrides = self._cfg.get("name_overrides") or {}
@@ -186,33 +275,17 @@ class AiReplyPlugin(BasePlugin):
         try:
             ent = await event.get_sender()
         except Exception:
-            return profile
-        def _extract(obj) -> str:
-            if obj is None:
-                return ""
-            first = (getattr(obj, "first_name", "") or "").strip()
-            last = (getattr(obj, "last_name", "") or "").strip()
-            full = f"{first} {last}".strip()
-            return (full or (getattr(obj, "title", "") or "").strip()
-                    or (getattr(obj, "username", "") or "").strip())
-
-        name = _extract(ent)
-        if not name:
-            try:
-                name = _extract(await event.get_chat())
-            except Exception:
-                pass
-        if not name:
-            # آخرین تلاش: موجودیت را مستقیم از خود تلگرام بگیر
-            try:
-                name = _extract(await self.client.get_entity(event.chat_id))
-            except Exception:
-                pass
+            ent = None
+        name = self._extract_name(ent)
+        if not name or getattr(event, "out", False):
+            # نام طرف مقابل مهم است، نه نام فرستنده (خودم)
+            name = await self._peer_name(event.chat_id, event)
         if not name or self._name_override(event.chat_id):
             return profile
         old = (profile or {}).get("target_name") or ""
-        # نام عددی یعنی «اسم واقعی نداریم» — باید جایگزین شود
-        if str(old).lstrip("-").isdigit():
+        my_name = await self._my_name()
+        # نام عددی (id) یا نامِ خودم = مقدار خراب → جایگزین شود
+        if str(old).lstrip("-").isdigit() or old == my_name:
             old = ""
         if name != old:
             await db.upsert_ai_profile(self.user_id, event.chat_id, target_name=name)
@@ -345,12 +418,7 @@ class AiReplyPlugin(BasePlugin):
     async def _create_default_profile(self, event) -> dict:
         """پروفایل پیش‌فرض: پیوی = آشنا، گروه = غریبه (قابل تغییر با .ai شخص)"""
         rel = "familiar" if event.is_private else "stranger"
-        try:
-            name = ""
-            ent = await event.get_sender()
-            name = (getattr(ent, "first_name", "") or getattr(ent, "title", "") or "").strip()
-        except Exception:
-            name = ""
+        name = await self._peer_name(event.chat_id, event)
         await db.upsert_ai_profile(
             self.user_id, event.chat_id,
             target_name=name or str(event.chat_id), relationship=rel,
