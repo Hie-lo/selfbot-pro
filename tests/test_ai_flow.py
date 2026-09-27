@@ -257,6 +257,27 @@ async def main():
     from bot.ai_panel import _esc as _panel_esc   # اطمینان از ایمن بودن متن‌ها
     check("متن فکت‌ها ایمن (escape) می‌شود", "&lt;" in _panel_esc("<b>"))
 
+    # ── ۱۵.۷) عیب‌یابی سرویس‌ها (پنل) ──
+    from bot.ai_panel import build_diag_text
+    good = build_diag_text({"providers": [{
+        "name": "سالم", "kind": "openai", "base_url": "https://api.example.com/v1",
+        "model": "m", "keys": ["sk-abcdef123456"]}]})
+    check("عیب‌یابی آدرس سالم را ✅ نشان می‌دهد",
+          "api.example.com" in good and "✅" in good)
+    check("عیب‌یابی کلید را ماسک می‌کند", "sk-abc" in good and "sk-abcdef123456" not in good)
+    check("عیب‌یابی راهنمای تست سرور را دارد", "ai_check.py" in good)
+
+    bad_cfg = {"providers": [{
+        "name": "خراب", "kind": "openai",
+        "base_url": "openrouter.ai/api/v1", "model": "m", "keys": ["k"]}]}
+    providers_bad = ai_providers.load_providers(bad_cfg)
+    ai_providers.set_last_error("خراب", "HTTP 401: bad key")
+    bad_txt = build_diag_text(bad_cfg)
+    check("عیب‌یابی آدرس نامعتبر را ❌ نشان می‌دهد", "نامعتبر" in bad_txt, bad_txt[:120])
+    check("عیب‌یابی آخرین خطا را نشان می‌دهد", "401" in bad_txt, bad_txt[:200])
+    check("عیب‌یابی بدون سرویس، راهنمای .env می‌دهد",
+          "AI_BASE_URL" in build_diag_text({"providers": []}))
+
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")
     check("شکستن پیام کار می‌کند", len(E.split_messages("یک\nدو\nسه")) == 3)

@@ -161,6 +161,14 @@ async def main():
     results.append(("دکمه‌های AI در گروه جدا هستند (ضد بلعیده‌شدن)",
                     ai_groups == [1], f"groups={ai_groups}"))
 
+    # ۳.۶) دکمه‌ی بی‌خاصیت «پنل مدیریت» حذف شده و بقیه‌ی دکمه‌ها هستند
+    from bot.keyboards import main_menu_kb
+    kb = str(main_menu_kb(has_account=True, is_admin=False))
+    results.append(("دکمه‌ی «پنل مدیریت» حذف شده", "پنل مدیریت" not in kb, kb[:100]))
+    results.append(("دکمه‌های مفید منو سرجایشان هستند",
+                    all(k in kb for k in ("features", "storage", "ai:menu",
+                                          "status", "subscription", "help")), kb[:160]))
+
     # ۴) تعداد هندلرهای گروه اصلی تغییری نکرده باشد (ضد حذف ناخواسته)
     n_main = sum(len(app.handlers[g]) for g in app.handlers if g >= 0)
     results.append(("تعداد هندلرهای گروه ≥ ۶۰", n_main >= 60, str(n_main)))

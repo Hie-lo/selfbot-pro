@@ -10,9 +10,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu_kb(has_account: bool = False, is_admin: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     if has_account:
-        buttons.append([
-            InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="panel"),
-        ])
+        # توجه: دکمه‌ی «⚙️ پنل مدیریت» (callback=panel) عمداً حذف شده؛ همان
+        # محتوا را پیام اصلی همین منو نشان می‌دهد و زدنش تغییری ایجاد نمی‌کرد.
+        # پنل داخل چت هم با دستور «.پنل» در دسترس است.
         buttons.append([
             InlineKeyboardButton("🧩 قابلیت‌ها", callback_data="features"),
             InlineKeyboardButton("📂 ذخیره‌سازی", callback_data="storage"),

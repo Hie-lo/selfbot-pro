@@ -333,13 +333,26 @@ def check_ai():
     else:
         ok("httpx آماده است", getattr(hx, "__version__", ""))
     providers = ai_providers.load_providers()
+    if providers:
+        src = {"config": "تنظیمات دیتابیس", "env-json": "AI_PROVIDERS در .env",
+               "env": "متغیرهای ساده‌ی .env (AI_KIND/AI_BASE_URL/…)"}.get(
+                   ai_providers.PROVIDER_SOURCE, ai_providers.PROVIDER_SOURCE)
+        ok(f"منبع تنظیمات AI: {src}")
     if not providers:
         warn("هیچ provider تنظیم نشده (قابلیت AI غیرفعال می‌ماند)",
              hint="AI_PROVIDERS را در .env بگذار — نمونه در .env.example")
     else:
         ok(f"provider های تنظیم‌شده: {len(providers)}")
         for p in providers:
-            ok(f"  • {p.name}", f"kind={p.kind} model={p.model or '?'} keys={len(p.keys)}")
+            if ai_providers.looks_like_url(p.base_url):
+                ok(f"  • {p.name}", f"{p.base_url} | model={p.model or '?'} | "
+                                   f"keys={len(p.keys)} ({ai_providers.mask_key(p.keys[0]) if p.keys else '—'})")
+            else:
+                bad(f"  • {p.name}: آدرس نامعتبر", repr(p.base_url),
+                    hint="آدرس را در .env بازنویسی کن (بدون براکت/لینک مارک‌داون).")
+            if p.last_error:
+                warn(f"     آخرین خطا: {p.last_error}",
+                     hint="برای جزئیات: python tools/ai_check.py")
 
 
 # ═══════════ ۸) لاگ ═══════════

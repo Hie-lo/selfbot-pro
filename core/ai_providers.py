@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 
 logger = logging.getLogger("ai_providers")
@@ -42,6 +43,81 @@ def _http():
             _httpx = False
     return _httpx or None
 
+# آخرین خطای هر سرویس — برای نمایش به کاربر (وگرنه خطاها فقط در لاگ می‌ماندند
+# و کاربر فقط «جوابی نیامد» را می‌دید).
+LAST_ERRORS: dict[str, str] = {}
+PROVIDER_SOURCE = "none"        # تنظیمات از کجا خوانده شد: config / env-json / env / none
+
+
+# تاریخچه‌ی کوتاه خطاها — تا وقتی یک خطای جدید می‌آید، خطای قبلی گم نشود
+ERROR_HISTORY: dict[str, list[str]] = {}
+
+
+def last_errors() -> dict[str, str]:
+    return dict(LAST_ERRORS)
+
+
+def error_history(name: str) -> list[str]:
+    return list(ERROR_HISTORY.get(name, []))
+
+
+def set_last_error(name: str, msg: str):
+    msg = (msg or "")[:300]
+    if not msg:
+        return
+    LAST_ERRORS[name] = msg
+    hist = ERROR_HISTORY.setdefault(name, [])
+    if msg not in hist:
+        hist.append(msg)
+        del hist[:-3]
+
+
+def clear_errors(name: str | None = None):
+    if name is None:
+        LAST_ERRORS.clear()
+        ERROR_HISTORY.clear()
+    else:
+        LAST_ERRORS.pop(name, None)
+        ERROR_HISTORY.pop(name, None)
+
+
+_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
+
+
+def clean_value(value) -> str:
+    """
+    پاک‌سازی مقدارهایی که (معمولاً) از چت کپی می‌شوند:
+
+      [https://a/v1](https://a/v1)  →  https://a/v1      (لینک مارک‌داون)
+      "sk-..." / 'sk-...' / [sk-...] / sk-...،‌   →  sk-...
+      https://a/v1/                 →  https://a/v1      (اسلش آخر)
+
+    بدون این، یک کپی‌پیست ساده از چت باعث می‌شود همه‌ی درخواست‌ها بی‌صدا
+    شکست بخورند و کاربر فکر کند «AI خراب است».
+    """
+    v = "" if value is None else str(value)
+    v = v.replace("\u200c", "").replace("\u200f", "").replace("\ufeff", "")
+    v = v.strip().strip("\u201c\u201d").strip()
+    v = v.strip('"').strip("'").strip().rstrip(",").strip()
+
+    m = _MD_LINK_RE.match(v)
+    if m:
+        v = m.group(2).strip()          # آدرس داخل پرانتز معتبرتر است
+    v = v.strip("[]").strip()
+    v = v.strip('"').strip("'").strip()
+
+    if v.startswith("http"):
+        v = v.rstrip("/")
+    return v
+
+
+_URL_RE = re.compile(r"^https?://[^\s\[\]()\"']+$")
+
+
+def looks_like_url(value: str) -> bool:
+    return bool(_URL_RE.match(value or ""))
+
+
 REQUEST_TIMEOUT = 45.0          # ثانیه
 COOLDOWN_AFTER_ERROR = 90       # ثانیه — چقدر یک کلید/سرویس خطادار کنار برود
 MAX_ATTEMPTS = 6                # سقف تلاش در یک فراخوانی (ضد حلقه)
@@ -53,11 +129,12 @@ class Provider:
     def __init__(self, name: str, kind: str, base_url: str, model: str,
                  keys: list[str], priority: int = 0, max_tokens: int = 400,
                  temperature: float = 0.8, extra: dict | None = None):
-        self.name = name
-        self.kind = (kind or "openai").lower()
-        self.base_url = (base_url or "").rstrip("/")
-        self.model = model
-        self.keys = [k for k in (keys or []) if k]
+        self.name = clean_value(name) or "provider"
+        self.kind = (clean_value(kind) or "openai").lower()
+        self.base_url = clean_value(base_url)
+        self.model = clean_value(model)
+        self.keys = [clean_value(k) for k in (keys or []) if clean_value(k)]
+        self.last_error = ""
         self.priority = priority
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -67,6 +144,9 @@ class Provider:
 
     # ── کلیدها ──
     def available_keys(self) -> list[str]:
+        # سرویس محلی/پروکسی بدون کلید: یک «کلید خالی» یعنی بدون هدر Authorization
+        if not self.keys:
+            return [""]
         now = time.monotonic()
         keys = [k for k in self.keys if self._cooldown_until.get(k, 0) <= now]
         if not keys:
@@ -94,6 +174,8 @@ class Provider:
 def _from_dict(d: dict) -> Provider | None:
     try:
         keys = d.get("keys") or ([d["key"]] if d.get("key") else [])
+        if isinstance(keys, str):
+            keys = [k.strip() for k in keys.split(",")]
         if not keys and d.get("kind") != "ollama":
             return None
         return Provider(
@@ -112,6 +194,20 @@ def _from_dict(d: dict) -> Provider | None:
         return None
 
 
+def mask_key(key: str) -> str:
+    """نمایش امن کلید: sk-or-…a1b2"""
+    k = key or ""
+    if not k:
+        return "(بدون کلید)"
+    if len(k) <= 8:
+        return f"{k[:2]}…{k[-2:]}"
+    return f"{k[:6]}…{k[-4:]}"
+
+
+def _esc(text: str) -> str:
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 def _default_base(kind: str | None) -> str:
     return {
         "gemini": "https://generativelanguage.googleapis.com/v1beta",
@@ -125,12 +221,16 @@ def load_providers(config: dict | None = None) -> list[Provider]:
     اولویت: providers داخل config کاربر → AI_PROVIDERS در .env → تک‌سرویس ساده
     (AI_BASE_URL/AI_API_KEY/AI_MODEL) → خالی
     """
+    global PROVIDER_SOURCE
+    PROVIDER_SOURCE = "none"
     raw = None
     if config and isinstance(config.get("providers"), list) and config["providers"]:
         raw = config["providers"]
+        PROVIDER_SOURCE = "config"
     elif config and isinstance(config.get("providers_json"), str):
         try:
             raw = json.loads(config["providers_json"])
+            PROVIDER_SOURCE = "config"
         except Exception:
             raw = None
     if raw is None:
@@ -138,6 +238,7 @@ def load_providers(config: dict | None = None) -> list[Provider]:
         if env_json:
             try:
                 raw = json.loads(env_json)
+                PROVIDER_SOURCE = "env-json"
             except Exception as e:
                 logger.error(f"AI_PROVIDERS is not valid JSON: {e}")
                 raw = None
@@ -152,16 +253,26 @@ def load_providers(config: dict | None = None) -> list[Provider]:
 
     if not providers:
         # حالت ساده: یک سرویس
-        key = os.getenv("AI_API_KEY", "").strip()
-        base = os.getenv("AI_BASE_URL", "").strip()
-        model = os.getenv("AI_MODEL", "").strip()
-        kind = os.getenv("AI_KIND", "openai").strip() or "openai"
+        key = clean_value(os.getenv("AI_API_KEY", ""))
+        base = clean_value(os.getenv("AI_BASE_URL", ""))
+        model = clean_value(os.getenv("AI_MODEL", ""))
+        kind = clean_value(os.getenv("AI_KIND", "openai")) or "openai"
         if model and (key or kind == "ollama"):
             providers.append(Provider(
                 name=f"{kind}-default", kind=kind,
                 base_url=base or _default_base(kind), model=model,
                 keys=[key] if key else [],
             ))
+            PROVIDER_SOURCE = "env"
+
+    # آدرسی که معتبر نیست را همان‌جا با پیام واضح علامت می‌زنیم (نه این‌که
+    # بعداً وسط درخواست بی‌صدا شکست بخورد)
+    for p in providers:
+        if not looks_like_url(p.base_url):
+            msg = (f"آدرس سرویس معتبر نیست: {p.base_url!r} — "
+                   f"باید با http/https شروع شود و کاراکتر اضافه نداشته باشد")
+            logger.error(f"{p.name}: {msg}")
+            set_last_error(p.name, msg)
 
     providers.sort(key=lambda p: p.priority)
     return providers
@@ -248,19 +359,40 @@ async def _call_provider(p: Provider, key: str, messages: list[dict],
         resp = await client.post(url, json=payload, headers=headers)
 
     if resp.status_code in (429, 500, 502, 503, 504):
+        msg = f"HTTP {resp.status_code} — "
+        msg += ("سقف مصرف/تعداد درخواست (Rate limit)" if resp.status_code == 429
+                else "خطای موقت سرویس")
+        p.last_error = msg
+        set_last_error(p.name, msg)
         p.cooldown(key, COOLDOWN_AFTER_ERROR if resp.status_code != 429 else 60)
         return None
     if resp.status_code >= 400:
         body = resp.text[:200].replace("\n", " ")
+        p.last_error = f"HTTP {resp.status_code}: {body}"
+        set_last_error(p.name, p.last_error)
         logger.error(f"{p.name} HTTP {resp.status_code}: {body}")
         # کلید اشتباه/مدل اشتباه → کول‌داون طولانی‌تر
         if resp.status_code in (401, 403, 404):
             p.cooldown(key, 600)
         return None
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except Exception as e:
+        msg = f"پاسخ نامعتبر از سرویس (JSON نبود): {str(e)[:80]}"
+        p.last_error = msg
+        set_last_error(p.name, msg)
+        return None
+
     text = _gemini_text(data) if p.kind == "gemini" else _openai_text(data)
-    return text or None
+    if not text:
+        msg = "سرویس جواب خالی داد (متن پاسخ خالی بود)"
+        p.last_error = msg
+        set_last_error(p.name, msg)
+        return None
+    p.last_error = ""
+    clear_errors(p.name)
+    return text
 
 
 async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
@@ -298,10 +430,14 @@ async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
             except Exception as e:
                 hx = _http()
                 if hx and isinstance(e, (hx.TimeoutException, hx.TransportError)):
-                    logger.warning(f"{p.name}: network error ({type(e).__name__})")
+                    msg = f"خطای شبکه/Timeout ({type(e).__name__})"
+                    logger.warning(f"{p.name}: {msg}")
                     p.cooldown(key, 45)
                 else:
-                    logger.error(f"{p.name}: {type(e).__name__}: {e}")
+                    msg = f"{type(e).__name__}: {e}"
+                    logger.error(f"{p.name}: {msg}")
+                p.last_error = msg
+                set_last_error(p.name, msg)
         if attempts >= MAX_ATTEMPTS:
             break
 
@@ -319,4 +455,9 @@ def status_lines(providers: list[Provider]) -> list[str]:
             f"{state} <b>{p.name}</b> — <code>{p.model or '؟'}</code> "
             f"({len(p.keys)} کلید، اولویت {p.priority})"
         )
+        err = p.last_error or LAST_ERRORS.get(p.name)
+        if err:
+            out.append(f"   ↳ ⚠️ {_esc(err)}")
+        if p.keys:
+            out.append(f"   ↳ کلید: <code>{mask_key(p.keys[0])}</code>")
     return out

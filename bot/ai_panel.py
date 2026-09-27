@@ -31,6 +31,7 @@ def ai_menu_kb(enabled: bool = True) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 مخاطبین و حافظه", callback_data="ai:contacts"),
          InlineKeyboardButton("🔑 سرویس‌ها", callback_data="ai:providers")],
         [InlineKeyboardButton("🧪 تست پاسخ", callback_data="ai:test"),
+         InlineKeyboardButton("🔍 عیب‌یابی", callback_data="ai:diag"),
          InlineKeyboardButton("🔄 بازخوانی", callback_data="ai:menu")],
     ])
 
@@ -146,6 +147,49 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await update.effective_chat.send_message(text, reply_markup=kb, parse_mode="HTML")
+
+
+def build_diag_text(cfg: dict | None = None) -> str:
+    """
+    متن «🔍 عیب‌یابی» — نشان می‌دهد هر سرویس چه آدرس/مدل/کلیدی دارد و
+    آخرین خطایش چه بوده. بدون این، کاربر فقط «جوابی نیامد» را می‌دید.
+    """
+    from core import ai_providers
+    providers = ai_providers.load_providers(cfg)
+    lines = ["🔍 <b>عیب‌یابی سرویس‌های AI</b>\n"]
+    if not providers:
+        lines.append("هیچ سرویسی تنظیم نشده. در <code>.env</code> مقدارهای "
+                     "<code>AI_BASE_URL</code> / <code>AI_API_KEY</code> / "
+                     "<code>AI_MODEL</code> را پر کن.")
+        return "\n".join(lines)
+
+    src = {"config": "تنظیمات دیتابیس", "env-json": "AI_PROVIDERS در .env",
+           "env": "متغیرهای .env"}.get(ai_providers.PROVIDER_SOURCE, "—")
+    lines.append(f"منبع تنظیمات: {_esc(src)}\n")
+    for p in providers:
+        ok_url = ai_providers.looks_like_url(p.base_url)
+        lines.append(f"• <b>{_esc(p.name)}</b> ({_esc(p.kind)})")
+        lines.append(f"   آدرس: <code>{_esc(p.base_url or '—')}</code> "
+                     f"{'✅' if ok_url else '❌ نامعتبر!'}")
+        lines.append(f"   مدل: <code>{_esc(p.model or '—')}</code>")
+        if p.keys:
+            lines.append(f"   کلید: <code>{_esc(ai_providers.mask_key(p.keys[0]))}</code>")
+        else:
+            lines.append("   کلید: ➖ ندارد (برای سرویس محلی طبیعی است)")
+        seen = set()
+        candidates = [p.last_error] + list(reversed(ai_providers.error_history(p.name)))
+        for err in candidates:
+            if err and err not in seen:
+                seen.add(err)
+                lines.append(f"   ⚠️ {_esc(err)}")
+                if len(seen) >= 2:      # فقط دو خطای آخر برای خوانا ماندن
+                    break
+        if not seen and p.blocked:
+            lines.append("   🔴 در کول‌داون (چند دقیقه صبر کن)")
+    lines.append("\n💡 آدرس باید فقط <code>https://…</code> باشد؛ اگر از چت "
+                 "کپی شده و براکت/پرانتز دارد، دوباره بنویس.")
+    lines.append("💡 تست دقیق روی سرور: <code>python tools/ai_check.py</code>")
+    return "\n".join(lines)
 
 
 async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -380,6 +424,12 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await q.answer()
         return True
 
+    if action == "diag":
+        await q.edit_message_text(build_diag_text(cfg)[:3900],
+                                  reply_markup=ai_menu_kb(), parse_mode="HTML")
+        await q.answer()
+        return True
+
     if action == "test":
         from core import ai_providers
         providers = ai_providers.load_providers(cfg)
@@ -403,9 +453,18 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 f"🤖 من: {_esc(reply[:400])}",
                 reply_markup=ai_menu_kb(), parse_mode="HTML")
         else:
+            errs = ai_providers.last_errors()
+            lines = ["❌ <b>هیچ سرویسی جواب نداد.</b>\n"]
+            if errs:
+                lines.append("<b>خطای دقیق سرویس‌ها:</b>")
+                for name, err in list(errs.items())[:6]:
+                    lines.append(f"• <b>{_esc(name)}</b>: {_esc(err)}")
+            else:
+                lines.append("سرویسی پاسخ نداد ولی خطایی هم ثبت نشد "
+                             "— با «🔍 عیب‌یابی» جزئیات را ببین.")
+            lines.append("\n🔍 برای جزئیات بیشتر: دکمه‌ی «🔍 عیب‌یابی»")
             await q.edit_message_text(
-                "❌ هیچ سرویسی جواب نداد. کلید/مدل/اتصال را چک کن.",
-                reply_markup=ai_menu_kb(), parse_mode="HTML")
+                "\n".join(lines), reply_markup=ai_menu_kb(), parse_mode="HTML")
         await q.answer()
         return True
 
