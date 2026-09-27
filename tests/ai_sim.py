@@ -31,6 +31,7 @@ from telethon.sessions import StringSession           # noqa: E402
 from telethon.tl import types, functions              # noqa: E402
 
 ME = 1001
+ME2 = 1002          # اکانت دوم خودم (سلف‌بات جداگانه، تنظیمات جداگانه)
 PEER = 200
 GROUP = -1001234567890
 NOW = lambda: datetime.now(timezone.utc)              # noqa: E731
@@ -266,6 +267,25 @@ async def setup_user():
     await db.get_pool().execute(
         "UPDATE users SET plan='pro', plan_expires_at=$2 WHERE telegram_id=$1",
         ME, NOW().replace(year=NOW().year + 1))
+    client = make_client()
+    await pm.load_plugins_for_user(u["id"], client)
+    return u["id"], client
+
+
+async def setup_second_user(telegram_id: int = ME2, name: str = "Second"):
+    """
+    اکانت دومِ من: کاربر تازه با اشتراک فعال ولی قابلیت‌های خاموش.
+    (اکانت‌های تلگرامِ هر کاربر، ردیف و تنظیمات جدا در دیتابیس دارند)
+    """
+    from database import db
+    from core import plugin_manager as pm
+    await db.init_db()
+    await db.get_pool().execute("DELETE FROM users WHERE telegram_id=$1", telegram_id)
+    u = await db.create_user(telegram_id, name)
+    await db.get_pool().execute(
+        "UPDATE users SET plan='pro', plan_expires_at=$2 WHERE telegram_id=$1",
+        telegram_id, NOW().replace(year=NOW().year + 1))
+    await db.set_feature(u["id"], "ai_reply", False)
     client = make_client()
     await pm.load_plugins_for_user(u["id"], client)
     return u["id"], client

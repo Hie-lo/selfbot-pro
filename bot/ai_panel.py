@@ -12,6 +12,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from core.version import code_version
 from database import db
 from plugins import ai_engine as E
 from plugins.ai_reply import drop_draft, get_draft
@@ -24,15 +25,22 @@ def _esc(text) -> str:
 
 
 def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
-               emoji_level: int = 1) -> InlineKeyboardMarkup:
+               emoji_level: int = 1, all_private: bool = False,
+               quiet: str = "") -> InlineKeyboardMarkup:
     send_label = ("📤 حالت ارسال: پیشنهاد به من" if draft_only
                   else "📤 حالت ارسال: خودکار ⚡")
+    quiet_label = ("😴 ساعت سکوت: خاموش" if not quiet
+                   else f"😴 ساعت سکوت: {quiet}")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✍️ شخصیت من (پرسونا)", callback_data="ai:persona")],
         [InlineKeyboardButton("🎭 مود", callback_data="ai:modes"),
          InlineKeyboardButton("🌡 سطح آزادی بیان", callback_data="ai:tones")],
         [InlineKeyboardButton(f"😊 ایموجی ({emoji_level})", callback_data="ai:emoji"),
          InlineKeyboardButton(send_label, callback_data="ai:draft")],
+        [InlineKeyboardButton(
+            f"🌍 همه‌ی پیوی‌ها: {'روشن' if all_private else 'خاموش'}",
+            callback_data="ai:allpvt"),
+         InlineKeyboardButton(quiet_label, callback_data="ai:quiet")],
         [InlineKeyboardButton("👥 مخاطبین و حافظه", callback_data="ai:contacts"),
          InlineKeyboardButton("🔑 سرویس‌ها", callback_data="ai:providers")],
         [InlineKeyboardButton("🧪 تست پاسخ", callback_data="ai:test"),
@@ -212,10 +220,18 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         f"😊 <b>ایموجی:</b> {emoji_lvl} — {_esc(E.EMOJI_LEVELS[emoji_lvl])}"
         + (f" · فقط: {_esc(allow)}" if allow else "") + "\n"
         f"📤 <b>حالت ارسال:</b> {_esc(draft)}\n"
-        f"👥 <b>مخاطبین با حافظه:</b> {len(chats)}\n\n"
-        "💡 برای فعال کردن در یک چت، از خود سلف‌بات <code>.ai روشن</code> را بفرست."
+        f"🌍 <b>همه‌ی پیوی‌ها:</b> {'روشن' if cfg.get('all_private') else 'خاموش'}\n"
+        f"😴 <b>ساعت سکوت:</b> {_esc(cfg.get('quiet_hours') or 'خاموش')} "
+        f"(به وقت {_esc(cfg.get('timezone') or 'سرور')})\n"
+        f"👥 <b>مخاطبین:</b> {len(chats)}\n\n"
+        "💡 برای فعال کردن در یک چت، از خود سلف‌بات <code>.ai روشن</code> را بفرست"
+        " یا «🌍 همه‌ی پیوی‌ها» را روشن کن.\n"
+        f"💡 سؤال «چرا جواب نمی‌دهد؟» → <code>.ai چرا</code>\n\n"
+        f"📦 نسخه‌ی کد: <code>{_esc(code_version())}</code>"
     )
-    kb = ai_menu_kb(draft_only=draft_only, emoji_level=emoji_lvl)
+    kb = ai_menu_kb(draft_only=draft_only, emoji_level=emoji_lvl,
+                    all_private=bool(cfg.get("all_private")),
+                    quiet=str(cfg.get("quiet_hours") or ""))
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -499,6 +515,25 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "\"model\":\"meta-llama/llama-3.1-8b-instruct:free\",\"keys\":[\"sk-...\"]}]</code>",
             reply_markup=ai_menu_kb(), parse_mode="HTML")
         await q.answer()
+        return True
+
+    if action == "allpvt":
+        new = not bool(cfg.get("all_private"))
+        await _save_ai_config(user_id, {"all_private": new})
+        await q.answer(
+            ("روشن شد — در هر پیوی جدید خودکار جواب می‌دهم و آن چت به مخاطبین اضافه می‌شود ✅"
+             if new else "خاموش شد — فقط چت‌هایی که خودت روشن کنی ❌"),
+            show_alert=True)
+        await show_ai_menu(update, context, user_id, edit=True)
+        return True
+
+    if action == "quiet":
+        cycle = {"": "1-8", "1-8": "23-7", "23-7": "2-7", "2-7": ""}
+        cur = str(cfg.get("quiet_hours") or "")
+        nxt = cycle.get(cur, "1-8")
+        await _save_ai_config(user_id, {"quiet_hours": nxt})
+        await q.answer("ساعت سکوت: " + (nxt or "خاموش") + " ✅")
+        await show_ai_menu(update, context, user_id, edit=True)
         return True
 
     if action == "emoji":

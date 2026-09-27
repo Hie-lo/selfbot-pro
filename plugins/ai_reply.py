@@ -13,6 +13,10 @@
   .ai مود ‹نام› / .تنظیم مود ‹نام›
   .ai سطح ‹۰-۳› / .تنظیم سطح ‹۰-۳›
   .ai بس                      — سکوت تا وقتی خودم روشن کنم
+  .ai چرا                     — چرا جواب نداده‌ام؟ (دشمن/ساعت سکوت/سقف/...)
+  .ai همه روشن|خاموش          — AI در همه‌ی پیوی‌ها (چت جدید خودکار می‌آید)
+  .ai سکوت 1-8 | خاموش        — ساعت سکوت به وقت خودت (نه سرور)
+  .ai سقف 20 240 1500         — سقف پاسخ: دقیقه/ساعت/روز
 
 ⚠️ هر دستور/قابلیت جدید یا تغییرکرده → bot/help_content.py را هم به‌روز کنید
 """
@@ -45,15 +49,26 @@ DEFAULT_CONFIG = {
     "allowed_emojis": "",    # لیست ایموجی‌های خودم: «😂❤️🙏»
     "draft_only": True,      # پیش‌فرض: پیشنهاد به من، نه ارسال خودکار
     "all_private": False,    # اگر True: همه‌ی پیوی‌ها (وگرنه فقط چت‌های روشن‌شده)
-    "rpm": 6, "rph": 60, "rpd": 300,
-    "quiet_hours": "1-8",    # ساعاتی که جواب نمی‌دهد (به وقت محلی سرور)
+    "rpm": 20, "rph": 240, "rpd": 1500,
+    "quiet_hours": "1-8",    # ساعاتی که جواب نمی‌دهد (به وقت خودت)
+    # ⚠️ منطقه‌ی زمانی برای «ساعت سکوت». سرور جای دیگری است؛ اگر این را
+    # نگذاری، «۱ تا ۸» به وقت سرور حساب می‌شود و ممکن است وسط روزِ تو
+    # ربات ساکت بماند.
+    "timezone": "Asia/Tehran",
     "min_delay": 1.2, "max_delay": 4.5,
     "typing_speed": 11.0,
     "raw_limit": 120,        # سقف پیام خام قبل از سبک‌سازی
     "keep_after_compact": 30,
     "fact_limit": 40,
     "stop_word": "#ساکت",
+    # اگر AI پشت‌سرهم و بدون این‌که خودت چیزی بنویسی، این‌قدر جواب بدهد،
+    # احتمالاً دو سلف‌بات دارند بی‌وقفه جواب هم را می‌دهند (خطر بن).
+    # ۰ = خاموش
+    "max_streak": 25,
 }
+
+# پیش‌فرض‌های جدید سقف ارسال (برای مهاجرت از مقادیر قدیمی)
+DEFAULT_CONFIG_SEND_LIMITS = {"rpm": 20, "rph": 240, "rpd": 1500}
 
 # پاسخ‌های جانشین: هیچ‌وقت بی‌جواب نمی‌ماند حتی وقتی همه‌ی سرویس‌ها خطا دهند
 FALLBACK_REPLIES = [
@@ -90,6 +105,7 @@ class AiReplyPlugin(BasePlugin):
         super().__init__(client, user_id)
         self._cfg: dict = {}
         self._my_name_cache: str = ""
+        self._skip_notice: dict[tuple, float] = {}   # جلوگیری از اسپم اعلان‌ها
         self._my_id: int | None = None
         self._owner_tg: int | None = None
         self._paused: set[int] = set()        # چت‌هایی که با .ai بس ساکت شده‌اند
@@ -98,6 +114,7 @@ class AiReplyPlugin(BasePlugin):
         self._usage_day: list[float] = []
         self._busy: set[int] = set()          # چت‌هایی که همین حالا در حال پاسخ‌اند
         self._personas: dict[int, float] = {}  # آخرین ارسال پیشنهاد به هر چت
+        self._streak: dict[int, int] = {}      # پاسخ‌های پشت‌سرهم بدون فعالیت من
 
     # ═══════════ راه‌اندازی ═══════════
 
@@ -117,6 +134,7 @@ class AiReplyPlugin(BasePlugin):
         await self._load_config()
         # نام‌های خراب (id خام یا نام خودم که اشتباهی ذخیره شده) را درست کن
         asyncio.create_task(self._repair_contact_names())
+        self._load_chat_labels()
 
         # ── پیام‌های ورودی: پاسخ هوشمند ──
         self._add_handler(self._on_incoming, events.NewMessage)
@@ -307,6 +325,22 @@ class AiReplyPlugin(BasePlugin):
                     cfg.update({k: v for k, v in stored.items() if v is not None})
         except Exception as e:
             self.logger.warning(f"load config failed: {e}")
+
+        # ── مهاجرت یک‌باره‌ی پیش‌فرض‌های قدیمی ──
+        # سقف‌های قبلی (۶/۶۰/۳۰۰) در عمل خیلی زود پر می‌شدند و باعث می‌شد
+        # AI بی‌دلیل «ساکت» بماند. اگر کاربر خودش سقف را عوض نکرده باشد
+        # (یعنی همان اعداد قدیمی مانده)، یک‌بار به مقادیر جدید ارتقا می‌دهیم
+        # و در دیتابیس هم می‌نویسیم تا دفعه‌ی بعد تکرار نشود.
+        legacy = {"rpm": 6, "rph": 60, "rpd": 300}
+        if all(int(cfg.get(k, -1)) == v for k, v in legacy.items()):
+            cfg.update(DEFAULT_CONFIG_SEND_LIMITS)
+            try:
+                await db.set_feature(self.user_id, self.name, True, cfg)
+                self.logger.info("send limits migrated to new defaults")
+            except Exception as e:
+                self.logger.warning(f"limit migration save failed: {e}")
+
+        cfg["_enabled"] = True
         self._cfg = cfg
 
     async def _save_config(self, **changes) -> None:
@@ -350,8 +384,10 @@ class AiReplyPlugin(BasePlugin):
             self.logger.info(f"paused by stop word in {chat_id}")
             return
 
-        if chat_id in self._paused or chat_id in self._busy:
-            return
+        if chat_id in self._paused:
+            return          # خودم با #ساکت خاموشش کردم — اعلان لازم نیست
+        if chat_id in self._busy:
+            return          # دارد روی همان پیام کار می‌کند
 
         profile = await db.get_ai_profile(self.user_id, chat_id)
         if not self._chat_enabled(event, profile):
@@ -379,17 +415,38 @@ class AiReplyPlugin(BasePlugin):
             from core.plugin_manager import get_active_plugins
             ar = get_active_plugins(self.user_id).get("auto_response")
             if ar is not None and sender_id in getattr(ar, "_enemies", {}):
+                self._notify_skip(
+                    chat_id, "این شخص در «لیست دشمن» است",
+                    "برای اینکه AI جواب بدهد: <code>.دشمن حذف</code> (ریپلای روی پیامش)")
                 return
         except Exception:
             pass
 
-        if self._in_quiet_hours():
-            return
-        if not self._quota_ok():
-            self.logger.info("quota reached — skipping AI reply")
+        # ── نگهبان حلقه: دو سلف‌بات که بی‌وقفه جواب هم را می‌دهند ──
+        max_streak = int(self._cfg.get("max_streak", 25) or 0)
+        if max_streak and self._streak.get(chat_id, 0) >= max_streak:
+            self._notify_skip(
+                chat_id, f"{max_streak} پاسخ پشت‌سرهم بدون این‌که خودت چیزی بنویسی",
+                "احتمالاً دو سلف‌بات (یا دو اکانت خودت) دارند جواب هم را می‌دهند. "
+                "برای ادامه، خودت یک پیام در این چت بنویس یا <code>.ai بس</code> بزن.")
             return
 
-        # اولین بار: پروفایل خودکار با حدس جایگاه
+        if self._in_quiet_hours():
+            self._notify_skip(
+                chat_id, "ساعت سکوت است",
+                f"بازه‌ی سکوت: <code>{self._esc(self._cfg.get('quiet_hours'))}</code> "
+                f"به وقت <code>{self._esc(self._cfg.get('timezone') or 'سرور')}</code>\n"
+                "تغییر: <code>.ai سکوت خاموش</code>")
+            return
+
+        ok_quota, quota_reason = self._quota_ok()
+        if not ok_quota:
+            self._notify_skip(chat_id, quota_reason,
+                              "برای افزایش: <code>.ai سقف 30 400 3000</code>")
+            return
+
+        # اولین بار: پروفایل خودکار با حدس جایگاه (در حالت «همه‌ی پیوی‌ها»
+        # یا چت‌های روشن‌شده) — این‌طور خودکار در فهرست مخاطبین می‌آید
         if profile is None:
             profile = await self._create_default_profile(event)
 
@@ -410,6 +467,9 @@ class AiReplyPlugin(BasePlugin):
                 await self._send_to_chat(event.chat_id, reply, reply_to=reply_to)
             else:
                 await self._send_draft(event, profile, reply)
+            # مصرف را فقط بعد از یک پاسخ موفق می‌شماریم (نه برای خطاها)
+            self._streak[chat_id] = self._streak.get(chat_id, 0) + 1
+            self._note_usage()
         finally:
             self._busy.discard(chat_id)
             if self._raw_count_needed(profile):
@@ -436,6 +496,7 @@ class AiReplyPlugin(BasePlugin):
                 return
             chat_id = event.chat_id
             self._last_activity[chat_id] = time.time()
+            self._streak[chat_id] = 0        # خودم حرف زدم → شمارش از نو
             profile = await db.get_ai_profile(self.user_id, chat_id)
             if profile and profile.get("enabled"):
                 await db.add_ai_message(self.user_id, chat_id, text,
@@ -449,31 +510,105 @@ class AiReplyPlugin(BasePlugin):
         # چت بدون پروفایل: فقط اگر همه‌ی پیوی‌ها روشن باشد
         return bool(event.is_private and self._cfg.get("all_private"))
 
+    def _load_chat_labels(self) -> None:
+        """نام مخاطبین را برای اعلان‌ها کش می‌کند (استارت)"""
+        async def _run():
+            try:
+                rows = await db.list_ai_profiles(self.user_id, limit=300)
+                labels = {}
+                for r in rows:
+                    name = (r.get("target_name") or "").strip()
+                    if name and not name.lstrip("-").isdigit():
+                        labels[str(r["target_id"])] = name
+                self._cfg.setdefault("_chat_labels", {}).update(labels)
+            except Exception as e:
+                self.logger.debug(f"chat labels failed: {e}")
+        asyncio.create_task(_run())
+
+    def _notify_skip(self, chat_id, reason: str, detail: str = "") -> None:
+        """
+        وقتی AI عمداً جواب نمی‌دهد، یک‌بار (هر نیم‌ساعت برای هر چت/دلیل) به
+        پیوی ربات خبر می‌دهد. بدون این، کاربر فکر می‌کند «ربات خراب است».
+        """
+        key = (int(chat_id), reason)
+        now = time.time()
+        if now - self._skip_notice.get(key, 0) < 1800:
+            return
+        self._skip_notice[key] = now
+
+        async def _send():
+            label = self._cfg.get("_chat_labels", {}).get(str(chat_id))
+            if not label:
+                try:
+                    row = await db.get_ai_profile(self.user_id, chat_id)
+                    name = (row or {}).get("target_name") or ""
+                    if name and not name.lstrip("-").isdigit():
+                        label = name
+                        self._cfg.setdefault("_chat_labels", {})[str(chat_id)] = name
+                except Exception:
+                    pass
+            text = f"⏸ <b>در چت {self._esc(label or chat_id)} جواب ندادم</b>\nدلیل: {reason}"
+            if detail:
+                text += f"\n{detail}"
+            text += "\n\n🩺 برای دیدن وضعیت: <code>.ai چرا</code> در همان چت"
+            await self._notify_owner(text)
+
+        asyncio.create_task(_send())
+
+    def _local_now(self):
+        """ساعت به وقت خودم (نه وقت سرور — سرور معمولاً جای دیگری است)"""
+        tz_name = str(self._cfg.get("timezone") or "").strip()
+        if tz_name:
+            try:
+                from zoneinfo import ZoneInfo
+                return datetime.now(ZoneInfo(tz_name))
+            except Exception as e:
+                self.logger.warning(f"bad timezone {tz_name!r}: {e}")
+        return datetime.now()
+
     def _in_quiet_hours(self) -> bool:
         spec = str(self._cfg.get("quiet_hours") or "").strip()
-        if not spec:
+        if not spec or spec in ("-", "off", "خاموش"):
             return False
         try:
             start_s, end_s = spec.split("-")
             start, end = int(start_s), int(end_s)
         except Exception:
             return False
-        hour = datetime.now().hour
+        hour = self._local_now().hour
         if start <= end:
             return start <= hour < end
         return hour >= start or hour < end     # بازه‌ی شب‌رو
 
-    def _quota_ok(self) -> bool:
+    def _quota_ok(self) -> tuple[bool, str]:
+        """
+        آیا سقف مصرف اجازه می‌دهد؟ خروجی: (مجاز، دلیلِ رد)
+        سقف‌ها روی همه‌ی چت‌ها با هم حساب می‌شوند (محافظت از اکانت).
+        """
         now = time.time()
         self._usage = [t for t in self._usage if now - t < 3600]
         self._usage_day = [t for t in self._usage_day if now - t < 86400]
-        if len([t for t in self._usage if now - t < 60]) >= int(self._cfg.get("rpm", 6)):
-            return False
-        if len(self._usage) >= int(self._cfg.get("rph", 60)):
-            return False
-        if len(self._usage_day) >= int(self._cfg.get("rpd", 300)):
-            return False
-        return True
+        rpm = int(self._cfg.get("rpm", 20))
+        rph = int(self._cfg.get("rph", 240))
+        rpd = int(self._cfg.get("rpd", 1500))
+        last_min = len([t for t in self._usage if now - t < 60])
+        if last_min >= rpm:
+            return False, f"سقف دقیقه‌ای پر شد ({last_min}/{rpm} در ۶۰ ثانیه)"
+        if len(self._usage) >= rph:
+            return False, f"سقف ساعتی پر شد ({len(self._usage)}/{rph})"
+        if len(self._usage_day) >= rpd:
+            return False, f"سقف روزانه پر شد ({len(self._usage_day)}/{rpd})"
+        return True, ""
+
+    def _quota_state(self) -> str:
+        """وضعیت خوانا برای پنل و .ai چرا"""
+        now = time.time()
+        used_min = len([t for t in self._usage if now - t < 60])
+        used_hour = len([t for t in self._usage if now - t < 3600])
+        used_day = len([t for t in self._usage_day if now - t < 86400])
+        return (f"دقیقه {used_min}/{self._cfg.get('rpm', 20)} · "
+                f"ساعت {used_hour}/{self._cfg.get('rph', 240)} · "
+                f"روز {used_day}/{self._cfg.get('rpd', 1500)}")
 
     def _note_usage(self) -> None:
         now = time.time()
@@ -523,11 +658,15 @@ class AiReplyPlugin(BasePlugin):
         if len((text or "").strip()) <= 20:
             # پیام کوتاه/مبهم → خلاقیت کمتر، جواب مرتبط‌تر
             temperature = max(0.35, min(temperature, 0.5))
-        reply, provider = await ai_providers.chat(
-            messages, config=self._cfg, temperature=temperature,
-            max_tokens=int(self._cfg.get("max_reply_tokens", 200) or 200),
-        )
-        self._note_usage()
+        try:
+            reply, provider = await ai_providers.chat(
+                messages, config=self._cfg, temperature=temperature,
+                max_tokens=int(self._cfg.get("max_reply_tokens", 200) or 200),
+            )
+        except Exception as e:      # noqa: BLE001
+            # هر خطای پیش‌بینی‌نشده هم به «پاسخ جانشین» می‌رسد، نه سکوت
+            self.logger.error(f"provider call crashed: {type(e).__name__}: {e}")
+            reply, provider = None, None
 
         if not reply:
             # نردبان: وقتی همه‌ی سرویس‌ها شکست خوردند، آدم بی‌جواب نمی‌ماند
@@ -564,7 +703,11 @@ class AiReplyPlugin(BasePlugin):
                 # فقط قطعه‌ی اول ریپلای می‌شود؛ بقیه پیام‌های ساده‌اند
                 await self.client.send_message(
                     chat_id, part, reply_to=reply_to if i == 0 else None)
-                self._last_activity[chat_id] = time.time()
+                # ⚠️ این‌جا _last_activity را ست نکن! آن برای پیام‌های *خودم*
+                # است (تا وقتی دارم خودم چت می‌کنم AI وارد نشود). اگر پاسخ AI
+                # هم فعالیتم حساب می‌شد، بعد از هر جواب ۹۰ ثانیه در آن چت
+                # ساکت می‌ماند — یعنی در گفت‌وگوی دوطرفه عملاً هیچ‌وقت جواب
+                # نمی‌داد.
                 await db.add_ai_message(self.user_id, chat_id, part, is_out=True)
             except FloodWaitError as e:
                 self.logger.warning(f"flood on send, waiting {e.seconds}s")
@@ -699,6 +842,14 @@ class AiReplyPlugin(BasePlugin):
             await self._cmd_set_emoji(event, arg, profile, chat_id)
         elif sub in ("نام", "اسم", "name"):
             await self._cmd_set_name(event, arg, profile, chat_id)
+        elif sub in ("چرا", "why", "وضعیت کامل"):
+            await self._cmd_why(event, profile, chat_id)
+        elif sub in ("سکوت", "ساعات", "quiet"):
+            await self._cmd_set_quiet(event, arg, profile, chat_id)
+        elif sub in ("سقف", "limit", "limits"):
+            await self._cmd_set_limits(event, arg)
+        elif sub in ("همه", "همه‌ی پیوی", "allprivate"):
+            await self._cmd_all_private(event, arg)
         elif sub in ("سرچ", "search"):
             await self._cmd_search(event, arg, chat_id)
         elif sub in ("حافظه", "memory"):
@@ -710,7 +861,9 @@ class AiReplyPlugin(BasePlugin):
         elif sub in ("کلید", "provider", "سرویس"):
             await self._cmd_providers(event)
         else:
-            await self._reply_notify("❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، شخص، نام، خودکار، دستی، مود، سطح، ایموجی، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
+            await self._reply_notify(
+                "❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، چرا، شخص، نام، خودکار، دستی، "
+                "مود، سطح، ایموجی، سکوت، سقف، همه، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
 
     async def _cmd_enable(self, event, profile, chat_id):
         self._paused.discard(chat_id)
@@ -719,6 +872,16 @@ class AiReplyPlugin(BasePlugin):
         else:
             await db.upsert_ai_profile(self.user_id, chat_id, enabled=True)
         rel = E.RELATIONSHIPS.get(profile.get("relationship", "familiar"), {})
+        enemy_note = ""
+        try:
+            from core.plugin_manager import get_active_plugins
+            ar = get_active_plugins(self.user_id).get("auto_response")
+            if ar is not None and chat_id in getattr(ar, "_enemies", {}):
+                enemy_note = ("\n\n⚠️ این شخص در «لیست دشمن» است؛ تا وقتی آن‌جاست "
+                              "AI جواب نمی‌دهد. برای آزاد کردن: ریپلای روی پیامش + "
+                              "<code>.دشمن حذف</code>")
+        except Exception:
+            pass
         await self._reply_notify(
             f"✅ پاسخ هوشمند در این چت روشن شد.\n"
             f"👤 جایگاه فعلی: <b>{rel.get('label', 'آشنا')}</b> "
@@ -726,6 +889,7 @@ class AiReplyPlugin(BasePlugin):
             f"🎭 مود: <b>{self._cfg.get('mode', 'عادی')}</b> · "
             f"سطح: <b>{E.TONE_LABELS.get(int(self._cfg.get('tone_level', 2)))}</b>\n"
             f"🧪 فعلاً پاسخ‌ها به پیوی ربات می‌آید تا تایید کنی (خودکار: <code>.ai خودکار</code>)"
+            + enemy_note
         )
 
     async def _cmd_disable(self, event, chat_id):
@@ -782,6 +946,169 @@ class AiReplyPlugin(BasePlugin):
             await self._save_config(tone_level=level)
             where = "همه‌ی چت‌ها"
         await self._reply_notify(f"🌡 سطح {level} ({where}): {E.TONE_LABELS[level]}")
+
+    async def _cmd_why(self, event, profile, chat_id):
+        """
+        «چرا جواب نمی‌دهی؟» — همه‌ی شرط‌ها را یکی‌یکی چک می‌کند و می‌گوید
+        کدام‌شان جلوی پاسخ را گرفته است.
+        """
+        from core.version import code_version, feature_summary
+        lines = ["🩺 <b>وضعیت پاسخ‌دهی در این چت</b>\n"]
+        blocked = []
+
+        # قابلیت روشن است؟
+        if not self._cfg.get("_enabled"):
+            blocked.append("قابلیت «هوش مصنوعی» خاموش است")
+        # پروفایل/چت
+        if profile is None:
+            lines.append("• این چت در فهرست مخاطبین نیست (روشن کن: <code>.ai روشن</code>)")
+            blocked.append("چت فعال نیست")
+        else:
+            state = "🟢 فعال" if profile.get("enabled", True) else "🔴 خاموش"
+            lines.append(f"• وضعیت چت: {state}")
+            if not profile.get("enabled", True):
+                blocked.append("در این چت خاموش است")
+            rel = E.RELATIONSHIPS.get(profile.get("relationship") or "familiar", {})
+            lines.append(f"• جایگاه: {self._esc(rel.get('label', '—'))}"
+                         f" · نام: {self._esc(profile.get('target_name') or '—')}")
+            auto = bool(profile.get("auto_mode")) and not self._cfg.get("draft_only", True)
+            mode_txt = "خودکار ⚡" if auto else "پیشنهاد به خودم 📤"
+            lines.append(f"• حالت ارسال: {mode_txt}"
+                         + ("" if not profile.get("auto_mode") or auto
+                            else " (کلید کلی «فقط پیشنویس» روشن است)"))
+        # سکوت دستی
+        if chat_id in self._paused:
+            lines.append("• 🤐 با «#ساکت» ساکت شده — فعال‌سازی: <code>.ai روشن</code>")
+            blocked.append("با #ساکت ساکت شده")
+        # دشمن (مهم‌ترین علت پنهانِ «جواب نمی‌دهد»)
+        try:
+            from core.plugin_manager import get_active_plugins
+            ar = get_active_plugins(self.user_id).get("auto_response")
+            enemies = getattr(ar, "_enemies", {}) if ar is not None else {}
+            if chat_id in enemies or (profile or {}).get("target_id") in enemies:
+                lines.append("• 💬 این شخص در «لیست دشمن» است → AI جواب نمی‌دهد")
+                lines.append("   برای آزاد کردن: ریپلای روی پیامش + <code>.دشمن حذف</code>")
+                blocked.append("در لیست دشمن")
+        except Exception:
+            pass
+        # ساعت سکوت
+        now_local = self._local_now()
+        lines.append(f"• 🕐 ساعت من: {now_local.strftime('%H:%M')} "
+                     f"({self._esc(self._cfg.get('timezone') or 'وقت سرور')})")
+        if self._in_quiet_hours():
+            lines.append(f"• 😴 الان در بازه‌ی سکوت هستم "
+                         f"(<code>{self._esc(self._cfg.get('quiet_hours'))}</code>)")
+            blocked.append("ساعت سکوت")
+        # سقف مصرف
+        ok_q, why_q = self._quota_ok()
+        lines.append(f"• 📊 مصرف: {self._esc(self._quota_state())}")
+        if not ok_q:
+            lines.append(f"• 🚦 {self._esc(why_q)}")
+            blocked.append(why_q)
+        # فعالیت خودم
+        idle = time.time() - self._last_activity.get(chat_id, 0)
+        if idle < 90:
+            lines.append(f"• ✋ {int(90 - idle)} ثانیه پیش خودم در چت فعال بودم "
+                         "(۹۰ ثانیه عقب می‌کشم)")
+            blocked.append("خودم در چت فعال بودم")
+        # سرویس‌ها
+        providers = ai_providers.load_providers(self._cfg)
+        lines.append(f"• 🔑 سرویس‌ها: {len(providers)}"
+                     + ("" if providers else " ❌ تنظیم نشده"))
+        if not providers:
+            blocked.append("هیچ سرویس AI تنظیم نشده")
+
+        lines.append("")
+        if blocked:
+            lines.append("⛔ <b>جواب نداده‌ام چون:</b> " + " · ".join(dict.fromkeys(blocked)))
+        else:
+            lines.append("✅ الان هیچ مانعی نیست — پیام بعدی را جواب می‌دهم.")
+        lines.append(f"\n📦 نسخه‌ی کد: <code>{self._esc(code_version())}</code> "
+                     f"({self._esc(feature_summary())})")
+
+        # برای مقایسه: آخرین خطاهای سرویس
+        errs = {k: v for k, v in ai_providers.last_errors().items() if v}
+        if errs:
+            lines.append("\n⚠️ آخرین خطای سرویس‌ها:")
+            for name, err in list(errs.items())[:3]:
+                lines.append(f"  • {self._esc(name)}: {self._esc(err)}")
+        await self._reply_notify("\n".join(lines))
+
+    async def _cmd_set_quiet(self, event, arg, profile, chat_id):
+        """ساعات سکوت: .ai سکوت 1-8 | .ai سکوت خاموش"""
+        raw = (arg or "").strip()
+        cur = self._cfg.get("quiet_hours")
+        if not raw:
+            await self._reply_notify(
+                f"😴 بازه‌ی سکوت فعلی: <code>{self._esc(cur)}</code> "
+                f"به وقت <code>{self._esc(self._cfg.get('timezone') or 'سرور')}</code>\n\n"
+                "• <code>.ai سکوت 1-8</code> — از ۱ شب تا ۸ صبح ساکت\n"
+                "• <code>.ai سکوت 23-7</code> — بازه‌ی شب‌رو\n"
+                "• <code>.ai سکوت خاموش</code> — همیشه جواب بده\n"
+                "💡 ساعت به وقت <b>خودت</b> حساب می‌شود، نه وقت سرور.")
+            return
+        if raw in ("خاموش", "off", "-", "0"):
+            await self._save_config(quiet_hours="")
+            await self._reply_notify("😴 ساعت سکوت خاموش شد — هر ساعتی جواب می‌دهم.")
+            return
+        m = re.match(r"^(\d{1,2})\s*[-–]\s*(\d{1,2})$", raw)
+        if not m or not (0 <= int(m.group(1)) <= 23 and 0 <= int(m.group(2)) <= 24):
+            await self._reply_notify("❓ قالب درست: <code>.ai سکوت 1-8</code> یا <code>.ai سکوت خاموش</code>")
+            return
+        await self._save_config(quiet_hours=f"{int(m.group(1))}-{int(m.group(2))}")
+        await self._reply_notify(
+            f"😴 ساعت سکوت شد <code>{int(m.group(1))}-{int(m.group(2))}</code> "
+            f"به وقت <code>{self._esc(self._cfg.get('timezone') or 'سرور')}</code>")
+
+    async def _cmd_set_limits(self, event, arg):
+        """سقف پاسخ: .ai سقف 30 400 3000  (دقیقه  ساعت  روز)"""
+        parts = (arg or "").split()
+        if not parts:
+            await self._reply_notify(
+                f"🚦 <b>سقف‌های فعلی</b> (روی همه‌ی چت‌ها با هم):\n"
+                f"دقیقه: <b>{self._cfg.get('rpm')}</b> · ساعت: <b>{self._cfg.get('rph')}</b> · "
+                f"روز: <b>{self._cfg.get('rpd')}</b>\n"
+                f"مصرف امروز: {self._esc(self._quota_state())}\n\n"
+                "تغییر: <code>.ai سقف 30 400 3000</code> (دقیقه ساعت روز)\n"
+                "۱۲۰ در دقیقه یا بیشتر = نزدیک به محدودیت تلگرام؛ احتیاط کن.")
+            return
+        try:
+            vals = [int(x) for x in parts[:3]]
+        except ValueError:
+            await self._reply_notify("❓ مثال: <code>.ai سقف 30 400 3000</code>")
+            return
+        if len(vals) < 3:
+            await self._reply_notify("❓ هر سه عدد لازم است: <code>.ai سقف 30 400 3000</code>")
+            return
+        rpm = max(1, min(vals[0], 600))          # سقف دقیقه: حداکثر ۶۰۰
+        rph = max(rpm, min(vals[1], 10000))      # ساعتی نباید از دقیقه‌ای کم‌تر باشد
+        rpd = max(rph, min(vals[2], 100000))
+        await self._save_config(rpm=rpm, rph=rph, rpd=rpd)
+        await self._reply_notify(f"🚦 سقف‌ها شد: دقیقه {rpm} · ساعت {rph} · روز {rpd}")
+
+    async def _cmd_all_private(self, event, arg):
+        """
+        «همه‌ی پیوی‌ها»: AI در هر پیوی جدید خودکار فعال می‌شود و آن چت
+        خودش در فهرست مخاطبین می‌آید.
+        """
+        raw = (arg or "").strip()
+        cur = bool(self._cfg.get("all_private"))
+        if not raw:
+            await self._reply_notify(
+                f"🌍 حالت «همه‌ی پیوی‌ها»: <b>{'روشن' if cur else 'خاموش'}</b>\n\n"
+                "اگر روشن باشد، در هر پیوی تازه‌ای خودکار جواب می‌دهم و آن چت "
+                "خودش به «مخاطبین و حافظه» اضافه می‌شود.\n"
+                "تغییر: <code>.ai همه روشن</code> یا <code>.ai همه خاموش</code>")
+            return
+        new = raw in ("روشن", "on", "yes", "1", "فعال")
+        if raw not in ("روشن", "on", "yes", "1", "فعال", "خاموش", "off", "no", "0", "غیرفعال"):
+            await self._reply_notify("❓ <code>.ai همه روشن</code> یا <code>.ai همه خاموش</code>")
+            return
+        await self._save_config(all_private=new)
+        await self._reply_notify(
+            f"🌍 حالت «همه‌ی پیوی‌ها» {'روشن شد ✅' if new else 'خاموش شد ❌'}"
+            + ("\nاز این به بعد هر پیوی جدیدی که پیام بدهد، خودکار جواب می‌گیرد "
+               "و در فهرست مخاطبین می‌آید." if new else ""))
 
     async def _cmd_set_name(self, event, arg, profile, chat_id):
         """

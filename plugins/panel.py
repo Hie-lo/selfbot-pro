@@ -255,20 +255,53 @@ class PanelPlugin(BasePlugin):
         )
 
         # ── راهنمای قابلیت خاموش (هوش مصنوعی) ──
+        # اگر پلاگین AI روشن نباشد، دستورهای `.ai` هیچ کاری نمی‌کردند و
+        # حتی پیام کاربر هم پاک می‌شد → به‌نظر «خراب» می‌آمد (خصوصاً روی
+        # اکانت دوم که قابلیت‌ها جداگانه‌اند). حالا:
+        #   • «.ai روشن» خودش قابلیت را روشن می‌کند و همان چت را فعال می‌کند
+        #   • بقیه‌ی زیرفرمان‌ها پیام روشنِ راهنما می‌گیرند
         async def ai_off_hint(event):
             if not event.out:
                 return
-            from core.plugin_manager import get_active_plugins
+            from core.plugin_manager import get_active_plugins, enable_plugin
             if "ai_reply" in get_active_plugins(self.user_id):
                 return
-            try:
-                await event.delete()
-            except Exception:
-                pass
+
+            text = (event.raw_text or "").strip()
+            chat_id = event.chat_id
+
+            # ۱) دستور روشن‌کردن → خودکار قابلیت را بالا می‌آورد
+            m = re.match(r"^\.ai\s+(?:روشن|on|همه(?:\s+(?:روشن|on))?)\s*$", text)
+            if m:
+                ok = await enable_plugin(self.user_id, "ai_reply", self.client)
+                plugin = get_active_plugins(self.user_id).get("ai_reply")
+                if ok and plugin is not None:
+                    await db.set_feature(self.user_id, "ai_reply", True)
+                    await db.audit_log(self.user_id, "feature_toggle",
+                                       "ai_reply -> ON (auto bootstrap in chat)")
+                    try:
+                        if "همه" in text:
+                            await plugin._cmd_all_private(event, "روشن")
+                        await plugin._cmd_enable(event, None, chat_id)
+                    except Exception as e:      # noqa: BLE001
+                        self.logger.error(f"ai bootstrap failed: {type(e).__name__}: {e}")
+                        await self.client.send_message(
+                            chat_id, f"⚠️ قابلیت روشن شد ولی فعال‌سازی چت خطا داد: {e}")
+                    return
+                await self.client.send_message(
+                    chat_id,
+                    "❌ «🧠 پاسخ هوشمند» روشن نشد.\n"
+                    "علت معمولاً فعال نبودن اشتراک است — در پیوی ربات "
+                    "<code>.وضعیت</code> را بزن یا از پنل چک کن.",
+                    parse_mode="html")
+                return
+
+            # ۲) بقیه‌ی زیرفرمان‌ها → راهنمای روشن‌کردن (بدون پاک‌کردن پیام)
             await self.client.send_message(
-                event.chat_id,
-                "⚠️ قابلیت «🧠 پاسخ هوشمند» خاموش است.\n"
-                "برای فعال‌سازی: <code>.روشن هوش مصنوعی</code>",
+                chat_id,
+                "⚠️ قابلیت «🧠 پاسخ هوشمند» خاموش است، پس دستور اجرا نشد.\n"
+                "برای روشن‌کردن: <code>.ai روشن</code> (خودکار روشن می‌شود)\n"
+                "یا: <code>.روشن هوش مصنوعی</code>",
                 parse_mode="html",
             )
 

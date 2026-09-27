@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ai_sim as sim                                    # noqa: E402
@@ -603,6 +604,219 @@ async def main():
           (await db.get_ai_profile(uid, PEER)).get("target_name") == "رضایی")
     await _save_ai_config(uid, {"name_overrides": {}, "persona": "من کم‌حرفم",
                                 "mode": "عادی", "emoji_level": 1})
+
+    # ── ۱۵.۱۱) رگرسیون «گاهی جواب نمی‌دهد» ──
+    await _save_ai_config(uid, {"quiet_hours": "", "auto_mode": None,
+                                "draft_only": False, "all_private": False})
+    await db.set_ai_auto_mode(uid, PEER, True)
+    ar3 = reset_limits(uid)
+    if ar3:
+        ar3._skip_notice.clear()
+
+    # الف) سکوت ۹۰ ثانیه‌ای بعد از هر پاسخ (باگ اصلی)
+    answered = 0
+    for i in range(3):
+        reset_limits(uid)
+        before_n = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+        await sim.fire(client, f"پیام پشت‌سرهم {i}", out=False, mid=9100 + i)
+        await asyncio.sleep(2.2)
+        if len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > before_n:
+            answered += 1
+    check("در گفت‌وگوی دوطرفه به پیام‌های پشت‌سرهم جواب می‌دهد", answered == 3,
+          f"{answered}/3")
+    if ar3:
+        check("پاسخ AI چت را ۹۰ ثانیه ساکت نمی‌کند",
+              time.time() - ar3._last_activity.get(PEER, 0) > 60,
+              str(ar3._last_activity.get(PEER)))
+
+    # ب) چند مخاطب همزمان
+    others = [7001, 7002, 7003]
+    for cid in others:
+        await db.upsert_ai_profile(uid, cid, target_name=f"مخاطب{cid}",
+                                   enabled=True, auto_mode=True)
+    got = 0
+    for cid in others:
+        reset_limits(uid)
+        before_n = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+        await sim.fire(client, "سلام", out=False, sender_id=cid, chat=cid, mid=9200 + cid)
+        await asyncio.sleep(2.2)
+        if len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > before_n:
+            got += 1
+    check("به چند مخاطب همزمان جواب می‌دهد", got == 3, f"{got}/3")
+
+    # ج) سقف‌های واقعی‌تر + مهاجرت مقادیر قدیمی
+    from plugins.ai_reply import DEFAULT_CONFIG as DC
+    check("سقف دقیقه‌ای پیش‌فرض واقعی است", int(DC["rpm"]) >= 20, str(DC["rpm"]))
+    check("سقف روزانه پیش‌فرض واقعی است", int(DC["rpd"]) >= 1000, str(DC["rpd"]))
+    await db.set_feature(uid, "ai_reply", True, {"rpm": 6, "rph": 60, "rpd": 300})
+    ar4 = pm.get_active_plugins(uid)["ai_reply"]
+    await ar4._load_config()
+    check("سقف‌های قدیمی ذخیره‌شده خودکار مهاجرت می‌کنند",
+          int(ar4._cfg.get("rpm")) >= 20, str(ar4._cfg.get("rpm")))
+
+    # د) سقف که پر شد، دلیلش را می‌گوید (نه سکوت بی‌دلیل)
+    ar5 = pm.get_active_plugins(uid)["ai_reply"]
+    ar5._usage = [time.time()] * int(ar5._cfg.get("rpm", 20))
+    ok_q, why_q = ar5._quota_ok()
+    check("سقف پر شده تشخیص داده می‌شود", not ok_q and "سقف" in why_q, why_q)
+    check("وضعیت مصرف خوانا است", "دقیقه" in ar5._quota_state(), ar5._quota_state())
+    reset_limits(uid)
+
+    # ه) ساعت سکوت به وقت خودم، نه سرور
+    ar5._cfg["timezone"] = "Asia/Tehran"
+    ar5._cfg["quiet_hours"] = ""
+    check("ساعت سکوت خاموش قابل تشخیص است", ar5._in_quiet_hours() is False)
+    ar5._cfg["quiet_hours"] = f"{ar5._local_now().hour}-{(ar5._local_now().hour + 1) % 24}"
+    check("ساعت سکوت فعال درست تشخیص داده می‌شود", ar5._in_quiet_hours() is True)
+    check("ساعت محلی از منطقه‌ی زمانی می‌آید",
+          ar5._local_now() is not None)
+    ar5._cfg["quiet_hours"] = ""
+
+    # و) دستورها
+    pv_before = len(PV)
+    await sim.fire(client, ".ai چرا", out=True, mid=9300)
+    await asyncio.sleep(0.6)
+    why_txt = "\n".join(t for _, t in PV[pv_before:])
+    check("«.ai چرا» وضعیت کامل می‌دهد", "وضعیت پاسخ‌دهی" in why_txt, why_txt[:100])
+    check("«.ai چرا» نسخه‌ی کد را نشان می‌دهد", "نسخه‌ی کد" in why_txt)
+    check("«.ai چرا» ساعت محلی را نشان می‌دهد", "ساعت من" in why_txt)
+
+    pv_before = len(PV)
+    await sim.fire(client, ".ai سکوت 23-7", out=True, mid=9301)
+    await asyncio.sleep(0.5)
+    check("«.ai سکوت ‹بازه›» ذخیره می‌شود",
+          (await _ai_config(uid)).get("quiet_hours") == "23-7",
+          str((await _ai_config(uid)).get("quiet_hours")))
+    await sim.fire(client, ".ai سکوت خاموش", out=True, mid=9302)
+    await asyncio.sleep(0.5)
+    check("«.ai سکوت خاموش» ساعت سکوت را برمی‌دارد",
+          not (await _ai_config(uid)).get("quiet_hours"))
+
+    await sim.fire(client, ".ai سقف 30 400 3000", out=True, mid=9303)
+    await asyncio.sleep(0.5)
+    cfg_lim = await _ai_config(uid)
+    check("«.ai سقف» سقف‌ها را عوض می‌کند",
+          (cfg_lim.get("rpm"), cfg_lim.get("rph"), cfg_lim.get("rpd")) == (30, 400, 3000),
+          str((cfg_lim.get("rpm"), cfg_lim.get("rph"), cfg_lim.get("rpd"))))
+
+    # ز) «همه‌ی پیوی‌ها» → چت جدید خودکار به مخاطبین اضافه می‌شود
+    await sim.fire(client, ".ai همه روشن", out=True, mid=9304)
+    await asyncio.sleep(0.5)
+    check("«.ai همه روشن» ذخیره می‌شود",
+          bool((await _ai_config(uid)).get("all_private")))
+    reset_limits(uid)
+    fresh_peer = 8080
+    await sim.fire(client, "سلام تازه", out=False, sender_id=fresh_peer,
+                   chat=fresh_peer, mid=9400)
+    await asyncio.sleep(2.0)
+    ids_now = {c["target_id"] for c in await db.list_ai_chats(uid)}
+    check("چت پیوی جدید خودکار در مخاطبین می‌آید", fresh_peer in ids_now, str(sorted(ids_now))[:200])
+    await sim.fire(client, ".ai همه خاموش", out=True, mid=9305)
+    await asyncio.sleep(0.4)
+
+    # ح) میان‌برهای پنل: ساعت سکوت و همه‌ی پیوی‌ها
+    kb2 = str(ai_menu_kb(all_private=True, quiet="1-8"))
+    check("دکمه‌ی «همه‌ی پیوی‌ها» در پنل هست", "ai:allpvt" in kb2)
+    check("دکمه‌ی ساعت سکوت در پنل هست", "ai:quiet" in kb2)
+    check("وضعیت دکمه‌ها در برچسب دیده می‌شود",
+          "روشن" in kb2 and "1-8" in kb2)
+
+    # ط) نسخه‌ی کد در دسترس است
+    from core.version import code_version, feature_summary
+    check("نسخه‌ی کد خوانده می‌شود", bool(code_version()), code_version())
+    check("خلاصه‌ی قابلیت‌ها تعداد مودها را می‌گوید",
+          "مود" in feature_summary(), feature_summary())
+
+    # ── ۱۵.۱۲) اکانت دومِ خودم (سلف‌بات جداگانه) ──
+    # کاربر: «از اکانت دوم که سلف‌بات هم رویش هست، نه جواب می‌گیرم نه در
+    # مخاطبین می‌آید، هرچقدر .ai را روشن/خاموش می‌کنم.»
+    # علت: پلاگین AI وقتی قابلیت خاموش باشد اصلاً لود نمی‌شود → دستور `.ai`
+    # هیچ‌وقت اجرا نمی‌شد (پیام پاک می‌شد و فقط یک هشدار می‌آمد).
+    uid2, client2 = await sim.setup_second_user()
+    reset_limits(uid2)
+    check("اکانت دوم با قابلیت AI خاموش شروع می‌شود",
+          "ai_reply" not in pm.get_active_plugins(uid2))
+
+    sent_before = len(SENT)
+    await sim.fire(client2, ".ai وضعیت", out=True, mid=9500)
+    await asyncio.sleep(0.8)
+    hint = "\n".join(x[2] for x in SENT[sent_before:] if isinstance(x[2], str))
+    check("با قابلیت خاموش، دستور .ai راهنما می‌دهد (سکوت نمی‌کند)",
+          "خاموش است" in hint, hint[:110])
+
+    await sim.fire(client2, ".ai روشن", out=True, mid=9501)
+    await asyncio.sleep(1.2)
+    check("«.ai روشن» روی اکانت دوم، خودِ قابلیت را روشن می‌کند",
+          "ai_reply" in pm.get_active_plugins(uid2),
+          str(sorted(pm.get_active_plugins(uid2))))
+    prof2 = await db.get_ai_profile(uid2, PEER)
+    check("و همان چت در مخاطبین اکانت دوم ثبت می‌شود", prof2 is not None, str(prof2))
+    ids2 = {c["target_id"] for c in await db.list_ai_chats(uid2)}
+    check("چت در فهرست مخاطبین اکانت دوم دیده می‌شود", PEER in ids2, str(sorted(ids2))[:150])
+
+    # مخاطبین دو اکانت قاطی نمی‌شوند
+    await db.upsert_ai_profile(uid2, 7777, target_name="مخصوص‌اکانت۲", enabled=True)
+    ids1 = {c["target_id"] for c in await db.list_ai_chats(uid)}
+    ids2 = {c["target_id"] for c in await db.list_ai_chats(uid2)}
+    check("مخاطبین دو اکانت جدا هستند", 7777 not in ids1 and 7777 in ids2,
+          f"اکانت۱={sorted(ids1)[:6]} اکانت۲={sorted(ids2)[:6]}")
+
+    # پاسخ‌دهی روی اکانت دوم
+    await _save_ai_config(uid2, {"draft_only": False, "quiet_hours": "",
+                                 "rpm": 20, "rph": 240, "rpd": 1500})
+    ar2 = pm.get_active_plugins(uid2)["ai_reply"]
+    await ar2._load_config()
+    ar2._usage.clear(); ar2._usage_day.clear(); ar2._last_activity.clear()
+    await db.set_ai_auto_mode(uid2, PEER, True)
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client2, "سلام از اکانت دوم", out=False, sender_id=PEER, mid=9510)
+    await asyncio.sleep(2.2)
+    check("اکانت دوم هم پاسخ AI می‌گیرد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+
+    # ── ۱۵.۱۳) نگهبان حلقه: دو سلف‌بات که بی‌وقفه جواب هم را می‌دهند ──
+    await _save_ai_config(uid, {"draft_only": False, "quiet_hours": ""})
+    ar5b = pm.get_active_plugins(uid)["ai_reply"]
+    await ar5b._load_config()
+    await db.upsert_ai_profile(uid, PEER, enabled=True)
+    await db.set_ai_auto_mode(uid, PEER, True)
+    reset_limits(uid)
+    ar5b._streak[PEER] = int(ar5b._cfg.get("max_streak", 25))
+    ar5b._skip_notice.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "بازم سلام", out=False, mid=9600)
+    await asyncio.sleep(1.5)
+    check("بعد از پاسخ‌های بی‌پایان، نگهبان حلقه جلوی پاسخ را می‌گیرد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before)
+    pv_n = "\n".join(t for _, t in PV[-4:])
+    check("و دلیلش را اطلاع می‌دهد", "پشت‌سرهم" in pv_n, pv_n[:120])
+    ar5b._last_activity[PEER] = 0
+    await sim.fire(client, "خودم دارم حرف می‌زنم", out=True, mid=9601)
+    await asyncio.sleep(0.6)
+    check("با حرف زدن خودم، شمارنده‌ی حلقه صفر می‌شود",
+          ar5b._streak.get(PEER, 0) == 0, str(ar5b._streak.get(PEER)))
+    reset_limits(uid)
+
+    # ── ۱۵.۱۴) خطای غیرمنتظره‌ی سرویس هم به پاسخ جانشین می‌رسد ──
+    await _save_ai_config(uid, {"draft_only": False, "quiet_hours": ""})
+    ar6 = pm.get_active_plugins(uid)["ai_reply"]
+    await ar6._load_config()
+    ar6._last_activity.clear(); ar6._streak.clear()
+    reset_limits(uid)
+    await db.upsert_ai_profile(uid, PEER, enabled=True)
+    await db.set_ai_auto_mode(uid, PEER, True)
+    real_chat = ai_providers.chat
+
+    async def _boom(*a, **k):
+        raise RuntimeError("simulated provider crash")
+
+    ai_providers.chat = _boom
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "سلام، خطای سرویس", out=False, mid=9700)
+    await asyncio.sleep(2.2)
+    check("خطای غیرمنتظره‌ی سرویس هم بی‌جواب نمی‌ماند",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    ai_providers.chat = real_chat
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")
