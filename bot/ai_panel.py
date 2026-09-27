@@ -26,11 +26,13 @@ def _esc(text) -> str:
 
 def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
                emoji_level: int = 1, all_private: bool = False,
-               quiet: str = "") -> InlineKeyboardMarkup:
+               quiet: str = "", fallback: bool = False) -> InlineKeyboardMarkup:
     send_label = ("📤 حالت ارسال: پیشنهاد به من" if draft_only
                   else "📤 حالت ارسال: خودکار ⚡")
     quiet_label = ("😴 ساعت سکوت: خاموش" if not quiet
                    else f"😴 ساعت سکوت: {quiet}")
+    fb_label = (f"🆘 پاسخ جانشین: روشن" if fallback
+                else "🆘 پاسخ جانشین: خاموش")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✍️ شخصیت من (پرسونا)", callback_data="ai:persona")],
         [InlineKeyboardButton("🎭 مود", callback_data="ai:modes"),
@@ -41,6 +43,7 @@ def ai_menu_kb(enabled: bool = True, draft_only: bool = True,
             f"🌍 همه‌ی پیوی‌ها: {'روشن' if all_private else 'خاموش'}",
             callback_data="ai:allpvt"),
          InlineKeyboardButton(quiet_label, callback_data="ai:quiet")],
+        [InlineKeyboardButton(fb_label, callback_data="ai:fallback")],
         [InlineKeyboardButton("👥 مخاطبین و حافظه", callback_data="ai:contacts"),
          InlineKeyboardButton("🔑 سرویس‌ها", callback_data="ai:providers")],
         [InlineKeyboardButton("🧪 تست پاسخ", callback_data="ai:test"),
@@ -221,6 +224,7 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         + (f" · فقط: {_esc(allow)}" if allow else "") + "\n"
         f"📤 <b>حالت ارسال:</b> {_esc(draft)}\n"
         f"🌍 <b>همه‌ی پیوی‌ها:</b> {'روشن' if cfg.get('all_private') else 'خاموش'}\n"
+        f"🆘 <b>پاسخ جانشین:</b> {'روشن (بدون سرویس هم می‌فرستد)' if cfg.get('fallback_replies') else 'خاموش (اگر سرویس خطا داد چیزی نمی‌فرستد)'}\n"
         f"😴 <b>ساعت سکوت:</b> {_esc(cfg.get('quiet_hours') or 'خاموش')} "
         f"(به وقت {_esc(cfg.get('timezone') or 'سرور')})\n"
         f"👥 <b>مخاطبین:</b> {len(chats)}\n\n"
@@ -231,7 +235,8 @@ async def show_ai_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
     kb = ai_menu_kb(draft_only=draft_only, emoji_level=emoji_lvl,
                     all_private=bool(cfg.get("all_private")),
-                    quiet=str(cfg.get("quiet_hours") or ""))
+                    quiet=str(cfg.get("quiet_hours") or ""),
+                    fallback=bool(cfg.get("fallback_replies")))
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     else:
@@ -523,6 +528,17 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await q.answer(
             ("روشن شد — در هر پیوی جدید خودکار جواب می‌دهم و آن چت به مخاطبین اضافه می‌شود ✅"
              if new else "خاموش شد — فقط چت‌هایی که خودت روشن کنی ❌"),
+            show_alert=True)
+        await show_ai_menu(update, context, user_id, edit=True)
+        return True
+
+    if action == "fallback":
+        new = not bool(cfg.get("fallback_replies"))
+        await _save_ai_config(user_id, {"fallback_replies": new})
+        await q.answer(
+            ("روشن شد — اگر هیچ سرویسی جواب نداد، یک پاسخ معمولی فرستاده می‌شود ⚠️"
+             if new else
+             "خاموش شد — اگر سرویس‌ها خطا دادند چیزی فرستاده نمی‌شود و خبرت می‌کنم ✅"),
             show_alert=True)
         await show_ai_menu(update, context, user_id, edit=True)
         return True

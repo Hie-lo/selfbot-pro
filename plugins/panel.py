@@ -188,6 +188,26 @@ class PanelPlugin(BasePlugin):
 
             await db.set_feature(self.user_id, feat_key, True)
             await db.audit_log(self.user_id, "feature_toggle", f"{feat_key} -> ON (chat)")
+
+            # «🧠 پاسخ هوشمند» تازه روشن شده ولی خودِ این چت هم باید در
+            # فهرست مخاطبین بیاید — وگرنه کاربر فکر می‌کند «.روشن ai فقط
+            # قابلیت را روشن می‌کند و اینجا جواب نمی‌دهد».
+            if feat_key == "ai_reply":
+                from core.plugin_manager import get_active_plugins
+                plugin = get_active_plugins(self.user_id).get("ai_reply")
+                if plugin is not None:
+                    try:
+                        await plugin._cmd_enable(event, None, event.chat_id)
+                    except Exception as e:                  # noqa: BLE001
+                        self.logger.error(f"ai chat enable failed: {type(e).__name__}: {e}")
+                        await event.edit(
+                            "⚠️ قابلیت روشن شد ولی فعال‌سازی این چت خطا داد؛ "
+                            "<code>.ai روشن</code> را در خود چت بزن."
+                        )
+                        return
+                await event.delete()
+                return
+
             await event.edit(f"✅ «{FEATURE_NAMES.get(feat_key, feat_key)}» روشن شد.")
 
         self._add_handler(

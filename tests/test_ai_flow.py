@@ -83,6 +83,8 @@ async def main():
     await pm.load_plugins_for_user(uid, client)
     AI = pm.get_active_plugins(uid).get("ai_reply")
     check("پلاگین ai_reply لود شد", AI is not None)
+    GENUINE_CHAT = ai_providers.chat          # مرجع تابع واقعی (تست‌ها جعل می‌کنند)
+    GENUINE_CALL = ai_providers._call_provider
 
     ai_providers.chat = fake_chat()
 
@@ -155,15 +157,37 @@ async def main():
     check("ادعا در لیست فکت‌های تأییدشده نیست",
           all("قول پول" not in f["content"] for f in approved))
 
-    # ── ۸) هیچ‌وقت بی‌جواب نمی‌ماند ──
+    # ── ۸) هیچ‌وقت بی‌جواب نمی‌ماند — ولی بدون اجازه هم چیزی نمی‌فرستد ──
+    # «پاسخ جانشین» پیش‌فرض خاموش است: کاربر گفت جایگزین بدون اجازه ممنوع.
+    await _save_ai_config(uid, {"fallback_replies": False})
+    ar8 = pm.get_active_plugins(uid)["ai_reply"]
+    await ar8._load_config()
+    ar8._pending_retry.clear()
     ai_providers.chat = fake_chat(fail=True)
     p = len(PV)
-    await sim.fire(client, "کجایی؟", out=False)
-    await asyncio.sleep(1.0)
+    n_before8 = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "کجایی؟", out=False, mid=9110)
+    await asyncio.sleep(1.2)
     drafts = [t for _, t in PV[p:] if "پیشنهاد پاسخ" in t]
-    check("با خطای همه‌ی سرویس‌ها، باز هم پیش‌نویس ساخته شد", bool(drafts))
+    check("با شکست همه‌ی سرویس‌ها، پاسخ جانشین خودکار ساخته نمی‌شود", not drafts)
+    check("و به طرف مقابل هم چیزی فرستاده نمی‌شود",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before8)
     check("به من هشدار داده شد که سرویس خطا داد",
           any("هیچ سرویس AI جواب نداد" in t for _, t in PV[p:]))
+
+    # اگر خودم «پاسخ جانشین» را روشن کنم، آن وقت می‌رود
+    await _save_ai_config(uid, {"fallback_replies": True})
+    await ar8._load_config()
+    ai_providers.chat = fake_chat(fail=True)
+    p = len(PV)
+    await sim.fire(client, "بازم کجایی؟", out=False, mid=9111)
+    await asyncio.sleep(1.5)
+    drafts_on = [t for _, t in PV[p:] if "پیشنهاد پاسخ" in t]
+    check("با روشن کردن «پاسخ جانشین»، به‌عنوان پیشنهاد نشان داده می‌شود",
+          bool(drafts_on), str(drafts_on)[:80])
+    await _save_ai_config(uid, {"fallback_replies": False})
+    await ar8._load_config()
+    ar8._pending_retry.clear()
 
     # ── ۹) حالت خودکار: ارسال به چت با تایپینگ ──
     ai_providers.chat = fake_chat(reply="دارم میام\nآماده شو")
@@ -782,6 +806,7 @@ async def main():
     await db.set_ai_auto_mode(uid, PEER, True)
     reset_limits(uid)
     ar5b._streak[PEER] = int(ar5b._cfg.get("max_streak", 25))
+    ar5b._streak_cool[PEER] = time.time()      # دوره‌ی خنک‌شدن فعال
     ar5b._skip_notice.clear()
     n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
     await sim.fire(client, "بازم سلام", out=False, mid=9600)
@@ -790,6 +815,14 @@ async def main():
           len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before)
     pv_n = "\n".join(t for _, t in PV[-4:])
     check("و دلیلش را اطلاع می‌دهد", "پشت‌سرهم" in pv_n, pv_n[:120])
+    # پایان دوره‌ی خنک‌شدن → خودکار ادامه می‌دهد (هرگز برای همیشه ساکت نمی‌ماند)
+    ar5b._streak_cool[PEER] = time.time() - 9999
+    reset_limits(uid)
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "بعد از خنک‌شدن", out=False, mid=9610)
+    await asyncio.sleep(2.0)
+    check("بعد از دوره‌ی خنک‌شدن، نگهبان حلقه خودکار رها می‌کند",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
     ar5b._last_activity[PEER] = 0
     await sim.fire(client, "خودم دارم حرف می‌زنم", out=True, mid=9601)
     await asyncio.sleep(0.6)
@@ -797,16 +830,178 @@ async def main():
           ar5b._streak.get(PEER, 0) == 0, str(ar5b._streak.get(PEER)))
     reset_limits(uid)
 
-    # ── ۱۵.۱۴) خطای غیرمنتظره‌ی سرویس هم به پاسخ جانشین می‌رسد ──
+    # ── ۱۵.۱۴) تلاش دوباره با فاصله (کاربر: «۲ بار تلاش کن، ۳ ثانیه فاصله») ──
+    real_call = ai_providers._call_provider
+    tries = []
+
+    async def _flaky(pv, key, messages, max_tokens, temperature):
+        tries.append(1)
+        if len(tries) == 1:
+            pv.last_error = "HTTP 503 — خطای موقت سرویس"
+            return None
+        return "سلام، خوبم"
+
+    class _FakeProvider:
+        name, model, kind, temperature, max_tokens = "fake", "m", "openai", 0.8, 200
+        blocked, last_error, keys = False, "", [""]
+
+        def available_keys(self):
+            return [""]
+
+        def cooldown(self, key, seconds=0):
+            pass
+
+    ai_providers._call_provider = _flaky
+    import time as _time
+    _t0 = _time.time()
+    text, name = await GENUINE_CHAT(
+        [{"role": "user", "content": "سلام"}], providers=[_FakeProvider()],
+        attempts=2, delay=0.6)
+    check("سرویس با تلاش دوباره جواب می‌دهد", text == "سلام، خوبم", str(text))
+    check("بین دو دور تلاش فاصله هست", len(tries) == 2 and _time.time() - _t0 >= 0.5,
+          f"tries={len(tries)}")
+    ai_providers._call_provider = GENUINE_CALL
+    real_chat = GENUINE_CHAT
+    ai_providers.chat = GENUINE_CHAT
+
+    _seen = {}
+
+    async def _spy(messages, **kw):
+        _seen.update(kw)
+        return ("باشه", "fake")
+
+    ai_providers.chat = _spy
+    await sim.fire(client, "خوبی خوشی سلامتی ؟ کجایی نیستی ؟ دلم واست تنگ شده بود منم",
+                   out=False, mid=9750)
+    await asyncio.sleep(2.0)
+    check("پلاگین ۲ تلاش با فاصله‌ی ۳ ثانیه درخواست می‌کند",
+          int(_seen.get("attempts", 0)) == 2 and float(_seen.get("delay", 0)) == 3.0,
+          f"attempts={_seen.get('attempts')} delay={_seen.get('delay')}")
+
+    # ── ۱۵.۱۵) پاسخ جانشین هرگز بدون اجازه فرستاده نمی‌شود ──
+
+    async def _dead(messages, **kw):
+        return (None, None)
+
+    ai_providers.chat = _dead
+    ar._cfg["no_reply_retry_delay"] = 1
+    ar._pending_retry.clear()
+    ar._skip_notice.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    pv0 = len(PV)
+    await sim.fire(client, "یکی هستی؟", out=False, mid=9760)
+    await asyncio.sleep(2.5)
+    check("وقتی همه‌ی سرویس‌ها خطا دادند، پاسخ جانشین به طرف مقابل نمی‌رود",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before)
+    notice = "\n".join(t for _, t in PV[pv0:])
+    check("و علتش را با جزئیات به من می‌گوید",
+          "هیچ سرویس AI جواب نداد" in notice and "تلاش" in notice, notice[:80])
+    check("و می‌گوید پیامی بدون اجازه فرستاده نشد",
+          "بدون جواب تو" in notice or "جایگزین" in notice)
+
+    # تلاش دومِ زمان‌دار وقتی سرویس برگشت، پاسخ را می‌رساند
+
+    async def _back(messages, **kw):
+        return ("ببخشید، اینجام", "fake")
+
+    ai_providers.chat = _back
+    ar._pending_retry.clear()
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "دوباره سلام", out=False, mid=9761)
+    await asyncio.sleep(1.0)
+    ai_providers.chat = _dead
+    await asyncio.sleep(2.6)
+    ai_providers.chat = _back
+    await asyncio.sleep(4.0)
+    check("تلاش زمان‌دار بعدی پاسخ را می‌رساند",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    ai_providers.chat = real_chat
+
+    # ── ۱۵.۱۶) هرگز برای همیشه متوقف نمی‌شود ──
+    import time as _tt
+    # ارسال خودکار در چت (پیش‌نویس خاموش) + سرویس سالم
+    await _save_ai_config(uid, {"draft_only": False, "fallback_replies": False})
+    ar = pm.get_active_plugins(uid)["ai_reply"]     # نمونه‌ی زنده (ممکن است عوض شده باشد)
+    await ar._load_config()
+    await db.set_ai_auto_mode(uid, PEER, True)
+    ai_providers.chat = _back
+    ar._pending_retry.clear()
+    ar._streak[PEER] = 999
+    ar._streak_cool[PEER] = 0
+    reset_limits(uid)
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "بازم سلام", out=False, mid=9770)
+    await asyncio.sleep(2.2)
+    check("بعد از پایان دوره‌ی خنک‌شدن، خودکار ادامه می‌دهد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+
+    ar._busy.add(PEER)
+    ar._busy_since[PEER] = _tt.time() - 999
+    reset_limits(uid)
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "قفل گیرکرده", out=False, mid=9771)
+    await asyncio.sleep(2.2)
+    check("قفل گیرکرده‌ی چت خودکار آزاد می‌شود (بدون ری‌استارت)",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    for _ in range(20):                 # تا پایان ارسال صبر کن
+        if PEER not in ar._busy:
+            break
+        await asyncio.sleep(0.5)
+    check("قفل در پایان پاسخ پاک می‌شود", PEER not in ar._busy)
+
+    # سقف دقیقه‌ای: مکث می‌کند ولی جواب می‌دهد
+    ar._cfg.update({"rpm": 1, "quota_wait_max": 3})
+    ar._usage = [_tt.time()]
+    ar._usage_day = [_tt.time()]
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "سقف پر", out=False, mid=9772)
+    await asyncio.sleep(4.5)
+    check("با پر بودن سقف دقیقه‌ای، بعد از مکث جواب می‌دهد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    ar._cfg.update({"rpm": 20, "quota_wait_max": 45})
+    reset_limits(uid)
+
+    # ── ۱۵.۱۶.۵) دکمه‌ی «پاسخ جانشین» در پنل ──
+    kb_fb = str(ai_menu_kb(fallback=False))
+    check("دکمه‌ی «پاسخ جانشین» در پنل هست", "ai:fallback" in kb_fb)
+    check("حالت خاموش آن دیده می‌شود", "خاموش" in kb_fb)
+    check("حالت روشن آن دیده می‌شود", "روشن" in str(ai_menu_kb(fallback=True)))
+
+    # ── ۱۵.۱۷) تغییر مود وسط گفت‌وگو پاسخ‌دهی را قطع نمی‌کند ──
+    ar = pm.get_active_plugins(uid)["ai_reply"]
+    await sim.fire(client, ".تنظیم مود دعوایی", out=True, mid=9780)
+    await asyncio.sleep(0.8)
+    ar._cfg = ar._cfg  # noqa: B018
+    await ar._load_config()
+    check("مود «دعوایی» ذخیره و فعال می‌شود", ar._cfg.get("mode") == "دعوایی",
+          str(ar._cfg.get("mode")))
+    check("مود «دعوایی» در موتور هست", "دعوایی" in E.MODES)
+    check("قاعده‌ی مود دعوایی نوشته شده", "دعواطلب" in E.MODE_RULES.get("دعوایی", ""))
+    check("عاشقانه رمانتیک‌تر شد",
+          "رمانتیک" in E.MODE_RULES["عاشقانه"] and "یک خط کامل" in E.LENGTH_HINT["بلند"])
+    check("طول پاسخ رمانتیک بلندتر است", E.MODES["عاشقانه"].get("length") == "بلند")
+    reset_limits(uid)
+    n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
+    await sim.fire(client, "خب چی می‌گی؟", out=False, mid=9781)
+    await asyncio.sleep(2.2)
+    check("بعد از تغییر مود، جواب دادن ادامه دارد",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    kb_modes = str(modes_kb("دعوایی"))
+    check("دکمه‌ی «دعوایی» در پنل هست", "دعوایی" in kb_modes)
+    await sim.fire(client, ".تنظیم مود عادی", out=True, mid=9782)
+    await asyncio.sleep(0.6)
+    await ar._load_config()
+    ai_providers.chat = real_chat
+    ar._pending_retry.clear()
+
+    # ── ۱۵.۱۸) خطای غیرمنتظره‌ی سرویس هم به پاسخ جانشین می‌رسد ──
     await _save_ai_config(uid, {"draft_only": False, "quiet_hours": ""})
     ar6 = pm.get_active_plugins(uid)["ai_reply"]
     await ar6._load_config()
-    ar6._last_activity.clear(); ar6._streak.clear()
+    ar6._last_activity.clear(); ar6._streak.clear(); ar6._pending_retry.clear()
     reset_limits(uid)
     await db.upsert_ai_profile(uid, PEER, enabled=True)
     await db.set_ai_auto_mode(uid, PEER, True)
-    real_chat = ai_providers.chat
-
     async def _boom(*a, **k):
         raise RuntimeError("simulated provider crash")
 
@@ -814,9 +1009,19 @@ async def main():
     n_before = len([x for x in SENT if x[0] == "send" and x[1] != "me"])
     await sim.fire(client, "سلام، خطای سرویس", out=False, mid=9700)
     await asyncio.sleep(2.2)
-    check("خطای غیرمنتظره‌ی سرویس هم بی‌جواب نمی‌ماند",
-          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) > n_before)
+    check("خطای غیرمنتظره‌ی سرویس هم هشدار می‌دهد (بدون پاسخ جانشین)",
+          len([x for x in SENT if x[0] == "send" and x[1] != "me"]) == n_before)
     ai_providers.chat = real_chat
+
+    # ── ۱۵.۱۹) پیام دستور «.ai روشن» بعد از اجرا در چت نمی‌ماند ──
+    ar = pm.get_active_plugins(uid)["ai_reply"]
+    await db.upsert_ai_profile(uid, PEER, enabled=False)
+    before_del = len([x for x in SENT if x[0] == "delete"])
+    await sim.fire(client, ".ai روشن", out=True, mid=9790)
+    await asyncio.sleep(1.0)
+    check("پیام دستور بعد از ارسال جواب پاک می‌شود (چت شلوغ/لو نرفتن)",
+          len([x for x in SENT if x[0] == "delete"]) > before_del,
+          str([x for x in SENT if x[0] == "delete"][-1:]))
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

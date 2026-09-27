@@ -65,7 +65,23 @@ DEFAULT_CONFIG = {
     # احتمالاً دو سلف‌بات دارند بی‌وقفه جواب هم را می‌دهند (خطر بن).
     # ۰ = خاموش
     "max_streak": 25,
+    # تلاش دوباره برای ارسال پاسخ: چند دور با فاصله
+    "retry_attempts": 2,
+    "retry_delay": 3.0,
+    # پاسخ جانشین (وقتی هیچ سرویس جواب نداد) پیش‌فرض «فرستاده نمی‌شود» —
+    # فقط به من نشان داده می‌شود تا خودم تصمیم بگیرم.
+    "fallback_replies": False,
+    # اگر سقف دقیقه‌ای پر شد، حداکثر این‌قدر صبر کن و بعد جواب بده
+    "quota_wait_max": 45,
+    # وقتی همه‌ی سرویس‌ها جواب ندادند، چند ثانیه بعد یک‌بار دیگر تلاش کن
+    "no_reply_retry_delay": 25,
 }
+
+# بعد از فعال شدن نگهبان حلقه، این‌قدر صبر می‌کنیم و بعد خودکار ادامه می‌دهیم
+STREAK_COOLDOWN = 180   # ثانیه
+
+# اگر پاسخ یک چت بیشتر از این طول بکشد، قفلش آزاد می‌شود (ضد «گیر کردن»)
+BUSY_TIMEOUT = 120      # ثانیه
 
 # پیش‌فرض‌های جدید سقف ارسال (برای مهاجرت از مقادیر قدیمی)
 DEFAULT_CONFIG_SEND_LIMITS = {"rpm": 20, "rph": 240, "rpd": 1500}
@@ -106,6 +122,7 @@ class AiReplyPlugin(BasePlugin):
         self._cfg: dict = {}
         self._my_name_cache: str = ""
         self._skip_notice: dict[tuple, float] = {}   # جلوگیری از اسپم اعلان‌ها
+        self._pending_retry: dict[int, dict] = {}    # پیام‌هایی که باید دوباره تلاش شوند
         self._my_id: int | None = None
         self._owner_tg: int | None = None
         self._paused: set[int] = set()        # چت‌هایی که با .ai بس ساکت شده‌اند
@@ -113,8 +130,10 @@ class AiReplyPlugin(BasePlugin):
         self._usage: list[float] = []         # زمان استفاده‌ها برای سقف‌ها
         self._usage_day: list[float] = []
         self._busy: set[int] = set()          # چت‌هایی که همین حالا در حال پاسخ‌اند
+        self._busy_since: dict[int, float] = {}   # از چه زمانی (ضد گیر کردن)
         self._personas: dict[int, float] = {}  # آخرین ارسال پیشنهاد به هر چت
         self._streak: dict[int, int] = {}      # پاسخ‌های پشت‌سرهم بدون فعالیت من
+        self._streak_cool: dict[int, float] = {}   # کِی نگهبان حلقه فعال شد
 
     # ═══════════ راه‌اندازی ═══════════
 
@@ -387,7 +406,15 @@ class AiReplyPlugin(BasePlugin):
         if chat_id in self._paused:
             return          # خودم با #ساکت خاموشش کردم — اعلان لازم نیست
         if chat_id in self._busy:
-            return          # دارد روی همان پیام کار می‌کند
+            # اگر قفل چت بیش از حد معمول مانده (گیر کرده)، آزادش کن.
+            # قبلاً این حالت فقط با ری‌استارت ربات درست می‌شد و کاربر فکر
+            # می‌کرد «AI خراب شده».
+            if time.time() - self._busy_since.get(chat_id, 0) > BUSY_TIMEOUT:
+                self.logger.warning(f"stale busy lock for {chat_id} — releasing")
+                self._busy.discard(chat_id)
+                self._busy_since.pop(chat_id, None)
+            else:
+                return      # دارد روی همان پیام کار می‌کند
 
         profile = await db.get_ai_profile(self.user_id, chat_id)
         if not self._chat_enabled(event, profile):
@@ -425,11 +452,19 @@ class AiReplyPlugin(BasePlugin):
         # ── نگهبان حلقه: دو سلف‌بات که بی‌وقفه جواب هم را می‌دهند ──
         max_streak = int(self._cfg.get("max_streak", 25) or 0)
         if max_streak and self._streak.get(chat_id, 0) >= max_streak:
-            self._notify_skip(
-                chat_id, f"{max_streak} پاسخ پشت‌سرهم بدون این‌که خودت چیزی بنویسی",
-                "احتمالاً دو سلف‌بات (یا دو اکانت خودت) دارند جواب هم را می‌دهند. "
-                "برای ادامه، خودت یک پیام در این چت بنویس یا <code>.ai بس</code> بزن.")
-            return
+            cooled = time.time() - self._streak_cool.get(chat_id, 0)
+            if cooled < STREAK_COOLDOWN:
+                if not self._streak_cool.get(chat_id):
+                    self._streak_cool[chat_id] = time.time()
+                self._notify_skip(
+                    chat_id, f"{max_streak} پاسخ پشت‌سرهم بدون این‌که خودت چیزی بنویسی",
+                    f"احتمالاً دو سلف‌بات (یا دو اکانت خودت) دارند جواب هم را می‌دهند. "
+                    f"{int(STREAK_COOLDOWN - cooled)} ثانیه دیگر خودکار ادامه می‌دهم "
+                    "(یا خودت یک پیام بنویس).")
+                return
+            # دوره‌ی خنک‌شدن تمام شد → شمارش از نو (هرگز برای همیشه ساکت نمی‌ماند)
+            self._streak[chat_id] = 0
+            self.logger.info(f"streak cooldown finished for {chat_id} — resuming")
 
         if self._in_quiet_hours():
             self._notify_skip(
@@ -438,6 +473,15 @@ class AiReplyPlugin(BasePlugin):
                 f"به وقت <code>{self._esc(self._cfg.get('timezone') or 'سرور')}</code>\n"
                 "تغییر: <code>.ai سکوت خاموش</code>")
             return
+
+        # سقف دقیقه‌ای (ضدبن) نباید باعث «جواب ندادن» شود؛ فقط کمی صبر می‌کنیم
+        waited = await self._wait_for_quota_slot()
+        if waited >= 0.5:
+            self.logger.info(f"quota wait {waited:.0f}s before replying in {chat_id}")
+            self._notify_skip(
+                chat_id, "سقف دقیقه‌ای پر بود، کمی مکث کردم",
+                f"حدود {waited:.0f} ثانیه صبر کردم و بعد جواب دادم. "
+                "برای سقف بالاتر: <code>.ai سقف 30 400 3000</code>")
 
         ok_quota, quota_reason = self._quota_ok()
         if not ok_quota:
@@ -457,6 +501,7 @@ class AiReplyPlugin(BasePlugin):
         # نوع پاسخ: پیش‌نویس یا ارسال خودکار
         auto = bool(profile.get("auto_mode")) and not self._cfg.get("draft_only", True)
         self._busy.add(chat_id)
+        self._busy_since[chat_id] = time.time()
         try:
             profile = await self._refresh_contact_name(event, profile)
             reply = await self._generate(event, profile)
@@ -472,6 +517,7 @@ class AiReplyPlugin(BasePlugin):
             self._note_usage()
         finally:
             self._busy.discard(chat_id)
+            self._busy_since.pop(chat_id, None)
             if self._raw_count_needed(profile):
                 asyncio.create_task(self._maybe_compact(chat_id))
 
@@ -497,6 +543,7 @@ class AiReplyPlugin(BasePlugin):
             chat_id = event.chat_id
             self._last_activity[chat_id] = time.time()
             self._streak[chat_id] = 0        # خودم حرف زدم → شمارش از نو
+            self._streak_cool.pop(chat_id, None)
             profile = await db.get_ai_profile(self.user_id, chat_id)
             if profile and profile.get("enabled"):
                 await db.add_ai_message(self.user_id, chat_id, text,
@@ -555,6 +602,76 @@ class AiReplyPlugin(BasePlugin):
 
         asyncio.create_task(_send())
 
+    async def _no_reply_notice(self, chat_id: int, event, profile: dict) -> None:
+        """
+        هیچ سرویس AI جواب نداد: نه پاسخ جانشین می‌فرستیم (بدون اجازه‌ی تو
+        ممنوع)، نه بی‌خبر می‌مانیم. یک‌بار دیگر با فاصله تلاش می‌کنیم.
+        """
+        label = self._cfg.get("_chat_labels", {}).get(str(chat_id)) or chat_id
+        errs = {k: v for k, v in ai_providers.last_errors().items() if v}
+        detail = "\n".join(f"  • {self._esc(k)}: {self._esc(v)}" for k, v in list(errs.items())[:3])
+
+        key = ("noreply", int(chat_id))
+        now = time.time()
+        first_time = now - self._skip_notice.get(key, 0) >= 900
+        self._skip_notice[key] = now
+
+        # یک تلاش دوباره‌ی زمان‌دار (فقط یکی برای هر چت)
+        existing = self._pending_retry.get(chat_id)
+        if existing and now - existing["created"] < 300:
+            return
+        self._pending_retry[chat_id] = {
+            "event": event, "profile": profile, "created": now,
+        }
+        if len(self._pending_retry) > 30:       # جلوگیری از رشد بی‌نهایت
+            for k in sorted(self._pending_retry, key=lambda k: self._pending_retry[k]["created"])[:10]:
+                self._pending_retry.pop(k, None)
+        delay = max(5.0, float(self._cfg.get("no_reply_retry_delay", 25) or 25))
+        asyncio.create_task(self._retry_later(chat_id, delay))
+
+        if first_time:
+            await self._notify_owner(
+                f"⚠️ <b>هیچ سرویس AI جواب نداد</b> — در چت {self._esc(label)}\n"
+                + (f"آخرین خطاها:\n{detail}\n" if detail else "")
+                + f"⏳ {int(delay)} ثانیه دیگر یک‌بار دیگر تلاش می‌کنم. "
+                "هیچ پیامی بدون جواب تو به طرف مقابل فرستاده نمی‌شود.\n"
+                "برای بررسی: <code>.ai وضعیت</code> / <code>.ai چرا</code>"
+            )
+
+    async def _retry_later(self, chat_id: int, delay: float) -> None:
+        """تلاش دوباره‌ی زمان‌دار بعد از شکست همه‌ی سرویس‌ها"""
+        await asyncio.sleep(delay)
+        item = self._pending_retry.pop(chat_id, None)
+        if not item:
+            return
+        event, profile = item["event"], item["profile"]
+        if chat_id in self._paused or not self._quota_ok()[0]:
+            return
+        try:
+            await self._load_config()
+            reply = await self._generate(event, profile)
+            if not reply:
+                await self._notify_owner(
+                    f"❌ تلاش دوم هم برای چت "
+                    f"{self._esc(self._cfg.get('_chat_labels', {}).get(str(chat_id)) or chat_id)} "
+                    "بی‌نتیجه ماند — پاسخ جانشین فرستاده نشد. "
+                    "کلید/مدل سرویس‌ها را با <code>.ai وضعیت</code> ببین."
+                )
+                return
+            auto = (bool(profile.get("auto_mode"))
+                    and not self._cfg.get("draft_only", True))
+            if auto:
+                reply_to = (event.message.id
+                            if self._cfg.get("reply_to_incoming", True) else None)
+                await self._send_to_chat(chat_id, reply, reply_to=reply_to)
+                self._streak[chat_id] = self._streak.get(chat_id, 0) + 1
+                self._note_usage()
+                self.logger.info(f"delayed retry delivered a reply in {chat_id}")
+            else:
+                await self._send_draft(event, profile, reply)
+        except Exception as e:      # noqa: BLE001
+            self.logger.error(f"delayed retry failed: {type(e).__name__}: {e}")
+
     def _local_now(self):
         """ساعت به وقت خودم (نه وقت سرور — سرور معمولاً جای دیگری است)"""
         tz_name = str(self._cfg.get("timezone") or "").strip()
@@ -599,6 +716,29 @@ class AiReplyPlugin(BasePlugin):
         if len(self._usage_day) >= rpd:
             return False, f"سقف روزانه پر شد ({len(self._usage_day)}/{rpd})"
         return True, ""
+
+    async def _wait_for_quota_slot(self) -> float:
+        """
+        اگر سقف دقیقه‌ای پر شده، تا آزاد شدن اولین جای خالی صبر می‌کند
+        (حداکثر `quota_wait_max` ثانیه) تا گفت‌وگو قطع نشود.
+        خروجی: چند ثانیه صبر شد (۰ = لازم نشد)
+        """
+        rpm = max(1, int(self._cfg.get("rpm", 20)))
+        max_wait = max(0, int(self._cfg.get("quota_wait_max", 45)))
+        started = time.time()
+        while True:
+            now = time.time()
+            recent = [t for t in self._usage if now - t < 60]
+            if len(recent) < rpm:
+                return time.time() - started
+            if time.time() - started >= max_wait:
+                return time.time() - started
+            # تا خالی شدن اولین جای سقف صبر کن (کمی بیشتر، که مطمئن باشیم)
+            sleep_for = min(60 - (time.time() - min(recent)) + 0.5,
+                            max_wait - (time.time() - started) + 0.5)
+            if sleep_for <= 0:
+                return time.time() - started
+            await asyncio.sleep(min(sleep_for, 5.0))
 
     def _quota_state(self) -> str:
         """وضعیت خوانا برای پنل و .ai چرا"""
@@ -661,7 +801,9 @@ class AiReplyPlugin(BasePlugin):
         try:
             reply, provider = await ai_providers.chat(
                 messages, config=self._cfg, temperature=temperature,
-                max_tokens=int(self._cfg.get("max_reply_tokens", 200) or 200),
+                max_tokens=int(self._cfg.get("max_reply_tokens", 300) or 300),
+                attempts=int(self._cfg.get("retry_attempts", 2) or 1),
+                delay=float(self._cfg.get("retry_delay", 3.0) or 0.0),
             )
         except Exception as e:      # noqa: BLE001
             # هر خطای پیش‌بینی‌نشده هم به «پاسخ جانشین» می‌رسد، نه سکوت
@@ -669,13 +811,23 @@ class AiReplyPlugin(BasePlugin):
             reply, provider = None, None
 
         if not reply:
-            # نردبان: وقتی همه‌ی سرویس‌ها شکست خوردند، آدم بی‌جواب نمی‌ماند
-            reply = random.choice(FALLBACK_REPLIES)
-            self.logger.warning("all providers failed — fallback reply used")
-            await self._notify_owner(
-                "⚠️ <b>هیچ سرویس AI جواب نداد</b> — یک پاسخ جانشین فرستاده شد.\n"
-                "providerها و کلیدها را با <code>.ai وضعیت</code> چک کن."
-            )
+            # ── هیچ سرویس جواب نداد ──
+            # کاربر: «هیچ‌وقت جایگزین رو بدون اجازه نفرست، حتی توی حالت خودکار.»
+            # پس: خودکار هرگز جایگزین نمی‌فرستد؛ در حالت پیشنهاد (draft) به‌عنوان
+            # پیشنهاد نشان داده می‌شود (تصمیم با خودت) و اگر خودت
+            # «پاسخ جانشین» را روشن کرده باشی، همان می‌رود.
+            if self._cfg.get("fallback_replies"):
+                reply = random.choice(FALLBACK_REPLIES)
+                self.logger.warning("all providers failed — fallback enabled by user")
+                await self._notify_owner(
+                    "⚠️ <b>هیچ سرویس AI جواب نداد</b> — چون «پاسخ جانشین» را "
+                    "روشن کرده‌ای، یک پاسخ معمولی فرستاده شد.\n"
+                    "providerها و کلیدها را با <code>.ai وضعیت</code> چک کن."
+                )
+            else:
+                self.logger.warning("all providers failed — no reply sent (fallback disabled)")
+                await self._no_reply_notice(chat_id, event, profile)
+                return None
 
         reply = E.clean_reply(reply)
         # فیلتر ایموجی: سطح کاربر + لیست ایموجی‌های خودش (مدل‌ها همیشه
@@ -743,8 +895,8 @@ class AiReplyPlugin(BasePlugin):
         )
         await self._notify_owner(text, draft_id=draft_id)
 
-    async def _notify_owner(self, text: str, draft_id: str | None = None) -> None:
-        """اعلان به پیوی ربات کنترلی (فالبک: سیو مسیج)"""
+    async def _notify_owner(self, text: str, draft_id: str | None = None) -> bool:
+        """اعلان به پیوی ربات کنترلی (فالبک: سیو مسیج) — True اگر تحویل شد"""
         sent = False
         if self._owner_tg:
             kwargs = {}
@@ -754,8 +906,10 @@ class AiReplyPlugin(BasePlugin):
         if not sent:
             try:
                 await self.client.send_message("me", text, parse_mode="html")
+                sent = True
             except Exception as e:
                 self.logger.error(f"notify failed: {e}")
+        return sent
 
     def _draft_keyboard(self, draft_id: str) -> dict:
         """کیبورد دکمه‌ای برای پیش‌نویس (با telegram.InlineKeyboardMarkup)"""
@@ -780,9 +934,25 @@ class AiReplyPlugin(BasePlugin):
     async def _on_command(self, event):
         try:
             await self._load_config()      # هم‌گام‌سازی با تغییرات پنل پیوی ربات
+            try:
+                self._cmd_notice_sent = False
+            except Exception:
+                pass
             await self._handle_command(event)
         except Exception as e:
             self.logger.error(f"command error: {type(e).__name__}: {e}")
+        finally:
+            # پیام دستور در چت خودِ مخاطب می‌ماند (مثل «.ai روشن») و برای او
+            # دیده می‌شود؛ اگر جوابش در پیوی ربات تحویل شده باشد، پاکش می‌کنیم
+            # تا هم چت شلوغ نشود و هم چیزی لو نرود.
+            if getattr(self, "_cmd_notice_sent", False):
+                try:
+                    await event.delete()
+                except Exception:
+                    try:
+                        await self.client.delete_messages(event.chat_id, [event.message.id])
+                    except Exception as e:
+                        self.logger.debug(f"command delete failed: {e}")
 
     async def _handle_command(self, event):
         text = (event.raw_text or "").strip()
@@ -867,6 +1037,10 @@ class AiReplyPlugin(BasePlugin):
 
     async def _cmd_enable(self, event, profile, chat_id):
         self._paused.discard(chat_id)
+        self._streak[chat_id] = 0
+        self._streak_cool.pop(chat_id, None)
+        self._busy.discard(chat_id)
+        self._busy_since.pop(chat_id, None)
         if profile is None:
             profile = await self._create_default_profile(event)
         else:
@@ -1246,9 +1420,12 @@ class AiReplyPlugin(BasePlugin):
         await self._reply_notify("🔑 <b>سرویس‌های AI</b>\n" + "\n".join(lines) +
                                  "\n\nبرای عوض کردن کلید: <code>AI_PROVIDERS</code> در .env")
 
-    async def _reply_notify(self, text: str):
+    async def _reply_notify(self, text: str) -> bool:
         """خروجی دستورها: در پیوی ربات (چت دستور شلوغ نمی‌شود)"""
-        await self._notify_owner(text)
+        ok = await self._notify_owner(text)
+        if ok:
+            self._cmd_notice_sent = True
+        return ok
 
     # ═══════════ حافظه: سبک‌سازی ═══════════
 

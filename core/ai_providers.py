@@ -301,11 +301,51 @@ def _openai_headers(p: Provider, key: str) -> dict:
     return headers
 
 
+_REASONING_KEYS = ("reasoning_content", "reasoning", "thinking", "analysis")
+
+
 def _openai_text(data: dict) -> str:
+    """
+    متن پاسخ را از جواب سرویس بیرون می‌کشد.
+
+    ⚠️ مدل‌های استدلالی (reasoning) وقتی سقف توکن تمام شود، content را خالی و
+    فقط reasoning می‌فرستند. قبلاً همین باعث می‌شد «همه‌ی سرویس‌ها جواب
+    ندادند» و پاسخ جانشین بیاید، در حالی که سرویس سالم بود.
+    """
     try:
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+    except Exception:
+        msg = {}
+    if not isinstance(msg, dict):
+        return ""
+    text = (msg.get("content") or "").strip()
+    if text:
+        return text
+    for k in _REASONING_KEYS:
+        val = msg.get(k)
+        if isinstance(val, str) and val.strip():
+            # آخرین جمله‌های استدلال را برمی‌داریم (جواب معمولاً آخرش است)
+            return val.strip()[-1200:]
+    return ""
+
+
+def _openai_finish_reason(data: dict) -> str:
+    try:
+        return str((data.get("choices") or [{}])[0].get("finish_reason") or "")
     except Exception:
         return ""
+
+
+def _api_error_text(data: dict) -> str:
+    """پیام خطای داخل بدنه (اگر سرویس با ۲۰۰ آمد ولی خطا داد)"""
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("type") or "")[:200]
+    if isinstance(err, str):
+        return err[:200]
+    return ""
 
 
 def _gemini_payload(p: Provider, messages: list[dict], max_tokens: int, temperature: float) -> dict:
@@ -384,9 +424,28 @@ async def _call_provider(p: Provider, key: str, messages: list[dict],
         set_last_error(p.name, msg)
         return None
 
+    api_err = _api_error_text(data) if isinstance(data, dict) else ""
+    if api_err:
+        msg = f"خطای سرویس: {api_err}"
+        p.last_error = msg
+        set_last_error(p.name, msg)
+        logger.error(f"{p.name}: {msg}")
+        return None
+
     text = _gemini_text(data) if p.kind == "gemini" else _openai_text(data)
     if not text:
-        msg = "سرویس جواب خالی داد (متن پاسخ خالی بود)"
+        finish = _openai_finish_reason(data) if p.kind != "gemini" else ""
+        if finish in ("length", "max_tokens") and max_tokens < 3000:
+            # سقف توکن تمام شد (معمولاً مدل استدلالی، فکر کردن همه‌اش را خورد)
+            # → یک‌بار با بودجه‌ی بیشتر
+            bigger = min(max(max_tokens * 4, 800), 3000)
+            logger.warning(f"{p.name}: پاسخ خالی (finish_reason={finish}) — تلاش با {bigger} توکن")
+            try:
+                return await _call_provider(p, key, messages, bigger, temperature)
+            except Exception as e:                       # noqa: BLE001
+                logger.error(f"{p.name}: retry after empty reply failed: {e}")
+        msg = (f"سرویس جواب خالی داد (finish_reason={finish or '؟'})"
+               if finish else "سرویس جواب خالی داد (متن پاسخ خالی بود)")
         p.last_error = msg
         set_last_error(p.name, msg)
         return None
@@ -395,23 +454,16 @@ async def _call_provider(p: Provider, key: str, messages: list[dict],
     return text
 
 
-async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
-               config: dict | None = None, max_tokens: int | None = None,
-               temperature: float | None = None, model: str | None = None) -> tuple[str | None, str | None]:
-    """
-    فراخوانی مدل با چرخش خودکار.
-    خروجی: (متن پاسخ، نام provider) — اگر همه شکست بخورند (None, None)
-    """
-    if providers is None:
-        providers = load_providers(config)
+RETRY_ATTEMPTS = 2        # چند دور کامل روی همه‌ی سرویس‌ها تلاش شود
+RETRY_DELAY = 3.0         # فاصله‌ی بین دورها (ثانیه)
 
-    usable = [p for p in providers if not p.blocked]
-    if not usable:
-        logger.error("no AI provider available (all cooling down / no keys)")
-        return None, None
 
+async def _try_once(providers: list[Provider], messages: list[dict], *,
+                    max_tokens: int | None, temperature: float | None,
+                    model: str | None) -> tuple[str | None, str | None]:
+    """یک دور چرخش روی همه‌ی سرویس‌ها"""
     attempts = 0
-    for p in usable:
+    for p in providers:
         if model:
             p.model = model
         for key in (p.available_keys() or [""]):
@@ -440,7 +492,55 @@ async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
                 set_last_error(p.name, msg)
         if attempts >= MAX_ATTEMPTS:
             break
+    return None, None
 
+
+async def chat(messages: list[dict], *, providers: list[Provider] | None = None,
+               config: dict | None = None, max_tokens: int | None = None,
+               temperature: float | None = None, model: str | None = None,
+               attempts: int = RETRY_ATTEMPTS,
+               delay: float = RETRY_DELAY) -> tuple[str | None, str | None]:
+    """
+    فراخوانی مدل با چرخش خودکار + چند دور تلاش با فاصله.
+
+    کاربر: «۲ بار تلاش کن با فاصله مثلاً ۳ ثانیه که جواب حتماً ارسال شود.»
+    دور اول: سرویس‌های سالم. اگر همه شکست خوردند → چند ثانیه صبر → دور دوم
+    روی همه (کول‌داون‌ها نادیده گرفته می‌شوند، چون ممکن است موقتی باشند).
+
+    خروجی: (متن پاسخ، نام provider) — اگر همه شکست بخورند (None, None)
+    """
+    if providers is None:
+        providers = load_providers(config)
+
+    rounds = max(1, int(attempts or 1))
+    usable = [p for p in providers if not p.blocked]
+    if not usable:
+        usable = list(providers)        # همه در کول‌داون: در دور دوم امتحان می‌کنیم
+
+    for rnd in range(rounds):
+        pool = usable if rnd == 0 else list(providers)
+        if rnd:
+            await asyncio.sleep(max(0.0, float(delay or 0)))
+            logger.info(f"AI retry round {rnd + 1}/{rounds} after {delay}s")
+            for p in pool:
+                # کول‌داون موقتی (429/5xx) را فقط برای همین دور صفر کن؛
+                # خطای قطعی (کلید/مدل غلط) دست‌نخورده می‌ماند تا اسپم نشود
+                now = time.monotonic()
+                cools = getattr(p, "_cooldown_until", None)
+                if isinstance(cools, dict):
+                    for k, until in list(cools.items()):
+                        if until - now <= COOLDOWN_AFTER_ERROR + 1:
+                            cools.pop(k, None)
+        if not pool:
+            continue
+        text, name = await _try_once(
+            pool, messages, max_tokens=max_tokens,
+            temperature=temperature, model=model,
+        )
+        if text:
+            return text, name
+
+    logger.error("no AI provider answered after retries")
     return None, None
 
 
