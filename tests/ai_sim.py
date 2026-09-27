@@ -118,7 +118,7 @@ async def _send_message(self, entity, message=None, reply_to=None, **kw):
     chat = "me" if entity == "me" else _chat_of(entity)
     m = _mk_msg(text, out=True, sender_id=ME, reply_to=getattr(reply_to, "id", reply_to))
     m._client = self
-    SENT.append(("send", chat, text))
+    SENT.append(("send", chat, text, getattr(reply_to, "id", reply_to)))
     return m
 
 
@@ -142,6 +142,24 @@ async def _get_messages(self, entity, ids=None, limit=None, **kw):
     if isinstance(ids, (list, tuple)):
         return [STORE.get(i) for i in ids]
     return STORE.get(ids)
+
+
+async def _get_sender(self):
+    """کاربر/چت فرستنده — در تست‌ها از جدول موجودیت‌ها می‌آید"""
+    sid = getattr(self, "sender_id", None)
+    if sid is None:
+        return None
+    ent = _ENTS.get(sid if sid > 0 else abs(sid))
+    if ent is None:
+        return None
+    return ent
+
+
+async def _get_chat(self):
+    cid = getattr(self, "chat_id", None)
+    if cid is None:
+        return None
+    return _ENTS.get(cid if cid > 0 else abs(cid))
 
 
 async def _get_input_chat(self):
@@ -199,6 +217,8 @@ class FakeBot:
 def install():
     from telethon.tl.custom.chatgetter import ChatGetter
     ChatGetter.get_input_chat = _get_input_chat
+    ChatGetter.get_sender = _get_sender
+    ChatGetter.get_chat = _get_chat
     TelegramClient.connect = _connect
     TelegramClient.is_connected = _is_connected
     TelegramClient.disconnect = _disconnect

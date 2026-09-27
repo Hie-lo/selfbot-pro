@@ -32,6 +32,23 @@ def check(name: str, ok: bool, extra: str = ""):
     print(("✅ " if ok else "❌ ") + name + (f"   {extra}" if extra else ""))
 
 
+def reset_limits(uid):
+    """سقف مصرف و «فعال بودن خودم» را صفر می‌کند تا پیام بعدی قطعاً پردازش شود"""
+    from core import plugin_manager as _pm
+    # دشمن PEER را هم پاک کن (بخش همزیستی با دشمن آن را ثبت کرده بود و از
+    # این‌جا به بعد جلوی پاسخ‌ها را می‌گرفت)
+    other = _pm.get_active_plugins(uid).get("auto_response")
+    if other is not None:
+        getattr(other, "_enemies", {}).pop(PEER, None)
+    ar = _pm.get_active_plugins(uid).get("ai_reply")
+    if ar:
+        ar._usage.clear()
+        ar._usage_day.clear()
+        ar._last_activity.clear()
+        ar._paused.discard(PEER)
+    return ar
+
+
 def fake_chat(reply="سلام خوبم، تو چطوری؟", fail=False,
               summary='{"summary":"درباره فوتبال حرف زدیم","facts":["فوتبال دوست داره"]}'):
     async def _chat(messages, **kw):
@@ -231,8 +248,8 @@ async def main():
 
     # ── ۱۵) پنل پیوی ربات: پرسونا ──
     from bot import ai_panel
-    from bot.ai_panel import (ai_menu_kb, build_emoji_text, contacts_kb, emoji_kb,
-                             modes_kb, tones_kb)
+    from bot.ai_panel import (ai_menu_kb, build_emoji_text, build_modes_text,
+                             contacts_kb, emoji_kb, modes_kb, tones_kb)
     check("کیبورد مودها ساخته می‌شود", "ai:mode:playfull" in str(modes_kb("playfull")))
     check("کیبورد سطح‌ها ساخته می‌شود", "ai:tone:3" in str(tones_kb(3)))
     check("کیبورد مخاطبین ساخته می‌شود", "ai:chat:" in str(contacts_kb(
@@ -397,6 +414,120 @@ async def main():
           bool((await db.get_ai_profile(uid, PEER)).get("auto_mode")))
     await _save_ai_config(uid, {"draft_only": True})
     await db.set_ai_auto_mode(uid, PEER, False)
+
+    # ── ۱۵.۹۵) نام‌ها: نام من، نام مخاطب، اصلاح دستی ──  # noqa: F811
+    # نام خودم (از اکانت تلگرام، نه «من»)
+    ar = pm.get_active_plugins(uid).get("ai_reply")
+    my_name = await ar._my_name()
+    check("نام واقعی من از اکانت خوانده می‌شود", my_name and my_name != "من", my_name)
+
+    prof_n = await db.get_ai_profile(uid, PEER)
+    check("نام مخاطب خودکار از تلگرام گرفته می‌شود",
+          (prof_n.get("target_name") or "") == "Ali", str(prof_n.get("target_name")))
+
+    await sim.fire(client, ".ai نام رضایی", out=True)
+    await asyncio.sleep(0.4)
+    check("«.ai نام ‹اسم›» نام را عوض می‌کند",
+          (await db.get_ai_profile(uid, PEER)).get("target_name") == "رضایی"
+          and (await _ai_config(uid)).get("name_overrides", {}).get(str(PEER)) == "رضایی")
+    await sim.fire(client, ".ai نام خودکار", out=True)
+    await asyncio.sleep(0.4)
+    check("«.ai نام خودکار» به نام تلگرام برمی‌گردد",
+          not (await _ai_config(uid)).get("name_overrides")
+          and (await db.get_ai_profile(uid, PEER)).get("target_name") == "Ali")
+
+    # جایگزینی نام عددی با نام واقعی
+    await db.upsert_ai_profile(uid, PEER, target_name=str(PEER))
+    reset_limits(uid)
+    await sim.fire(client, "سلام", out=False)
+    await asyncio.sleep(1.2)
+    check("نام عددی (id) با نام واقعی جایگزین می‌شود",
+          (await db.get_ai_profile(uid, PEER)).get("target_name") == "Ali")
+
+    # نام دستی نباید با نام تلگرام بازنویسی شود
+    await sim.fire(client, ".ai نام رضایی", out=True)
+    await asyncio.sleep(0.4)
+    reset_limits(uid)
+    await sim.fire(client, "سلام دوباره", out=False)
+    await asyncio.sleep(1.2)
+    check("نام دستی من با نام تلگرام بازنویسی نمی‌شود",
+          (await db.get_ai_profile(uid, PEER)).get("target_name") == "رضایی")
+    await sim.fire(client, ".ai نام خودکار", out=True)
+    await asyncio.sleep(0.4)
+
+    # ── ۱۵.۹۶) مودها: ناراحت و خشمگین + اعمال واقعی ──
+    check("مود «ناراحت» وجود دارد", "ناراحت" in E.MODES)
+    check("مود «خشمگین» وجود دارد", "خشمگین" in E.MODES)
+    check("«دلگیر» به «ناراحت» و «عصبانی» به «خشمگین» می‌رود",
+          E.norm_mode("دلگیر") == "ناراحت" and E.norm_mode("عصبانی") == "خشمگین")
+    check("هر مود قاعده‌ی رفتاری دارد",
+          all(m in E.MODE_RULES for m in E.MODES),
+          str([m for m in E.MODES if m not in E.MODE_RULES]))
+    kb_all = str(modes_kb("عادی"))
+    check("همه‌ی مودها در پنل هستند",
+          all(f"ai:mode:{m}" in kb_all for m in E.MODES),
+          str([m for m in E.MODES if f"ai:mode:{m}" not in kb_all]))
+    check("متن پنل مودها همه را توضیح می‌دهد",
+          all(m in build_modes_text({}) for m in E.MODES))
+
+    for m in ("ناراحت", "خشمگین"):
+        await sim.fire(client, f".تنظیم مود {m}", out=True)
+        await asyncio.sleep(0.35)
+        check(f"مود {m} ذخیره می‌شود", (await _ai_config(uid)).get("mode") == m)
+        n = len(PV)
+        reset_limits(uid)
+        await sim.fire(client, "چرا اینکارو کردی؟", out=False)
+        await asyncio.sleep(1.2)
+        last_prompt = CALLS[-1][0]["content"] if CALLS else ""
+        check(f"قاعده‌ی مود {m} در پرامپت می‌آید",
+              E.MODE_RULES[m][:20] in last_prompt, last_prompt[-200:])
+        check(f"یادآوری مود {m} در پایان پرامپت هست",
+              f"مود الان «{m}»" in last_prompt)
+
+    # ── ۱۵.۹۷) ریپلای روی پیام طرف ──
+    await sim.fire(client, ".تنظیم مود عادی", out=True)
+    await asyncio.sleep(0.3)
+    ar = pm.get_active_plugins(uid).get("ai_reply")
+    reset_limits(uid)
+    await sim.fire(client, ".ai خودکار", out=True)
+    await asyncio.sleep(0.4)
+    reset_limits(uid)
+    n_sent = len(SENT)
+    await sim.fire(client, "کجایی تو؟", out=False, mid=4242)
+    await asyncio.sleep(2.5)
+    sends = [x for x in SENT[n_sent:] if x[0] == "send" and x[1] != "me"]
+    check("پاسخ خودکار ارسال می‌شود", bool(sends), str(sends))
+    check("پاسخ ریپلای روی همان پیام طرف است",
+          bool(sends) and len(sends[0]) > 3 and sends[0][3] == 4242,
+          str(sends[0] if sends else None))
+
+    # پیش‌نویس هم شناسه‌ی پیام را نگه می‌دارد
+    DRAFTS.clear()
+    reset_limits(uid)
+    await sim.fire(client, ".ai دستی", out=True)
+    await asyncio.sleep(0.4)
+    reset_limits(uid)
+    await sim.fire(client, "خب؟", out=False, mid=4343)
+    await asyncio.sleep(1.5)
+    d = list(DRAFTS.values())[-1] if DRAFTS else {}
+    check("پیش‌نویس شناسه‌ی پیام طرف را نگه می‌دارد", d.get("reply_to") == 4343, str(d.get("reply_to")))
+    check("پیش‌نویس نام مخاطب را دارد", bool(d.get("name")), str(d.get("name")))
+
+    # ── ۱۵.۹۸) دقت: قواعد ضد بی‌ربطی و غلط املایی ──
+    msgs_rel = E.build_messages(my_name="علی", persona="", mode="عادی",
+                                settings=st2, notes=[], facts=[], pending=[],
+                                history=[{"content": "کجایی؟", "is_out": False}],
+                                incoming_text="کجایی؟")
+    sys_txt = msgs_rel[0]["content"]
+    check("قاعده‌ی «مستقیماً جواب همان پیام» در پرامپت هست",
+          "مستقیماً به همان پیام" in sys_txt)
+    check("قاعده‌ی ممنوعیت اطلاعات ساختگی هست",
+          "هیچ اطلاعات، خاطره، اسم، عدد" in sys_txt)
+    check("قاعده‌ی پیام مبهم/کوتاه هست", "پیام کوتاه یا مبهم" in sys_txt)
+    check("قاعده‌ی غلط املایی اصلاح شده",
+          "غلط املایی واضح" in sys_txt and "غلط تایپی طبیعی اشکالی ندارد" not in sys_txt)
+    check("قاعده‌ی نام‌بردن هست", "اسم طرف را فقط همان‌طور" in sys_txt)
+    check("پیام طرف در یادآوری پایان پرامپت می‌آید", "کجایی؟" in sys_txt.split("یادآوری آخر")[-1])
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

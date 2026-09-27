@@ -915,7 +915,8 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # اولویت ۶: پنل هوش مصنوعی (پرسونا / ویرایش پیش‌نویس)
     if (context.user_data.get("awaiting_ai_persona")
             or context.user_data.get("awaiting_ai_draft_edit")
-            or context.user_data.get("awaiting_ai_fact_edit")):
+            or context.user_data.get("awaiting_ai_fact_edit")
+            or context.user_data.get("awaiting_ai_contact_name")):
         from bot.ai_panel import handle_ai_text
         user = await get_or_create_user(update)
         if await handle_ai_text(update, context, user["id"]):

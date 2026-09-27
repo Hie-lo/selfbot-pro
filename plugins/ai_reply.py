@@ -89,6 +89,7 @@ class AiReplyPlugin(BasePlugin):
     def __init__(self, client, user_id: int):
         super().__init__(client, user_id)
         self._cfg: dict = {}
+        self._my_name_cache: str = ""
         self._my_id: int | None = None
         self._owner_tg: int | None = None
         self._paused: set[int] = set()        # چت‌هایی که با .ai بس ساکت شده‌اند
@@ -151,6 +152,74 @@ class AiReplyPlugin(BasePlugin):
         await super().stop()
 
     # ═══════════ تنظیمات ═══════════
+
+    async def _my_name(self) -> str:
+        """نام واقعی خودم از اکانت تلگرام (نه «من»)"""
+        if self._my_name_cache:
+            return self._my_name_cache
+        try:
+            me = await self.client.get_me()
+            name = (getattr(me, "first_name", "") or getattr(me, "username", "") or "").strip()
+        except Exception as e:
+            self.logger.warning(f"get_me failed: {type(e).__name__}")
+            name = ""
+        self._my_name_cache = name or "من"
+        return self._my_name_cache
+
+    def _name_override(self, chat_id) -> str:
+        """نام دستی که خودم گذاشته‌ام (اگر باشد، اسم خودکار جای آن نمی‌نشیند)"""
+        overrides = self._cfg.get("name_overrides") or {}
+        if isinstance(overrides, str):
+            try:
+                import json
+                overrides = json.loads(overrides)
+            except Exception:
+                overrides = {}
+        return str(overrides.get(str(chat_id)) or "").strip()
+
+    async def _refresh_contact_name(self, event, profile: dict):
+        """
+        نام طرف را تازه می‌کند. قبلاً فقط یک‌بار موقع ساخت پروفایل خوانده
+        می‌شد و اگر آن موقع در دسترس نبود، تا همیشه id عددی یا اسم غلط
+        می‌مانْد.
+        """
+        try:
+            ent = await event.get_sender()
+        except Exception:
+            return profile
+        def _extract(obj) -> str:
+            if obj is None:
+                return ""
+            first = (getattr(obj, "first_name", "") or "").strip()
+            last = (getattr(obj, "last_name", "") or "").strip()
+            full = f"{first} {last}".strip()
+            return (full or (getattr(obj, "title", "") or "").strip()
+                    or (getattr(obj, "username", "") or "").strip())
+
+        name = _extract(ent)
+        if not name:
+            try:
+                name = _extract(await event.get_chat())
+            except Exception:
+                pass
+        if not name:
+            # آخرین تلاش: موجودیت را مستقیم از خود تلگرام بگیر
+            try:
+                name = _extract(await self.client.get_entity(event.chat_id))
+            except Exception:
+                pass
+        if not name or self._name_override(event.chat_id):
+            return profile
+        old = (profile or {}).get("target_name") or ""
+        # نام عددی یعنی «اسم واقعی نداریم» — باید جایگزین شود
+        if str(old).lstrip("-").isdigit():
+            old = ""
+        if name != old:
+            await db.upsert_ai_profile(self.user_id, event.chat_id, target_name=name)
+            profile = dict(profile or {})
+            profile["target_name"] = name
+            self.logger.info(f"contact name set: {old!r} → {name!r}")
+        return profile
 
     async def _load_config(self):
         cfg = dict(DEFAULT_CONFIG)
@@ -259,11 +328,13 @@ class AiReplyPlugin(BasePlugin):
         auto = bool(profile.get("auto_mode")) and not self._cfg.get("draft_only", True)
         self._busy.add(chat_id)
         try:
+            profile = await self._refresh_contact_name(event, profile)
             reply = await self._generate(event, profile)
             if not reply:
                 return
             if auto:
-                await self._send_to_chat(event.chat_id, reply)
+                reply_to = event.message.id if self._cfg.get("reply_to_incoming", True) else None
+                await self._send_to_chat(event.chat_id, reply, reply_to=reply_to)
             else:
                 await self._send_draft(event, profile, reply)
         finally:
@@ -351,7 +422,8 @@ class AiReplyPlugin(BasePlugin):
             global_emoji=self._cfg.get("emoji_level"),
             allowed_emojis=self._cfg.get("allowed_emojis"),
         )
-        settings["target_name"] = profile.get("target_name") or str(chat_id)
+        settings["target_name"] = (self._name_override(chat_id)
+                                   or profile.get("target_name") or str(chat_id))
         history = await db.get_ai_messages(self.user_id, chat_id, limit=15)
         notes = await db.get_ai_notes(self.user_id, chat_id, limit=10)
         facts = await db.get_ai_facts(self.user_id, chat_id, limit=int(self._cfg.get("fact_limit", 40)))
@@ -371,15 +443,21 @@ class AiReplyPlugin(BasePlugin):
 
         mode = E.norm_mode(self._cfg.get("mode", "عادی")) or "عادی"
         now_line = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        my_name = await self._my_name()
         messages = E.build_messages(
-            my_name="من", persona=self._cfg.get("persona", ""), mode=mode,
+            my_name=my_name, persona=self._cfg.get("persona", ""), mode=mode,
             settings=settings, notes=notes, facts=facts, pending=pending,
             history=history, now_line=now_line, no_memory=no_memory,
+            incoming_text=text,
         )
 
         temperature = E.MODES.get(mode, {}).get("temperature", 0.8)
+        if len((text or "").strip()) <= 20:
+            # پیام کوتاه/مبهم → خلاقیت کمتر، جواب مرتبط‌تر
+            temperature = max(0.35, min(temperature, 0.5))
         reply, provider = await ai_providers.chat(
             messages, config=self._cfg, temperature=temperature,
+            max_tokens=int(self._cfg.get("max_reply_tokens", 200) or 200),
         )
         self._note_usage()
 
@@ -404,8 +482,8 @@ class AiReplyPlugin(BasePlugin):
 
     # ═══════════ ارسال ═══════════
 
-    async def _send_to_chat(self, chat_id, reply: str) -> None:
-        """ارسال انسانی: تایپینگ + تأخیر + تکه‌تکه"""
+    async def _send_to_chat(self, chat_id, reply: str, reply_to: int | None = None) -> None:
+        """ارسال انسانی: تایپینگ + تأخیر + تکه‌تکه (پیام اول ریپلای روی پیام طرف)"""
         parts = E.split_messages(reply)
         speed = float(self._cfg.get("typing_speed", 11.0))
         for i, part in enumerate(parts):
@@ -415,7 +493,9 @@ class AiReplyPlugin(BasePlugin):
             try:
                 async with self.client.action(chat_id, "typing"):
                     await asyncio.sleep(delay)
-                await self.client.send_message(chat_id, part)
+                # فقط قطعه‌ی اول ریپلای می‌شود؛ بقیه پیام‌های ساده‌اند
+                await self.client.send_message(
+                    chat_id, part, reply_to=reply_to if i == 0 else None)
                 self._last_activity[chat_id] = time.time()
                 await db.add_ai_message(self.user_id, chat_id, part, is_out=True)
             except FloodWaitError as e:
@@ -437,6 +517,8 @@ class AiReplyPlugin(BasePlugin):
             "name": profile.get("target_name") or str(event.chat_id),
             "incoming": (event.raw_text or "")[:300],
             "reply": reply,
+            "reply_to": (event.message.id
+                         if self._cfg.get("reply_to_incoming", True) else None),
             "created": time.time(),
         }
         if len(DRAFTS) > 50:       # جلوگیری از رشد بی‌نهایت
@@ -547,6 +629,8 @@ class AiReplyPlugin(BasePlugin):
             await self._cmd_set_tone(event, arg, profile, chat_id)
         elif sub in ("ایموجی", "اموجی", "emoji"):
             await self._cmd_set_emoji(event, arg, profile, chat_id)
+        elif sub in ("نام", "اسم", "name"):
+            await self._cmd_set_name(event, arg, profile, chat_id)
         elif sub in ("سرچ", "search"):
             await self._cmd_search(event, arg, chat_id)
         elif sub in ("حافظه", "memory"):
@@ -558,7 +642,7 @@ class AiReplyPlugin(BasePlugin):
         elif sub in ("کلید", "provider", "سرویس"):
             await self._cmd_providers(event)
         else:
-            await self._reply_notify("❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، شخص، خودکار، دستی، مود، سطح، ایموجی، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
+            await self._reply_notify("❓ زیرفرمان‌ها: روشن، خاموش، وضعیت، شخص، نام، خودکار، دستی، مود، سطح، ایموجی، سرچ، حافظه، سبک‌سازی، فراموش، کلید، بس")
 
     async def _cmd_enable(self, event, profile, chat_id):
         self._paused.discard(chat_id)
@@ -630,6 +714,49 @@ class AiReplyPlugin(BasePlugin):
             await self._save_config(tone_level=level)
             where = "همه‌ی چت‌ها"
         await self._reply_notify(f"🌡 سطح {level} ({where}): {E.TONE_LABELS[level]}")
+
+    async def _cmd_set_name(self, event, arg, profile, chat_id):
+        """
+        نام این مخاطب را دستی تعیین می‌کند:
+          .ai نام علی        → از این به بعد او را «علی» می‌شناسم
+          .ai نام خودکار     → برگشت به نام واقعی تلگرام
+        """
+        name = (arg or "").strip()
+        overrides = dict(self._cfg.get("name_overrides") or {})
+        if not name:
+            cur = overrides.get(str(chat_id)) or (profile or {}).get("target_name") or "—"
+            await self._reply_notify(
+                f"📛 نام فعلی این مخاطب: <b>{self._esc(cur)}</b>\n\n"
+                f"تغییر: <code>.ai نام علی</code>\n"
+                f"برگشت به نام تلگرام: <code>.ai نام خودکار</code>")
+            return
+        if name in ("خودکار", "auto", "تلگرام", "-"):
+            overrides.pop(str(chat_id), None)
+            await self._save_config(name_overrides=overrides)
+            live = ""
+            try:
+                # ⚠️ از get_sender استفاده نکن: فرستنده‌ی این پیام خودِ من است
+                # (دستور را با اکانت خودم فرستادم)، پس نام *خودم* برمی‌گشت.
+                ent = await self.client.get_entity(chat_id)
+                first = (getattr(ent, "first_name", "") or "").strip()
+                last = (getattr(ent, "last_name", "") or "").strip()
+                live = (f"{first} {last}".strip()
+                        or (getattr(ent, "title", "") or "").strip()
+                        or (getattr(ent, "username", "") or "").strip())
+            except Exception as e:
+                self.logger.warning(f"get_entity for name failed: {type(e).__name__}")
+            if live:
+                await db.upsert_ai_profile(self.user_id, chat_id, target_name=live)
+            await self._reply_notify(
+                f"📛 برگشت به نام تلگرام: <b>{self._esc(live or '—')}</b>"
+                + ("" if live else " (اسمی از تلگرام نگرفتم؛ هر پیام جدید خودش دوباره تلاش می‌کند)"))
+            return
+        if len(name) > 40:
+            name = name[:40]
+        overrides[str(chat_id)] = name
+        await self._save_config(name_overrides=overrides)
+        await db.upsert_ai_profile(self.user_id, chat_id, target_name=name)
+        await self._reply_notify(f"📛 از این به بعد این مخاطب <b>{self._esc(name)}</b> است.")
 
     async def _cmd_set_emoji(self, event, arg, profile, chat_id):
         """

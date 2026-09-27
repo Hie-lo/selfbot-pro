@@ -78,21 +78,33 @@ def build_emoji_text(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-MODE_ROWS = [["عادی", "خوشحال", "playfull"],
-             ["شوخ", "رسمی", "کاری"],
-             ["عاشقانه", "آرام", "هیجان"]]
-
-
 def modes_kb(current: str) -> InlineKeyboardMarkup:
+    """
+    همه‌ی مودهای موتور (E.MODES) — دستی لیست نمی‌کنیم تا مود جدید جا نماند
+    (قبلاً «دلگیر» در موتور بود ولی در پنل نبود).
+    """
+    names = list(E.MODES)
     rows = []
-    for row in MODE_ROWS:
+    for i in range(0, len(names), 3):
         rows.append([
             InlineKeyboardButton(("✅ " if m == current else "") + m,
                                  callback_data=f"ai:mode:{m}")
-            for m in row
+            for m in names[i:i + 3]
         ])
     rows.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="ai:menu")])
     return InlineKeyboardMarkup(rows)
+
+
+def build_modes_text(cfg: dict) -> str:
+    cur = E.norm_mode(cfg.get("mode", "عادی")) or "عادی"
+    lines = [f"🎭 <b>مود</b>\n", f"مود فعلی: <b>{_esc(cur)}</b>\n"]
+    for name, info in E.MODES.items():
+        mark = "✅ " if name == cur else ""
+        lines.append(f"{mark}<b>{_esc(name)}</b> — {_esc(info['desc'])}")
+    lines.append(
+        "\n💡 مود لحن و طول پاسخ‌ها را عوض می‌کند و روی همه‌ی چت‌ها اعمال می‌شود.\n"
+        "با دستور هم می‌شود: <code>.تنظیم مود ناراحت</code> / <code>.تنظیم مود خشمگین</code>")
+    return "\n".join(lines)
 
 
 def tones_kb(current: int) -> InlineKeyboardMarkup:
@@ -110,7 +122,9 @@ def tones_kb(current: int) -> InlineKeyboardMarkup:
 def contacts_kb(contacts: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for c in contacts[:20]:
-        name = c.get("name") or str(c["target_id"])
+        raw = (c.get("name") or "").strip()
+        # اگر نام ذخیره‌شده همان id عددی بود، یعنی اسم واقعی نداریم
+        name = raw if raw and not raw.lstrip("-").isdigit() else f"بدون نام ({c['target_id']})"
         flags = ("⚡" if c.get("auto_mode") else "👤") + ("🟢" if c.get("enabled", True) else "🔴")
         rows.append([InlineKeyboardButton(
             f"{flags} {name} ({c['msgs']}پیام/{c['facts']}فکت)",
@@ -127,6 +141,7 @@ def chat_kb(target_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔀 جایگاه", callback_data=f"ai:rel:{target_id}"),
          InlineKeyboardButton("⚡ خودکار/دستی", callback_data=f"ai:auto:{target_id}")],
         [InlineKeyboardButton("🗑 پاک کردن حافظه", callback_data=f"ai:wipe:{target_id}")],
+        [InlineKeyboardButton("📛 نام این مخاطب", callback_data=f"ai:editname:{target_id}")],
         [InlineKeyboardButton("⬅️ بازگشت", callback_data="ai:contacts")],
     ])
 
@@ -298,11 +313,15 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # ── مودها ──
     if action == "modes":
         await q.edit_message_text(
-            f"🎭 <b>مود فعلی:</b> {_esc(cfg.get('mode', 'عادی'))}\n\nیک مود انتخاب کن:",
-            reply_markup=modes_kb(cfg.get("mode", "عادی")), parse_mode="HTML")
+            build_modes_text(cfg),
+            reply_markup=modes_kb(E.norm_mode(cfg.get("mode", "عادی")) or "عادی"),
+            parse_mode="HTML")
         await q.answer()
         return True
     if action == "mode":
+        if not E.norm_mode(arg):
+            await q.answer("مود ناشناس", show_alert=True)
+            return True
         await save(mode=arg)
         await q.answer(f"مود شد {arg}")
         await q.edit_message_text(
@@ -511,6 +530,21 @@ async def cb_ai(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                   parse_mode="HTML")
         return True
 
+    if action == "editname":
+        target = int(parts[2])
+        context.user_data["awaiting_ai_contact_name"] = target
+        profile = await db.get_ai_profile(user_id, target) or {}
+        overrides = cfg.get("name_overrides") or {}
+        cur = overrides.get(str(target)) or profile.get("target_name") or "—"
+        await q.edit_message_text(
+            f"📛 <b>نام این مخاطب</b>\n\n"
+            f"نام فعلی: <b>{_esc(cur)}</b>\n\n"
+            "نام درست را بفرست.\n"
+            "(برای برگشت به نام واقعی تلگرام، کلمه «خودکار» را بفرست)",
+            parse_mode="HTML")
+        await q.answer()
+        return True
+
     if action == "draft":
         new_state = not bool(cfg.get("draft_only", True))
         await _save_ai_config(user_id, {"draft_only": new_state})
@@ -612,10 +646,16 @@ async def cb_ai_draft(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await q.answer("اکانت وصل نیست", show_alert=True)
         return True
     try:
-        await client.send_message(draft["chat_id"], draft["reply"])
-        await db.add_ai_message(user_id, draft["chat_id"], draft["reply"], is_out=True)
+        parts = E.split_messages(draft["reply"])
+        r_to = draft.get("reply_to")
+        for i, part in enumerate(parts):
+            await client.send_message(draft["chat_id"], part,
+                                      reply_to=r_to if i == 0 else None)
+            await db.add_ai_message(user_id, draft["chat_id"], part, is_out=True)
         drop_draft(draft_id)
-        await q.edit_message_text(f"✅ ارسال شد به {_esc(draft['name'])}:\n\n{_esc(draft['reply'])}")
+        await q.edit_message_text(
+            f"✅ ارسال شد به {_esc(draft['name'])}"
+            + (" (ریپلای روی پیامش)" if r_to else "") + f":\n\n{_esc(draft['reply'])}")
     except Exception as e:
         logger.error(f"draft send failed: {e}")
         await q.answer(f"خطا: {type(e).__name__}", show_alert=True)
@@ -640,6 +680,26 @@ async def handle_ai_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"<i>{_esc(text[:300])}</i>\n\n"
             "از این به بعد پاسخ‌ها با همین لحن ساخته می‌شوند.",
             parse_mode="HTML")
+        await show_ai_menu(update, context, user_id, edit=False)
+        return True
+
+    name_target = context.user_data.get("awaiting_ai_contact_name")
+    if name_target:
+        context.user_data.pop("awaiting_ai_contact_name", None)
+        new_name = text.strip()[:40]
+        cfg2 = await _ai_config(user_id)
+        overrides = dict(cfg2.get("name_overrides") or {})
+        if new_name in ("خودکار", "auto", "تلگرام", "-"):
+            overrides.pop(str(name_target), None)
+            overrides.pop(name_target, None)
+            await _save_ai_config(user_id, {"name_overrides": overrides})
+            await update.message.reply_text("✅ برگشت به نام واقعی تلگرام.")
+        else:
+            overrides[str(name_target)] = new_name
+            overrides.pop(name_target, None)
+            await _save_ai_config(user_id, {"name_overrides": overrides})
+            await db.upsert_ai_profile(user_id, name_target, target_name=new_name)
+            await update.message.reply_text(f"✅ نام این مخاطب شد «{new_name}».")
         await show_ai_menu(update, context, user_id, edit=False)
         return True
 
