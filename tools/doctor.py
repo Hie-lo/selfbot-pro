@@ -250,15 +250,23 @@ async def check_handlers():
         traceback.print_exc()
         return
     try:
+        import inspect as _ins
         app = Application.builder().token("1:x").build()
-        await register_handlers(app)
+        _res = register_handlers(app)          # مثل main.py، بدون await
+        if _ins.isawaitable(_res):
+            await _res
     except Exception as e:
         bad("ثبت هندلرها شکست خورد", f"{type(e).__name__}: {e}")
         traceback.print_exc()
         return
 
     total = sum(len(g) for g in app.handlers.values())
-    ok(f"هندلرها ثبت شدند: {total}")
+    if total == 0:
+        bad("هیچ هندلری ثبت نشد — ربات ساکت می‌ماند",
+            "register_handlers را main.py بدون await صدا می‌زند",
+            hint="کد قدیمی/خراب است → git fetch && git reset --hard FETCH_HEAD")
+    else:
+        ok(f"هندلرها ثبت شدند: {total}")
 
     # هندلر همه‌گیر وسط گروه = بقیه هرگز اجرا نمی‌شوند
     caught = []

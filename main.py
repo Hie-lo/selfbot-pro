@@ -97,7 +97,18 @@ def main():
         .build()
     )
 
-    register_handlers(app)
+    # محافظ: اگر register_handlers روزی async شود و این‌جا await نشود،
+    # ربات بالا می‌آید ولی هیچ هندلری ندارد و کاملاً ساکت می‌ماند.
+    import asyncio
+    import inspect
+
+    _res = register_handlers(app)
+    if inspect.isawaitable(_res):
+        _loop = asyncio.new_event_loop()
+        try:
+            _loop.run_until_complete(_res)
+        finally:
+            _loop.close()
     app.add_error_handler(error_handler)
 
     print("\n" + "=" * 50)

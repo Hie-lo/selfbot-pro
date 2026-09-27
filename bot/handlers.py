@@ -1516,7 +1516,15 @@ async def route_ai_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
 
 
-async def register_handlers(app: Application):
+def register_handlers(app: Application):
+    """
+    ثبت هندلرها — ⚠️ همگام (sync) است و باید همین‌طور بماند.
+
+    این تابع در main.py بدون await صدا زده می‌شود؛ اگر async شود و
+    کسی await نکند، هیچ هندلری ثبت نمی‌شود و ربات بالا می‌آید ولی کاملاً
+    ساکت می‌ماند (بدون هیچ خطایی در لاگ). تست tests/test_bot_dispatch.py
+    همین مسیر را چک می‌کند.
+    """
     """ثبت همه هندلرها با اولویت درست"""
 
     # ── 0. مسدودی (group=-1 → قبل از همه) ──

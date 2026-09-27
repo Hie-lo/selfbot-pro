@@ -119,9 +119,24 @@ def catch_all_in_main_group(app) -> list[str]:
 
 async def main():
     app = Application.builder().token("1:x").build()
-    await register_handlers(app)
+
+    # ⚠️ مهم: دقیقاً مثل main.py صدا زده می‌شود (بدون await).
+    # اگر register_handlers روزی async شود و main.py آن را await نکند،
+    # ربات بالا می‌آید ولی صفر هندلر دارد و کاملاً ساکت می‌ماند.
+    import inspect
+    _res = register_handlers(app)
+    if inspect.isawaitable(_res):
+        await _res
 
     results = []
+
+    # ۰) هندلرها واقعاً ثبت شده‌اند؟ (مسیر صدا زدن main.py)
+    total = sum(len(g) for g in app.handlers.values())
+    import inspect as _ins
+    results.append(("register_handlers همگام است (خطر «صفر هندلر»)",
+                    not _ins.iscoroutinefunction(register_handlers),
+                    "async است و main.py await نمی‌کند → ربات ساکت!"))
+    results.append(("با صدا زدن مثل main.py هندلر ثبت می‌شود", total > 0, f"total={total}"))
 
     # ۱) هیچ هندلر همه‌گیری نباید وسط گروه اصلی باشد
     bad = catch_all_in_main_group(app)
