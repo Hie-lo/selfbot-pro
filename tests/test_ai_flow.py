@@ -28,6 +28,39 @@ CALLS = []
 RESULTS = []
 
 
+class _FakeQ:
+    """CallbackQuery جعلی برای تست کلیک روی دکمه‌های پنل"""
+
+    def __init__(self, data):
+        self.data = data
+        self.edits = []
+        self.answers = []
+
+    async def answer(self, text=None, show_alert=False, **kw):
+        self.answers.append(text)
+
+    async def edit_message_text(self, text, reply_markup=None, parse_mode=None, **kw):
+        self.edits.append((text, str(reply_markup)))
+
+
+class _FakeCbUpdate:
+    def __init__(self, q):
+        self.callback_query = q
+
+
+class _FakeCtx:
+    def __init__(self):
+        self.user_data = {}
+
+
+async def _click_ai(user_id: int, data: str):
+    """شبیه‌سازی کلیک روی یک دکمه‌ی پنل AI (مسیر واقعی cb_ai)"""
+    from bot.ai_panel import cb_ai
+    q = _FakeQ(data)
+    handled = await cb_ai(_FakeCbUpdate(q), _FakeCtx(), user_id)
+    return handled, q
+
+
 def check(name: str, ok: bool, extra: str = ""):
     RESULTS.append((name, ok))
     print(("✅ " if ok else "❌ ") + name + (f"   {extra}" if extra else ""))
@@ -1218,6 +1251,49 @@ async def main():
     _prof_after = await db.get_ai_profile(uid, PEER)
     check("و همین چت را هم فعال می‌کند", bool(_prof_after and _prof_after.get("enabled")),
           str((_prof_after or {}).get("enabled")))
+
+    # ── ۱۵.۲۶) کلیک واقعی روی دکمه‌های مکث در پنل ──
+    # (فقط وجود دکمه کافی نیست؛ باید مطمئن شویم کلیک، واقعاً تنظیم را عوض می‌کند)
+    await _save_ai_config(uid, {"owner_idle_seconds": 90})
+    _handled, _q = await _click_ai(uid, "ai:idle_global")
+    check("کلیک «✋ مکث پیش‌فرض» مدیریت می‌شود", _handled is True)
+    _cfg_after = await _ai_config(uid)
+    check("و پیش‌فرض را عوض می‌کند",
+          int(_cfg_after.get("owner_idle_seconds", 90)) != 90,
+          str(_cfg_after.get("owner_idle_seconds")))
+    check("پیام تأیید به کاربر نشان داده می‌شود", bool(_q.answers), str(_q.answers)[:50])
+
+    await db.upsert_ai_profile(uid, 6363, target_name="مخاطب مکث", idle_seconds=-1)
+    _handled, _q = await _click_ai(uid, "ai:chat:6363")
+    check("صفحه‌ی مخاطب باز می‌شود و مکث را نشان می‌دهد",
+          _handled is True and any("مکث" in (t or "") for t, _ in _q.edits))
+    _handled, _q = await _click_ai(uid, "ai:idle:6363")
+    _prof_idle = await db.get_ai_profile(uid, 6363)
+    check("کلیک «✋ مکث» این مخاطب را جداگانه تنظیم می‌کند",
+          _handled is True and int(_prof_idle.get("idle_seconds", -2)) >= 0,
+          str(_prof_idle.get("idle_seconds")))
+    _eff3, _src3 = ar._idle_for(6363, _prof_idle)
+    check("و مکث مؤثرش از تنظیم اختصاصی می‌آید", "اختصاصی" in _src3, f"{_eff3} / {_src3}")
+    _eff4, _src4 = ar._idle_for(99999, {"idle_seconds": -1})
+    check("بقیه‌ی مخاطبین همچنان پیش‌فرض کلی دارند", "پیش‌فرض" in _src4,
+          f"{_eff4} / {_src4}")
+    await db.upsert_ai_profile(uid, 6363, idle_seconds=-1)
+    await _save_ai_config(uid, {"owner_idle_seconds": 90})
+    await ar._load_config()
+
+    # ── ۱۵.۲۷) لیست مخاطبین، مکث اختصاصی را نشان می‌دهد ──
+    from bot.ai_panel import contacts_kb
+    _contacts = [{"target_id": 555, "name": "با مکث", "msgs": 1, "facts": 0,
+                  "auto_mode": False, "enabled": True, "idle_seconds": 5},
+                 {"target_id": 556, "name": "بی‌مکث", "msgs": 1, "facts": 0,
+                  "auto_mode": False, "enabled": True, "idle_seconds": 0},
+                 {"target_id": 557, "name": "معمولی", "msgs": 1, "facts": 0,
+                  "auto_mode": False, "enabled": True, "idle_seconds": -1}]
+    _kb_contacts = str(contacts_kb(_contacts))
+    check("لیست مخاطبین مکث اختصاصی را نشان می‌دهد",
+          "✋5ث" in _kb_contacts and "بیمکث" in _kb_contacts, _kb_contacts[:120])
+    check("و برای مخاطب بدون تنظیم اختصاصی چیزی نشان نمی‌دهد",
+          "معمولی (1پیام/0فکت)" in _kb_contacts, _kb_contacts[-160:])
 
     # ── ۱۶) موتور: پاک‌سازی خروجی و رفتار ──
     check("مقدمه‌چینی حذف می‌شود", E.clean_reply("```\n(لبخند) سلام! چطوری؟\n```") == "سلام! چطوری؟")

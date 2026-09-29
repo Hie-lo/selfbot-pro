@@ -1250,6 +1250,7 @@ class AiReplyPlugin(BasePlugin):
         counts = await db.count_ai_memory(self.user_id, chat_id)
         rel = E.RELATIONSHIPS.get((profile or {}).get("relationship", "familiar"), {})
         providers = ai_providers.load_providers(self._cfg)
+        idle_now, idle_src = self._idle_for(chat_id, profile)
         await self._reply_notify(
             f"🧠 <b>وضعیت پاسخ هوشمند</b>\n"
             f"چت: <code>{chat_id}</code> — {'روشن ✅' if (profile or {}).get('enabled', False) else 'خاموش ❌'}\n"
@@ -1257,6 +1258,7 @@ class AiReplyPlugin(BasePlugin):
             f"مود: <b>{self._cfg.get('mode', 'عادی')}</b> · "
             f"سطح: <b>{E.TONE_LABELS.get(int(self._cfg.get('tone_level', 2)), '—')}</b>\n"
             f"ارسال: <b>{'خودکار' if (profile or {}).get('auto_mode') else 'پیشنهاد به من'}</b>\n"
+            f"✋ مکث: <b>{idle_now} ثانیه</b> ({self._esc(idle_src)})\n"
             f"حافظه: {counts['msg']} پیام · {counts['note']} خلاصه · {counts['fact']} فکت\n"
             f"سرویس: {', '.join(p.name for p in providers) or 'تنظیم نشده'}"
         )

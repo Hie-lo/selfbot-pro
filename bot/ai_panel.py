@@ -140,8 +140,14 @@ def contacts_kb(contacts: list[dict]) -> InlineKeyboardMarkup:
         # اگر نام ذخیره‌شده همان id عددی بود، یعنی اسم واقعی نداریم
         name = raw if raw and not raw.lstrip("-").isdigit() else f"بدون نام ({c['target_id']})"
         flags = ("⚡" if c.get("auto_mode") else "👤") + ("🟢" if c.get("enabled", True) else "🔴")
+        # مکث اختصاصی این مخاطب (اگر دارد) روی دکمه دیده شود
+        try:
+            own_idle = int(c.get("idle_seconds", -1))
+        except (TypeError, ValueError):
+            own_idle = -1
+        idle_badge = "" if own_idle < 0 else (" ✋بیمکث" if own_idle == 0 else f" ✋{own_idle}ث")
         rows.append([InlineKeyboardButton(
-            f"{flags} {name} ({c['msgs']}پیام/{c['facts']}فکت)",
+            f"{flags} {name} ({c['msgs']}پیام/{c['facts']}فکت){idle_badge}",
             callback_data=f"ai:chat:{c['target_id']}",
         )])
     rows.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="ai:menu")])
