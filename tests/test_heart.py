@@ -1,10 +1,17 @@
 """
-تست پلاگین قلب — باگ «همه‌ی انیمیشن‌ها یکسان» و پوشش ارقام فارسی.
+تست پلاگین قلب — قفل کردن انیمیشن‌های نسخه‌ی سالم.
+
+نسخه‌ی مرجع: کامیت e9397bf (آخرین کامیت قلب) — همان طراحی‌ای که در
+7c9cf24 تأیید شد: ‎.قلب3/.قلب5 بزرگ، ‎.قلب4 با فاصله، ‎.قلب2 حداکثر ۶ قلب.
+
+هر انیمیشن باید دقیقاً همان فریم‌های نسخه‌ی مرجع را تولید کند؛ اگر کسی
+(از جمله خودم) انیمیشن را عوض کند، «هش» زیر عوض می‌شود و تست می‌گیرد.
 
 اجرا:
     PYTHONPATH=. python tests/test_heart.py
 """
 import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -15,13 +22,27 @@ from core.digits import to_ascii   # noqa: E402
 
 PASS, FAIL = [], []
 
+# هشِ فریم‌های نسخه‌ی سالم (e9397bf) — از روی همان پیاده‌سازی گرفته شده
+GOLD_HASH = {
+    ".قلب": "cfc86c618668dc82",
+    ".قلب2": "4869c9fee0a6fee7",
+    ".قلب3": "d876f34a7fbd0a37",
+    ".قلب4": "5bf00f41b8772b4e",
+    ".قلب5": "8c4081e66ef13446",
+    ".قلب6": "7ecfd69ea552e0eb",
+}
+ZWNJ = "\u200c"
+
+
+def digest(frames) -> str:
+    return hashlib.sha256("\x00".join(frames).encode()).hexdigest()[:16]
+
 
 def check(name: str, ok: bool, extra: str = ""):
     (PASS if ok else FAIL).append(name)
     print(("✅ " if ok else "❌ ") + name + (f"   {extra}" if extra else ""))
 
 
-# ── ماکت‌های ساده (بدون تلگرام واقعی) ──
 class FakeMsg:
     def __init__(self, first):
         self.id = 1
@@ -63,35 +84,31 @@ class FakeClient:
         return m
 
     async def __call__(self, request):
-        # _already_seen → GetPeerDialogs؛ این‌جا همیشه «خوانده نشده»
+        # _already_seen → GetPeerDialogs؛ در تست «خوانده نشده»
         self.calls += 1
         raise RuntimeError("no network in test")
 
 
 async def run_cmd(plugin, client, cmd, **kw):
-    ev = FakeEvent(cmd, **kw)
     client.sent.clear()
-    await client.handlers["heart_cmd"](ev)
+    await client.handlers["heart_cmd"](FakeEvent(cmd, **kw))
     return client.sent[-1].frames if client.sent else []
 
 
 async def main():
-    print("=" * 60)
-    print("تست قلب: ارقام فارسی + تفاوت انیمیشن‌ها")
-    print("=" * 60)
+    print("=" * 66)
+    print("تست قلب — انیمیشن‌ها باید عیناً نسخه‌ی سالم (e9397bf) باشند")
+    print("=" * 66)
 
-    # ── ۱) خودِ تبدیل ارقام ──
+    # ── ۰) تبدیل ارقام ──
     check("ارقام فارسی تبدیل می‌شوند", to_ascii("۲۳۴۵۶") == "23456", to_ascii("۲۳۴۵۶"))
-    check("ارقام عربی هم تبدیل می‌شوند", to_ascii("٣٤٥") == "345", to_ascii("٣٤٥"))
-    check("متن غیرعددی دست‌نخورده می‌ماند", to_ascii(".قلب") == ".قلب")
+    check("ارقام عربی هم تبدیل می‌شوند", to_ascii("٣٤٥") == "345")
 
     H.SEEN_TIMEOUT = 0.4   # پیش‌فرض واقعی ۱۲ ساعت است؛ در تست کوتاه می‌کنیم
-
     client = FakeClient()
     plugin = H.HeartPlugin(client, user_id=1)
     await plugin.start()
 
-    # سرعت انیمیشن‌ها صفر تا تست طول نکشد
     orig_sleep = asyncio.sleep
 
     async def fast_sleep(t=0):
@@ -99,78 +116,74 @@ async def main():
 
     asyncio.sleep = fast_sleep
     try:
-        # ── ۲) باگ اصلی: .قلب۳ باید همان .قلب3 باشد (نه انیمیشن ۱) ──
-        base = await run_cmd(plugin, client, ".قلب")
-        three_fa = await run_cmd(plugin, client, ".قلب۳")
-        three_en = await run_cmd(plugin, client, ".قلب3")
-        check("«.قلب۳» و «.قلب3» یکی هستند", three_fa == three_en,
-              f"{len(three_fa)} ویرایش")
-        check("«.قلب۳» دیگر روی انیمیشن ۱ نمی‌افتد", three_fa != base,
-              f"۳: {len(three_fa)} ویرایش · ۱: {len(base)} ویرایش")
-
-        # فاصله هم مشکلی نباشد
-        check("«.قلب ۲» (با فاصله، رقم فارسی) هم کار می‌کند",
-              await run_cmd(plugin, client, ".قلب ۲") == await run_cmd(plugin, client, ".قلب2"))
-
-        # ── ۳) هر ۶ انیمیشن باید واقعاً فرق داشته باشند ──
+        # ── ۱) هش: انیمیشن‌ها قفل‌شده روی نسخه‌ی سالم ──
         seqs = {}
-        for cmd in [".قلب", ".قلب2", ".قلب3", ".قلب4", ".قلب5", ".قلب6"]:
-            seqs[cmd] = await run_cmd(plugin, client, cmd)
-        for cmd, fr in seqs.items():
-            check(f"{cmd}: انیمیشن واقعاً اجرا می‌شود",
-                  len(fr) >= 5 and len(set(fr)) >= 4,
-                  f"{len(fr)} ویرایش / {len(set(fr))} یکتا")
+        for cmd, want in GOLD_HASH.items():
+            frames = await run_cmd(plugin, client, cmd)
+            seqs[cmd] = frames
+            got = digest(frames)
+            check(f"{cmd} عیناً مثل نسخه‌ی سالم است", got == want,
+                  f"{len(frames)} فریم · {got}")
 
-        names = list(seqs)
-        dup = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]
+        # ── ۲) ارقام فارسی: همان انیمیشن، نه انیمیشن ۱ ──
+        for fa, en in [(".قلب۲", ".قلب2"), (".قلب۳", ".قلب3"),
+                       (".قلب۴", ".قلب4"), (".قلب۵", ".قلب5"),
+                       (".قلب۶", ".قلب6"), (".قلب ۳", ".قلب3")]:
+            check(f"«{fa}» = «{en}»",
+                  await run_cmd(plugin, client, fa) == seqs[en])
+
+        # ── ۳) طراحی هر انیمیشن (نسخه‌ی سالم) ──
+        p1, p2, p3, p4, p5, p6 = (seqs[c] for c in
+                                  [".قلب", ".قلب2", ".قلب3", ".قلب4", ".قلب5", ".قلب6"])
+
+        check("«.قلب»: تک‌قلب با فاصله‌های ۱ تا ۳ (۱۲ رنگ × ۳ دور)",
+              all(f.replace(ZWNJ, "").strip() in H.HEARTS for f in p1)
+              and len(p1) == 38
+              and {f.replace(ZWNJ, "").strip() for f in p1} == set(H.HEARTS),
+              f"{len({f.replace(ZWNJ, '').strip() for f in p1})} رنگ از {len(H.HEARTS)}")
+        check("«.قلب2»: همه‌ی مراحل کوچک (نیم‌فاصله) و حداکثر ۶ قلب",
+              all(ZWNJ in f for f in p2)
+              and max(f.count(ZWNJ) for f in p2) == H.GROW_MAX,
+              f"حداکثر قلب در فریم: {max(f.count(ZWNJ) for f in p2)}")
+        check("«.قلب3»: قلب بزرگ (بدون نیم‌فاصله) و رفت‌وبرگشت رنگ",
+              all(ZWNJ not in f for f in p3) and p3[:1] == ["🤍"]
+              and p3[len(H.HEARTS) + 14] in H.HEARTS,     # پیمایش معکوس
+              f"نمونه: {p3[:3]}")
+        check("«.قلب4»: حرکت با فاصله (۰ تا ۳ از دو طرف)",
+              all(ZWNJ not in f and f.strip() in H.HEARTS for f in p4)
+              and any(f.startswith("   ") for f in p4)
+              and any(f.startswith(" ") and not f.startswith("  ") for f in p4)
+              and p4[-1] == "  ❤️  ",
+              f"نمونه: {[repr(f) for f in p4[:3]]}")
+        check("«.قلب5»: فقط قلب‌های صورتی خاص",
+              {f for f in p5} <= set(H.HEARTS_PINK) and len(p5) == 25,
+              f"فریم‌ها: {sorted(set(p5))}")
+        check("«.قلب6»: پنجره‌ی ۳تایی بدون فاصله/نیم‌فاصله",
+              all(ZWNJ not in f for f in p6)
+              and max(len(f.replace("\ufe0f", "").replace("", "")) for f in p6) >= 3,
+              f"نمونه: {p6[:3]}")
+
+        # ── ۴) هیچ دو انیمیشنی مثل هم نیست ──
+        dup = [(a, b) for i, a in enumerate(seqs) for b in list(seqs)[i + 1:]
                if seqs[a] == seqs[b]]
-        check("هیچ دو انیمیشنی عین هم نیستند", not dup, str(dup))
+        check("هیچ دو انیمیشنی یکسان نیستند", not dup, str(dup))
 
-        # فریم اول هم باید متفاوت باشد تا کاربر اشتباه نکند
-        firsts = {c: seqs[c][0] for c in names if seqs[c]}
-        check("فریم اول انیمیشن‌ها یکسان نیست", len(set(firsts.values())) == len(firsts),
-              str({k: v for k, v in list(firsts.items())[:3]}))
-
-        # ── ۴) نشانه‌های ظاهری هر انیمیشن ──
-        zwnj, blank = "\u200c", "\u2800"
-        p3 = seqs[".قلب3"]
-        check("«.قلب3» ضربان دارد (بزرگ ↔ کوچک)", any(zwnj in f for f in p3),
-              "نمونه: " + repr([f for f in p3 if zwnj in f][:2]))
-        p4 = seqs[".قلب4"]
-        check("«.قلب4» حرکت دارد (فاصله‌ی بریل، نه فاصله‌ی معمولی)",
-              any(f.startswith(blank) for f in p4) and not any(f.startswith(" ") for f in p4),
-              "نمونه: " + repr([f for f in p4 if f.startswith(blank)][:2]))
-
-        # ── ۵) شماره‌ی نامعتبر → انیمیشن اصلی (بدون خطا) ──
-        check("«.قلب۹» با انیمیشن اصلی اجرا می‌شود (بدون خطا)",
-              await run_cmd(plugin, client, ".قلب۹") == base)
-
-        # ── ۶) پی‌وی با سین‌نشدن → انیمیشن شروع نشود (رفتار موردتأیید) ──
-        frames_priv = await run_cmd(plugin, client, ".قلب", chat_id=999, private=True)
-        check("پی‌ویِ سین‌نشده انیمیشن نمی‌شود (فقط فریم اول)", len(frames_priv) == 1,
-              f"{len(frames_priv)} فریم")
-
-        # ── ۷) پیام‌های ذخیره‌شده → فوری (قبلاً هیچ‌وقت انیمیشن نمی‌شد) ──
-        frames_saved = await run_cmd(plugin, client, ".قلب", chat_id=1, private=True)
-        check("«پیام‌های ذخیره‌شده» فوری انیمیشن می‌شود", len(frames_saved) > 5,
-              f"{len(frames_saved)} فریم")
-
-        # ── ۸) گروه → فوری ──
-        frames_group = await run_cmd(plugin, client, ".قلب2", chat_id=-100123, private=False)
-        check("گروه فوری انیمیشن می‌شود", len(frames_group) > 3, f"{len(frames_group)} فریم")
-
-        # ── ۹) پیام غیرخروجی (text خودم توسط خودم؟) نادیده گرفته شود ──
-        frames_in = await run_cmd(plugin, client, ".قلب", out=False)
-        check("پیام غیرخروجی دست‌کاری نمی‌شود", frames_in == [])
+        # ── ۵) رفتار پیوی/گروه/ذخیره‌شده ──
+        check("پی‌ویِ سین‌نشده انیمیشن نمی‌شود (فقط فریم اول)",
+              len(await run_cmd(plugin, client, ".قلب", chat_id=999, private=True)) == 1)
+        check("«پیام‌های ذخیره‌شده» فوری انیمیشن می‌شود (قبلاً هیچ‌وقت نمی‌شد)",
+              len(await run_cmd(plugin, client, ".قلب", chat_id=1, private=True)) > 5)
+        check("گروه فوری انیمیشن می‌شود",
+              len(await run_cmd(plugin, client, ".قلب2", chat_id=-100123, private=False)) > 3)
+        check("پیام غیرخروجی دست‌کاری نمی‌شود",
+              await run_cmd(plugin, client, ".قلب", out=False) == [])
     finally:
         asyncio.sleep = orig_sleep
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 66)
     print(f"نتیجه: {len(PASS)}/{len(PASS) + len(FAIL)} چک موفق")
-    if FAIL:
-        print("ناموفق‌ها:")
-        for f in FAIL:
-            print("  ❌", f)
+    for f in FAIL:
+        print("  ❌", f)
     return 1 if FAIL else 0
 
 
