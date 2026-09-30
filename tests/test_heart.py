@@ -22,14 +22,19 @@ from core.digits import to_ascii   # noqa: E402
 
 PASS, FAIL = [], []
 
-# هشِ فریم‌های نسخه‌ی سالم (e9397bf) — از روی همان پیاده‌سازی گرفته شده
+# هشِ فریم‌ها — «قفل» تا هیچ‌کس (از جمله خودم) بی‌سروصدا انیمیشن را عوض نکند.
+#   .قلب3 / .قلب4 / .قلب5 → عیناً نسخه‌ی سالم e9397bf (کاربر تأیید کرد)
+#   .قلب / .قلب2 / .قلب6   → طبق درخواست کاربر در راند ۳۲:
+#       • .قلب: پیام اول با قلب بزرگ «  ❤️  » (مثل نسخه‌ی قدیمی 5d754ec..252d270)
+#       • .قلب2: دیگر به قلب قرمز تنها برنمی‌گردد؛ روی آخرین فریم (۶ قلب) می‌ماند
+#       • .قلب6: مثل .قلب2 پیاده شد (کوچیک/نیم‌فاصله) با سقف ۳ قلب
 GOLD_HASH = {
-    ".قلب": "cfc86c618668dc82",
-    ".قلب2": "4869c9fee0a6fee7",
+    ".قلب": "fe31033b61682e88",
+    ".قلب2": "08cfe23c128b8290",
     ".قلب3": "d876f34a7fbd0a37",
     ".قلب4": "5bf00f41b8772b4e",
     ".قلب5": "8c4081e66ef13446",
-    ".قلب6": "7ecfd69ea552e0eb",
+    ".قلب6": "5b868c83025fda13",
 }
 ZWNJ = "\u200c"
 
@@ -97,7 +102,7 @@ async def run_cmd(plugin, client, cmd, **kw):
 
 async def main():
     print("=" * 66)
-    print("تست قلب — انیمیشن‌ها باید عیناً نسخه‌ی سالم (e9397bf) باشند")
+    print("تست قلب — انیمیشن‌ها قفل‌شده‌اند (هیچ‌کس عوضشان نکند)")
     print("=" * 66)
 
     # ── ۰) تبدیل ارقام ──
@@ -122,7 +127,7 @@ async def main():
             frames = await run_cmd(plugin, client, cmd)
             seqs[cmd] = frames
             got = digest(frames)
-            check(f"{cmd} عیناً مثل نسخه‌ی سالم است", got == want,
+            check(f"{cmd}: فریم‌ها قفل‌شده‌اند (هش ثابت)", got == want,
                   f"{len(frames)} فریم · {got}")
 
         # ── ۲) ارقام فارسی: همان انیمیشن، نه انیمیشن ۱ ──
@@ -141,10 +146,15 @@ async def main():
               and len(p1) == 38
               and {f.replace(ZWNJ, "").strip() for f in p1} == set(H.HEARTS),
               f"{len({f.replace(ZWNJ, '').strip() for f in p1})} رنگ از {len(H.HEARTS)}")
+        check("«.قلب»: پیام اول با قلب بزرگ باز می‌شود (مثل قدیم)",
+              p1[0] == f"  {H.HEARTS[0]}  ", repr(p1[0]))
         check("«.قلب2»: همه‌ی مراحل کوچک (نیم‌فاصله) و حداکثر ۶ قلب",
               all(ZWNJ in f for f in p2)
               and max(f.count(ZWNJ) for f in p2) == H.GROW_MAX,
               f"حداکثر قلب در فریم: {max(f.count(ZWNJ) for f in p2)}")
+        check("«.قلب2»: روی آخرین فریم (چند قلب) تمام می‌شود، نه یک قلب تنها",
+              p2[-1].count(ZWNJ) == H.GROW_MAX and len(p2) == 27,
+              f"فریم آخر: {p2[-1]!r}")
         check("«.قلب3»: قلب بزرگ (بدون نیم‌فاصله) و رفت‌وبرگشت رنگ",
               all(ZWNJ not in f for f in p3) and p3[:1] == ["🤍"]
               and p3[len(H.HEARTS) + 14] in H.HEARTS,     # پیمایش معکوس
@@ -158,10 +168,14 @@ async def main():
         check("«.قلب5»: فقط قلب‌های صورتی خاص",
               {f for f in p5} <= set(H.HEARTS_PINK) and len(p5) == 25,
               f"فریم‌ها: {sorted(set(p5))}")
-        check("«.قلب6»: پنجره‌ی ۳تایی بدون فاصله/نیم‌فاصله",
-              all(ZWNJ not in f for f in p6)
-              and max(len(f.replace("\ufe0f", "").replace("", "")) for f in p6) >= 3,
-              f"نمونه: {p6[:3]}")
+        check("«.قلب6»: مثل .قلب2 پیاده شده (کوچیک، نیم‌فاصله) با سقف ۳ قلب",
+              all(ZWNJ in f for f in p6)
+              and max(f.count(ZWNJ) for f in p6) == 3
+              and all(H.small(H._split(f.replace(ZWNJ, ""))) == f for f in p6),
+              f"سقف قلب: {max(f.count(ZWNJ) for f in p6)} · نمونه: {p6[:3]}")
+        check("«.قلب6»: روی آخرین فریم (۳ قلب) تمام می‌شود",
+              p6[-1].count(ZWNJ) == 3 and len(p6) == 24,
+              f"فریم آخر: {p6[-1]!r}")
 
         # ── ۴) هیچ دو انیمیشنی مثل هم نیست ──
         dup = [(a, b) for i, a in enumerate(seqs) for b in list(seqs)[i + 1:]
