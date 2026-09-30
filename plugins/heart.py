@@ -1,8 +1,8 @@
 """
 پلاگین قلب متحرک — چند انیمیشن
 کامندها: .قلب / .قلب 2 / .قلب2 / .قلب 3 ...
-• .قلب   : یک قلبِ بزرگ که رنگ عوض می‌کند — مثل .قلب3 ولی آرومتر و با
-           لیست ۱۲تاییِ HEARTS (بدون فاصله → قلب بزرگ و ثابت وسط)
+• .قلب   : زنجیره‌ای — ❤️ → ❤️🩷 → ❤️🩷🧡 → 🩷🧡💛 → … (۱ قلب، ۲ قلب،
+           بعد پنجره‌ی ۳تایی روی همین لیست؛ قلب‌ها بزرگ، بدون فاصله)
 • .قلب2  : زنجیره‌ای تا ۶ قلب و بعد جابه‌جا (🖤 → 🖤💜 → ... ) — همه کوچیک
            (نیم‌فاصله بعد از هر قلب) و در پایان روی همان آخرین فریم می‌ماند
 • .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
@@ -46,13 +46,30 @@ def small(hearts) -> str:
     return "".join(h + ZWNJ for h in hearts)
 
 
-def slide_frames(hearts, width=3, rounds=3):
-    """🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (چرخشی، چند دور)"""
+def chain_frames(hearts, window=3, rounds=2):
+    """
+    زنجیره‌ای — قلب‌ها از «خودِ همین لیست» و به‌همین ترتیب ساخته می‌شوند:
+
+        ❤️                (۱ قلب)
+        ❤️🩷              (۲ قلب)
+        ❤️🩷🧡            (۳ قلب — اول لیست)
+        🩷🧡💛            (پنجره یک قدم جلو رفت)
+        🧡💛💚
+        💛💚🩵  …          تا آخر لیست، بعد از اول شروع می‌کند
+
+    یعنی: اول ۱ و ۲ قلب، بعد یک پنجره‌ی `window`تایی که روی لیست می‌لغزد.
+    «rounds» = چند دور کل لیست را بچرخد.
+    """
     n = len(hearts)
-    frames = ["".join(hearts[:i]) for i in range(1, width)]
+    frames = ["".join(hearts[:i]) for i in range(1, window)]     # ۱، ۲، … (window-1)
     for start in range(n * rounds):
-        frames.append("".join(hearts[(start + k) % n] for k in range(width)))
+        frames.append("".join(hearts[(start + k) % n] for k in range(window)))
     return frames
+
+
+def slide_frames(hearts, width=3, rounds=3):
+    """نام قدیمی همین تابع — برای .قلب2 و .قلب6"""
+    return chain_frames(hearts, window=width, rounds=rounds)
 
 
 # ── .قلب بساز ──
@@ -321,7 +338,7 @@ def first_frame(num) -> str:
         return HEARTS_PINK[0]
     if num == "6":
         return HEARTS_SLIDE[0]            # بزرگ (بدون نیم‌فاصله)
-    return HEARTS[0]                      # .قلب: قلب بزرگ
+    return HEARTS[0]                      # .قلب: تک‌قلب بزرگ (ابتدای زنجیره)
 
 class HeartPlugin(BasePlugin):
     name = "heart_animation"
@@ -382,29 +399,22 @@ class HeartPlugin(BasePlugin):
                     pass
 
         async def anim_original(msg):
-            # .قلب — مثل .قلب3: یک قلبِ بزرگ که رنگ عوض می‌کند، فقط آرومتر و
-            # با لیست ۱۲تاییِ HEARTS (قلب3 از لیست ۱۶تاییِ خودش می‌رود).
-            # بدون فاصله و بدون نیم‌فاصله → قلب بزرگ می‌ماند و ثابت وسط
-            # می‌ایستد (در نسخه‌ی قبلی فاصله‌های ۱..۳ اضافه شده بود).
-            last = HEARTS[0]       # پیام اول همین است؛ ویرایش تکراری نکن
-            for _ in range(3):
-                for heart in HEARTS:
-                    if heart == last:
-                        continue        # فریم تکراری، ویرایش بی‌فایده است
-                    try:
-                        await msg.edit(heart)
-                        last = heart
-                        await asyncio.sleep(0.5)
-                    except MessageNotModifiedError:
-                        continue
-                    except FloodWaitError as e:
-                        await asyncio.sleep(e.seconds + 1)
-                    except Exception:
-                        return
-            try:
-                await msg.edit(HEARTS[0])      # پایان: قلب قرمز بزرگ
-            except Exception:
-                pass
+            # .قلب — از صفر بازنویسی شد (به‌درخواست کاربر):
+            #   ❤️ → ❤️🩷 → ❤️🩷🧡 → 🩷🧡💛 → 🧡💛💚 → 💛💚🩵 → ...
+            # ۱ قلب، بعد ۲ قلب، بعد پنجره‌ی ۳تایی که روی «همین لیست HEARTS»
+            # می‌لغزد. قلب‌ها بدون فاصله و نیم‌فاصله → بزرگ دیده می‌شوند.
+            # در پایان هم روی آخرین پنجره (۳ قلب) می‌ماند.
+            frames = chain_frames(HEARTS, window=3, rounds=2)
+            for fr in frames[1:]:        # فریم اول همان پیام اولیه است
+                try:
+                    await msg.edit(fr)
+                    await asyncio.sleep(0.6)
+                except MessageNotModifiedError:
+                    continue
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds + 1)
+                except Exception:
+                    return
 
         async def anim_grow(msg):
             # .قلب2 — زنجیره‌ای تا حداکثر ۶ قلب، بعد به ترتیب جابه‌جا میشن:
