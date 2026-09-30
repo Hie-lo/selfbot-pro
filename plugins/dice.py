@@ -8,11 +8,12 @@ import asyncio
 from telethon import events
 from telethon.tl.types import InputMediaDice
 from plugins.base import BasePlugin
+from core.digits import to_ascii
 
 
-def persian_to_english(text: str) -> str:
-    mapping = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-    return text.translate(mapping)
+# ارقام فارسی/عربی → انگلیسی (ماژول مشترک: core/digits.py)
+# این تابع برای سازگاری با کد قبلی نگه داشته شده؛ در کد جدید از to_ascii استفاده کنید
+persian_to_english = to_ascii
 
 
 class DicePlugin(BasePlugin):

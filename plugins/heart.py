@@ -1,18 +1,23 @@
 """
 پلاگین قلب متحرک — چند انیمیشن
 کامندها: .قلب / .قلب 2 / .قلب2 / .قلب 3 ...
-• .قلب   : انیمیشن ۱۲ قلب با حرکت (اصلی)
+
+عدد را با کیبورد فارسی هم می‌شود نوشت (‎.قلب۳ = ‎.قلب3) — core/digits.py
+قبل از پارس، ارقام فارسی/عربی را انگلیسی می‌کند. (باگی که همه‌ی انیمیشن‌ها را
+یکسان کرده بود: «۳» با «3» برابر نبود و بی‌صدا می‌افتاد روی انیمیشن ۱.)
+
+• .قلب1  : انیمیشن اصلی — تک‌قلب بزرگ، ۱۲ رنگ پشت‌سرهم
 • .قلب2  : زنجیره‌ای تا ۶ قلب و بعد جابه‌جا (🖤 → 🖤💜 → ... ) — همه کوچیک (نیم‌فاصله بعد از هر قلب)
-• .قلب3  : ضربان — تک‌قلب بزرگ با تغییر رنگ
-• .قلب4  : نفس — قلب با فاصله تپنده
+• .قلب3  : ضربان — قلب بین «بزرگ» و «کوچک» می‌زند (نیم‌فاصله = کوچک) با تغییر رنگ
+• .قلب4  : نفس — قلب کوچک با «فاصله‌ی بریل» جلو/عقب می‌رود (فاصله‌ی معمولی
+           دیده نمی‌شود چون تلگرام متن تک‌خطی را وسط‌چین می‌کند) + تغییر رنگ
 • .قلب5  : قلب‌های صورتیِ خاص دونه‌دونه عوض میشن (💕💞💓💗💘💝)
-• (غیرفعال) .قلب بساز        : قلب بزرگ — ردیف‌به‌ردیف از بالا، دور قرمز، داخل حلقه‌های رنگی متقارن (موج سریع)
-• .قلب بساز 2      : قلب یک‌رنگ؛ سریع ساخته میشه و کلش با هم همه‌ی رنگ‌ها رو می‌گیره
-• .قلب بساز 3      : دور قرمز، داخل سفید که دونه‌دونه صورتی میشه
-• .قلب بساز ‹رنگ›  : مثل 3 با رنگ دلخواه (قرمز، آبی، سبز، ...)
 • .قلب6  : پنجره‌ی ۳تایی — 🩷 → 🩷❤️ → 🩷❤️🧡 → ❤️🧡💛 → ... (بدون فاصله)
+• (غیرفعال) .قلب بساز / 2 / 3 / ‹رنگ› : قلب بزرگ ردیف‌به‌ردیف (پایین توضیح داده شده)
+
 اگه ریپلای باشه، روی همون پیام ریپلای میشه
 ویرایش فقط بعد از سین زدنِ طرف مقابل شروع میشه (فقط پی‌وی). اگه تا ۱۲ ساعت سین نزنه، انیمیشن اجرا نمیشه
+استثنا: «پیام‌های ذخیره‌شده» — آن‌جا فقط خودم می‌بینم، پس معطل «سین» نمی‌ماند.
 """
 import asyncio
 import time
@@ -20,6 +25,7 @@ from collections import deque
 from telethon import events, functions, types
 from telethon.errors import MessageNotModifiedError, FloodWaitError
 from plugins.base import BasePlugin
+from core.digits import to_ascii
 
 HEARTS = ["❤️", "🩷", "🧡", "💛", "💚", "🩵", "💙", "💜", "🖤", "🤍", "🩶", "💗"]
 # برای زنجیره‌ای — همون ترتیب مثال شما
@@ -281,7 +287,7 @@ async def play_frames(msg, frames, pacer: EditPacer) -> None:
 
 def build_frames(arg: str) -> list | None:
     """انتخاب انیمیشن از روی آرگومان؛ None = رنگ ناشناخته"""
-    arg = normalize_color(arg)
+    arg = normalize_color(to_ascii(arg))
     if arg in ("", "1"):
         return big_heart_frames()
     if arg == "2":
@@ -305,6 +311,7 @@ def _split(frame: str):
 
 def first_frame(num) -> str:
     """اولین فریم هر انیمیشن (هم پیام عادی هم ریپلای)"""
+    num = to_ascii(str(num)) if num else None
     if num == "2":
         return small(HEARTS_GROW[:1])
     if num == "3":
@@ -342,6 +349,11 @@ class HeartPlugin(BasePlugin):
             قبلاً بعد از ۱۲۰ ثانیه بدون سین هم خودش شروع می‌شد.
             """
             if not event.is_private:
+                return True
+            # پیام‌های ذخیره‌شده (چت با خودم): تنها بیننده خودم هستم و همان‌جا
+            # دارم نگاه می‌کنم؛ پس معطل «سین» نمی‌مانیم. (قبلاً این‌جا هیچ‌وقت
+            # انیمیشن اجرا نمی‌شد و کاربر فقط فریم اول را ثابت می‌دید.)
+            if event.chat_id == self.user_id:
                 return True
             loop = asyncio.get_running_loop()
             read_future = loop.create_future()
@@ -412,12 +424,14 @@ class HeartPlugin(BasePlugin):
                 pass
 
         async def anim_pulse(msg):
-            # .قلب3 — ضربان تک‌قلب با تغییر رنگ (بزرگ، بدون فاصله)
+            # .قلب3 — ضربان: هر رنگ دو بار می‌زند، «بزرگ» و بعد «کوچک»
+            # (نیم‌فاصله پیام را از حالت «فقط‌اموجی» درمی‌آورد → کوچک می‌شود؛
+            #  همین تفاوت اندازه است که ضربان را از بقیه‌ی انیمیشن‌ها جدا می‌کند)
             seq = ["🤍","🩶","🖤","💜","💙","🩵","💚","💛","🧡","🩷","❤️","💗","💓","💞","💕","💖"]
-            for _ in range(2):
-                for h in seq + seq[-2::-1]:   # رفت و برگشت (بدون تکرار قلب وسط)
+            for h in seq:
+                for form in (h, small([h])):     # بــزرگ → کوچک (ضربان)
                     try:
-                        await msg.edit(h)
+                        await msg.edit(form)
                         await asyncio.sleep(0.35)
                     except MessageNotModifiedError:
                         continue
@@ -431,15 +445,16 @@ class HeartPlugin(BasePlugin):
                 pass
 
         async def anim_breathe(msg):
-            # .قلب4 — نفس: قلب وسط با فاصله کم/زیاد
-            hearts = ["❤️","💜","💙","💚"]
-            for _ in range(3):
+            # .قلب4 — نفس: قلب کوچک با «فاصله‌ی بریل» جلو و عقب می‌رود.
+            # فاصله‌ی معمولی این‌جا بی‌فایده بود: تلگرام متن تک‌خطی را وسط‌چین
+            # می‌کند و فاصله‌ی دو طرف دیده نمی‌شود → انیمیشن شبیه تغییر رنگ
+            # می‌شد. «بریل خالی» (U+2800) عرض دارد و trim هم نمی‌شود.
+            hearts = ["❤️","💜","💙"]
+            for _ in range(2):
                 for h in hearts:
                     for pad in [0,1,2,3,2,1]:
                         try:
-                            spaces = " " * pad
-                            # اول و آخر با ZWNJ اگه تک بود — ولی اینجا همیشه با فاصله، نیازی نیست
-                            await msg.edit(f"{spaces}{h}{spaces}")
+                            await msg.edit(BLANK * pad + h + ZWNJ)
                             await asyncio.sleep(0.3)
                         except MessageNotModifiedError:
                             continue
@@ -448,7 +463,7 @@ class HeartPlugin(BasePlugin):
                         except Exception:
                             return
             try:
-                await msg.edit("  ❤️  ")
+                await msg.edit("❤️")
             except Exception:
                 pass
 
@@ -493,8 +508,8 @@ class HeartPlugin(BasePlugin):
         async def heart_cmd(event):
             if not event.out:
                 return
-            # پشتیبانی از .قلب / .قلب2 / .قلب 2 / .قلب 3 ...
-            text = (event.raw_text or "").strip()
+            # پشتیبانی از .قلب / .قلب2 / .قلب 2 / .قلب۳ ... (ارقام فارسی هم)
+            text = to_ascii((event.raw_text or "").strip())
             # text مثل ".قلب" یا ".قلب 2" یا ".قلب2"
             num = None
             # regex دستی بدون group capture پیچیده
@@ -537,7 +552,7 @@ class HeartPlugin(BasePlugin):
             # .قلب بساز / .قلب بساز 2 / .قلب بساز 3 / .قلب بساز ‹رنگ›
             if not event.out:
                 return
-            text = (event.raw_text or "").strip()
+            text = to_ascii((event.raw_text or "").strip())
             arg = text.split("بساز", 1)[1] if "بساز" in text else ""
             frames = build_frames(arg)
             if frames is None:
