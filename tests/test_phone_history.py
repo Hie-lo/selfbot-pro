@@ -710,6 +710,21 @@ async def main():
     check("برای پیام‌های پشت‌سرهم خودم هر بار نمی‌نویسد",
           len(rdb.remember_calls) == before_cnt, str(len(rdb.remember_calls)))
 
+    # ── ۱۷) حالت «پیدا نشد» ولی سابقه لینک دارد → لینک بازیابی بده ──
+    ndb = FakeDB()
+    ndb.records[(1, 31415)] = {"tg_id": 31415, "last_msg_id": 1747403,
+                               "first_name": None, "last_name": None,
+                               "kind": "pv"}
+    nc = FakeClient(user=None, raise_id=True, phone_users=[])
+    np_ = make_plugin(nc, ndb)
+    nr = await np_.lookup("31415")
+    check("پیدا نشد ولی لینک آخرین پیامش برگردانده می‌شود",
+          nr.get("ok") is False and (nr.get("msg_link") or "").endswith("1747403"),
+          str(nr.get("msg_link")))
+    from bot.user_panel import card_kb
+    kb_s = str(card_kb(None, None, nr.get("msg_link")))
+    check("و دکمه‌ی بازیابی روی کارت می‌آید", "1747403" in kb_s, kb_s[:80])
+
     print("\n" + "=" * 68)
     print(f"نتیجه: {len(PASS)}/{len(PASS) + len(FAIL)} چک موفق")
     for f in FAIL:

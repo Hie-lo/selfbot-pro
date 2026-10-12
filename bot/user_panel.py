@@ -139,8 +139,11 @@ def card_text(info: dict, note: str = "") -> str:
 
 # ═══════════ کیبوردها ═══════════
 
-def card_kb(uid: int | None, username: str | None = None) -> InlineKeyboardMarkup:
+def card_kb(uid: int | None, username: str | None = None,
+            msg_link: str | None = None) -> InlineKeyboardMarkup:
     rows = []
+    if msg_link:
+        rows.append([InlineKeyboardButton("↩️ باز کردن آخرین پیامش", url=msg_link)])
     if uid:
         rows.append([InlineKeyboardButton(
             "📂 آماده‌کردن چت (بدون ارسال پیام)", callback_data=f"u:draft:{uid}")])

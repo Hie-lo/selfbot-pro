@@ -523,8 +523,21 @@ class UserInfoPlugin(BasePlugin):
             if fb is not None and not fb.get("cooldown"):
                 note = (f"<br>🔎 به‌عنوان شماره هم امتحان شد: "
                         f"{_esc(fb.get('reason') or '')}")
+            # اگر در سابقه لینک آخرین پیامش را داریم، بده تا با یک ضربه در
+            # تلگرام خودت بازش کنی و با یک پیام، هویت‌اش دوباره ثبت شود.
+            link = None
+            try:
+                from database import db
+                rec_f = await db.get_user_record(self.user_id, uid)
+                if rec_f and rec_f.get("last_msg_id"):
+                    link = (f"tg://openmessage?user_id={uid}"
+                            f"&message_id={int(rec_f['last_msg_id'])}")
+            except Exception:
+                link = None
             return {
                 "ok": False,
+                "id": uid,
+                "msg_link": link,
                 "reason": "آیدی را نشناخت (نه در چت‌ها، نه مخاطبین، نه سابقه، نه نشست)",
                 "hint": "• اگر شماره‌اش را داری: <code>.کاربر 09121234567</code>\n"
                         "• اگر یوزرنیم دارد: <code>.کاربر @username</code>\n"
@@ -1047,7 +1060,7 @@ class UserInfoPlugin(BasePlugin):
         text = card_text(payload, note=note)
 
         uid = payload.get("id") if payload.get("ok") else None
-        kb = card_kb(uid, payload.get("username"))
+        kb = card_kb(uid, payload.get("username"), payload.get("msg_link"))
 
         if photo and self._owner_tg:
             if await runtime.notify_photo(self._owner_tg, photo, text, **{"reply_markup": kb}):
