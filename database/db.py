@@ -1110,12 +1110,15 @@ async def remember_user(user_id: int, tg_id: int, *, access_hash: int | None = N
                         first_name: str | None = None, last_name: str | None = None,
                         username: str | None = None, phone: str | None = None,
                         is_bot: bool | None = None, chat_id: int | None = None,
-                        source: str | None = None, last_text: str | None = None,
+                        source: str | None = None, kind: str | None = None,
+                        last_text: str | None = None, last_msg_id: int | None = None,
                         count_msg: bool = False) -> None:
     """
     ثبت/به‌روزرسانی سابقه‌ی یک کاربر.
     فیلدهای None دست‌نخورده می‌مانند (تا نامِ خوب با مقدار خالی خراب نشود).
     count_msg=True شمارنده‌ی پیام را یکی جلو می‌برد.
+    kind: «pv» (پیوی) یا «group» (گپ). آدم‌های گپ فقط وقتی که به تو ریپلای
+    زده باشند ثبت می‌شوند و بعد از چند روز خودکار پاک می‌شوند.
     """
     if not user_id or not tg_id:
         return
@@ -1125,8 +1128,8 @@ async def remember_user(user_id: int, tg_id: int, *, access_hash: int | None = N
             """
             INSERT INTO user_directory
                 (user_id, tg_id, access_hash, first_name, last_name, username,
-                 phone, is_bot, chat_id, source, last_text, msgs)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 phone, is_bot, chat_id, source, kind, last_text, last_msg_id, msgs)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (user_id, tg_id) DO UPDATE SET
                 access_hash = COALESCE(EXCLUDED.access_hash, user_directory.access_hash),
                 first_name  = COALESCE(EXCLUDED.first_name, user_directory.first_name),
@@ -1135,13 +1138,20 @@ async def remember_user(user_id: int, tg_id: int, *, access_hash: int | None = N
                 phone       = COALESCE(EXCLUDED.phone, user_directory.phone),
                 is_bot      = COALESCE(EXCLUDED.is_bot, user_directory.is_bot),
                 chat_id     = COALESCE(EXCLUDED.chat_id, user_directory.chat_id),
-                source      = COALESCE(EXCLUDED.source, user_directory.source),
+                -- «پیوی» همیشه از «گپ» بالاتر است: یک بار پیوی داده باشد،
+                -- دیگر با ریپلای‌های گپ از سابقه‌ی پیوی بیرون نمی‌افتد.
+                source      = CASE WHEN EXCLUDED.kind = 'pv' THEN EXCLUDED.source
+                                   ELSE COALESCE(user_directory.source, EXCLUDED.source) END,
+                kind        = CASE WHEN EXCLUDED.kind = 'pv' THEN 'pv'
+                                   ELSE COALESCE(user_directory.kind, EXCLUDED.kind) END,
                 last_text   = COALESCE(EXCLUDED.last_text, user_directory.last_text),
+                last_msg_id = COALESCE(EXCLUDED.last_msg_id, user_directory.last_msg_id),
                 msgs        = user_directory.msgs + EXCLUDED.msgs,
                 last_seen   = NOW()
             """,
             user_id, tg_id, access_hash, first_name, last_name, username,
-            phone, is_bot, chat_id, source, (last_text or None), 1 if count_msg else 0,
+            phone, is_bot, chat_id, source, kind, (last_text or None),
+            last_msg_id, 1 if count_msg else 0,
         )
 
 
@@ -1176,7 +1186,9 @@ async def find_user_record(user_id: int, *, username: str | None = None,
     return None
 
 
-async def search_directory(user_id: int, query: str, limit: int = 20) -> list[dict]:
+async def search_directory(user_id: int, query: str, limit: int = 20,
+                           kind: str | None = None,
+                           exclude_kind: str | None = None) -> list[dict]:
     """جست‌وجو در سابقه بر اساس نام/یوزرنیم/آیدی"""
     pool = get_pool()
     q = f"%{(query or '').strip()}%"
@@ -1186,29 +1198,86 @@ async def search_directory(user_id: int, query: str, limit: int = 20) -> list[di
         WHERE user_id = $1
           AND (first_name ILIKE $2 OR last_name ILIKE $2 OR username ILIKE $2
                OR CAST(tg_id AS TEXT) LIKE $2)
+          AND ($3::text IS NULL OR kind = $3)
+          AND ($4::text IS NULL OR kind IS DISTINCT FROM $4)
         ORDER BY last_seen DESC
-        LIMIT $3
+        LIMIT $5
         """,
-        user_id, q, limit,
+        user_id, q, kind, exclude_kind, int(limit),
     )
     return [dict(r) for r in rows]
 
 
-async def list_directory(user_id: int, limit: int = 30) -> list[dict]:
+async def list_directory(user_id: int, limit: int = 30,
+                         kind: str | None = None,
+                         exclude_kind: str | None = None) -> list[dict]:
     """آخرین کاربرانی که دیده‌ایم"""
     pool = get_pool()
     rows = await pool.fetch(
-        "SELECT * FROM user_directory WHERE user_id = $1 "
-        "ORDER BY last_seen DESC LIMIT $2",
-        user_id, limit,
+        """
+        SELECT * FROM user_directory
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR kind = $2)
+          AND ($3::text IS NULL OR kind IS DISTINCT FROM $3)
+        ORDER BY last_seen DESC
+        LIMIT $4
+        """,
+        user_id, kind, exclude_kind, int(limit),
     )
     return [dict(r) for r in rows]
 
 
-async def directory_count(user_id: int) -> int:
+async def directory_count(user_id: int, kind: str | None = None,
+                          exclude_kind: str | None = None) -> int:
     pool = get_pool()
     return int(await pool.fetchval(
-        "SELECT COUNT(*) FROM user_directory WHERE user_id = $1", user_id) or 0)
+        """
+        SELECT COUNT(*) FROM user_directory
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR kind = $2)
+          AND ($3::text IS NULL OR kind IS DISTINCT FROM $3)
+        """,
+        user_id, kind, exclude_kind) or 0)
+
+
+async def prune_directory(user_id: int, *, group_keep_days: int = 7,
+                          max_rows: int = 1500) -> dict:
+    """
+    کوتاه نگه‌داشتن سابقه (خواسته‌ی کاربر: «هر دفعه یک عالمه کاربر سرچ نشه»):
+      • آدم‌های «گپ» که چند روز است دیده نشده‌اند پاک می‌شوند.
+      • اگر کل رکوردها از سقف بگذرد، قدیمی‌ترین‌ها (اول گپ‌ها) می‌روند.
+    پیوی‌ها دست‌نخورده می‌مانند تا همیشه قابل پیدا شدن باشند.
+    """
+    pool = get_pool()
+    out = {"groups": 0, "capped": 0, "total": 0}
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            """
+            DELETE FROM user_directory
+            WHERE user_id = $1 AND kind = 'group'
+              AND last_seen < NOW() - make_interval(days => $2)
+            """,
+            user_id, int(group_keep_days),
+        )
+        out["groups"] = int(str(res).split()[-1] or 0)
+        total = int(await conn.fetchval(
+            "SELECT COUNT(*) FROM user_directory WHERE user_id = $1", user_id) or 0)
+        over = total - int(max_rows)
+        if over > 0:
+            res2 = await conn.execute(
+                """
+                DELETE FROM user_directory WHERE ctid IN (
+                    SELECT ctid FROM user_directory WHERE user_id = $1
+                    ORDER BY (kind = 'group') DESC, last_seen ASC
+                    LIMIT $2
+                )
+                """,
+                user_id, over,
+            )
+            out["capped"] = int(str(res2).split()[-1] or 0)
+        out["total"] = int(await conn.fetchval(
+            "SELECT COUNT(*) FROM user_directory WHERE user_id = $1", user_id) or 0)
+    return out
 
 
 async def get_ai_profile(user_id: int, target_id: int) -> dict | None:

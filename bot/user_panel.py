@@ -114,6 +114,15 @@ def card_text(info: dict, note: str = "") -> str:
     else:
         lines.append("💬 چت: <i>نامعلوم</i>")
 
+    if info.get("msgs"):
+        extra = f"📨 {int(info['msgs'])} پیام در سابقه"
+        if (info.get("kind") or "") == "group":
+            extra += " (از گپ‌ها — موقت)"
+        lines.append(extra)
+    if info.get("msg_link"):
+        lines.append(f"↩️ <a href=\"{_esc(info['msg_link'])}\">باز کردن آخرین "
+                     "پیامش</a>")
+
     if info.get("how"):
         lines.append(f"🔎 پیدا شد: <i>{_esc(info['how'])}</i>")
 
@@ -146,18 +155,23 @@ def card_kb(uid: int | None, username: str | None = None) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(rows)
 
 
-def anti_delete_kb(uid: int) -> InlineKeyboardMarkup:
+def anti_delete_kb(uid: int, link: str | None = None) -> InlineKeyboardMarkup:
     """
     دکمه‌های کارتِ «پیام حذف‌شده» — برای وقتی طرف چتش را پاک کرده و
     می‌خواهی دوباره پیام بدهی یا چت را بی‌صدا باز کنی.
+
+    link: لینک مستقیم همان پیام حذف‌شده (اگر داشته باشیم) — با یک ضربه
+    پیام در تلگرام باز می‌شود.
     """
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✉️ پیام بده", callback_data=f"u:msg:{uid}")],
-        [InlineKeyboardButton("📂 آماده‌کردن چت (بی‌صدا)",
-                              callback_data=f"u:draft:{uid}")],
-        [InlineKeyboardButton("🔗 لینک چت", callback_data=f"u:link:{uid}"),
-         InlineKeyboardButton("🗑 بستن", callback_data=f"u:close:{uid}")],
-    ])
+    rows = [[InlineKeyboardButton("✉️ پیام بده", callback_data=f"u:msg:{uid}")],
+            [InlineKeyboardButton("📂 آماده‌کردن چت (بی‌صدا)",
+                                  callback_data=f"u:draft:{uid}")]]
+    bottom = [InlineKeyboardButton("🔗 لینک چت", callback_data=f"u:link:{uid}"),
+              InlineKeyboardButton("🗑 بستن", callback_data=f"u:close:{uid}")]
+    rows.append(bottom)
+    if link:
+        rows.insert(0, [InlineKeyboardButton("↩️ باز کردن همان پیام", url=link)])
+    return InlineKeyboardMarkup(rows)
 
 
 def confirm_kb(uid: int) -> InlineKeyboardMarkup:

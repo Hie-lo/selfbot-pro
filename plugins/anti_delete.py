@@ -2,12 +2,17 @@
 پلاگین ضد حذف پیام — فقط PV
 """
 
+import time
 from datetime import datetime, timezone
 from telethon import events
 from plugins.base import BasePlugin
 from core import runtime
 from core.media import send_media_clean
 from database import db
+
+
+CARD_WINDOW = 180.0        # ثانیه؛ حذف‌های یک نفر در این بازه روی یک کارت جمع می‌شوند
+CARD_MAX_AGE = 48 * 3600   # حذف قدیمی‌تر از این، کارت دکمه‌دار نمی‌گیرد
 
 
 class AntiDeletePlugin(BasePlugin):
@@ -21,6 +26,52 @@ class AntiDeletePlugin(BasePlugin):
         self._max_cache_per_chat = 500
         self._max_chats = 50
         self._my_id = None
+        self._card_state: dict[int, dict] = {}   # uid → {msg_id, ts, count}
+        self._chat_meta: dict[int, dict] = {}    # chat_id → اطلاعات نام/یوزرنیم
+
+    async def _build_chat_meta(self, chat_id: int, sender_id, is_me: bool) -> dict:
+        """
+        اطلاعات نام/یوزرنیمِ یک چت را یک‌بار می‌گیرد و کش می‌کند.
+        در پیوی، «چت» و «فرستنده» یک نفرند، پس یک درخواست کافی است.
+        """
+        meta = {"sender_name": "شما" if is_me else "نامشخص",
+                "sender_username": None,
+                "sender_label": str(sender_id or ""),
+                "chat_name": str(chat_id), "chat_username": None,
+                "chat_label": str(chat_id)}
+        if is_me:
+            try:
+                me = await self.client.get_me()
+                uname = getattr(me, "username", None)
+                meta["sender_username"] = uname
+                meta["sender_label"] = f"@{uname} ({self._my_id})" if uname \
+                    else str(self._my_id)
+            except Exception:
+                pass
+            return meta
+
+        try:
+            ent = await self.client.get_entity(chat_id)
+        except Exception as e:                       # noqa: BLE001
+            self.logger.debug(f"Get chat entity failed: {e}")
+            return meta
+
+        first = getattr(ent, "first_name", "") or ""
+        last = getattr(ent, "last_name", "") or ""
+        title = getattr(ent, "title", "") or ""
+        name = (title.strip() or " ".join(x for x in (first, last) if x).strip()
+                or str(chat_id))
+        uname = getattr(ent, "username", None)
+        label = f"@{uname}" if uname else str(chat_id)
+        try:
+            from telethon import utils as _utils
+            label = label if uname else str(_utils.get_peer_id(ent))
+        except Exception:
+            pass
+        meta.update(sender_name=name, sender_username=uname,
+                    sender_label=(f"@{uname} ({sender_id})" if uname else str(sender_id)),
+                    chat_name=name, chat_username=uname, chat_label=label)
+        return meta
 
     async def start(self):
         me = await self.client.get_me()
@@ -52,62 +103,39 @@ class AntiDeletePlugin(BasePlugin):
             sender_id = msg.sender_id
             is_me = (sender_id == self._my_id)
 
-            # — اطلاعات فرستنده با جزئیات مثل فوروارد —
-            sender_name = "شما" if is_me else "نامشخص"
-            sender_username = None
-            sender_label = str(sender_id) if sender_id else ""
-            if not is_me and sender_id:
-                try:
-                    sender = await self.client.get_entity(sender_id)
-                    parts = [getattr(sender, "first_name", "") or "", getattr(sender, "last_name", "") or ""]
-                    sender_name = " ".join(p for p in parts if p).strip() or str(sender_id)
-                    sender_username = getattr(sender, "username", None)
-                    if sender_username:
-                        sender_label = f"@{sender_username} ({sender_id})"
-                    else:
-                        sender_label = str(sender_id)
-                except Exception as e:
-                    self.logger.debug(f"Get sender entity failed: {e}")
-                    sender_name = str(sender_id) if sender_id else "نامشخص"
-                    sender_label = str(sender_id) if sender_id else ""
-            elif is_me:
-                try:
-                    me = await self.client.get_me()
-                    sender_username = getattr(me, "username", None)
-                    if sender_username:
-                        sender_label = f"@{sender_username} ({self._my_id})"
-                    else:
-                        sender_label = str(self._my_id)
-                except Exception:
-                    sender_label = str(self._my_id)
+            # — اطلاعات فرستنده/چت —
+            # در پیوی، طرفِ چت همان فرستنده است؛ پس **یک** meta برای هر چت
+            # کش می‌شود و تا ۱۰ دقیقه دوباره از تلگرام خوانده نمی‌شود.
+            # (قبلاً برای هر پیام دو بار get_entity می‌زد → پرحجم و کند)
+            meta = self._chat_meta.get(chat_id)
+            now_mono = time.monotonic()
+            if meta is None or (now_mono - meta.get("ts", 0.0)) > 600:
+                meta = await self._build_chat_meta(chat_id, sender_id, is_me)
+                meta["ts"] = now_mono
+                self._chat_meta[chat_id] = meta
+                if len(self._chat_meta) > 200:
+                    for old_cid in sorted(self._chat_meta,
+                                          key=lambda k: self._chat_meta[k].get("ts", 0)
+                                          )[:100]:
+                        self._chat_meta.pop(old_cid, None)
 
-            # — اطلاعات چت با جزئیات —
-            chat_name = "نامشخص"
-            chat_username = None
-            chat_label = str(chat_id)
-            try:
-                chat_entity = await self.client.get_entity(chat_id)
-                if hasattr(chat_entity, "title") and chat_entity.title:
-                    chat_name = chat_entity.title.strip() or str(chat_id)
-                else:
-                    parts = [getattr(chat_entity, "first_name", "") or "", getattr(chat_entity, "last_name", "") or ""]
-                    chat_name = " ".join(p for p in parts if p).strip() or str(chat_id)
-                chat_username = getattr(chat_entity, "username", None)
-                if chat_username:
-                    chat_label = f"@{chat_username}"
-                else:
-                    # سعی کن peer_id را بگیری
-                    try:
-                        from telethon import utils as _utils
-                        chat_label = str(_utils.get_peer_id(chat_entity))
-                    except Exception:
-                        chat_label = str(chat_id)
-            except Exception as e:
-                self.logger.debug(f"Get chat entity failed: {e}")
-                chat_name = str(chat_id)
+            sender_name = meta["sender_name"]
+            sender_username = meta["sender_username"]
+            sender_label = meta["sender_label"]
+            chat_name = meta["chat_name"]
+            chat_username = meta["chat_username"]
+            chat_label = meta["chat_label"]
 
             now = datetime.now(timezone.utc)
             time_str = now.strftime("%Y/%m/%d %H:%M:%S")
+
+            # لینک مستقیم به همین پیام (برای «باز کردن گفتگو» با یک ضربه)
+            if chat_username:
+                msg_link = f"https://t.me/{chat_username}/{msg.id}"
+            else:
+                uid_for_link = abs(sender_id) if sender_id else abs(chat_id)
+                msg_link = (f"tg://openmessage?user_id={uid_for_link}"
+                            f"&message_id={msg.id}")
 
             self._cache[chat_id][msg.id] = {
                 "text": msg.text or "",
@@ -124,6 +152,7 @@ class AntiDeletePlugin(BasePlugin):
                 "time_str": time_str,
                 "date": msg.date,
                 "msg_id": msg.id,
+                "msg_link": msg_link,
             }
 
             self.logger.debug(f"Cached msg {msg.id} in chat {chat_id} ({chat_name})")
@@ -327,10 +356,18 @@ class AntiDeletePlugin(BasePlugin):
 
     async def _quick_actions(self, cached: dict) -> None:
         """
-        کارت دکمه‌دار در پیوی ربات کنترلی.
-        هدف: کاربری که چتش را پاک کرده، با یک ضربه دوباره قابل پیام‌دادن یا
-        باز کردن (پیش‌نویس) باشد — بدون نیاز به هیچ گروه/چت مشترک، چون از
-        سابقه‌ی خودمان (access_hash) استفاده می‌کند.
+        کارت دکمه‌دار در پیوی ربات کنترلی — برای این‌که کاربری که چتش را
+        پاک کرده، با یک ضربه دوباره قابل پیام‌دادن/باز کردن باشد.
+
+        بهینه (خواسته‌ی کاربر: «اگه هزار تا پیام پاک کنه، هزارتا ریکوئست؟»):
+          • پنجره‌ی تجمیع: تا ۳ دقیقه، همه‌ی حذف‌های یک نفر روی **همان
+            کارت** به‌روز می‌شوند (edit) — نه پیام جدید. پس ۱۰۰۰ حذف =
+            ۱ پیام + چند ویرایش.
+          • حذف‌های قدیمی‌تر از ۴۸ ساعت کارت نمی‌گیرند (گزارش در چت
+            ذخیره‌سازی هست، ولی مزاحم نمی‌شود).
+          • فیلدفیلد فقط پیوی.
+          • طرف در همان لحظه با «نام/یوزرنیم» در سابقه ثبت می‌شود تا
+            بعداً حتی با «@یوزرنیم» هم پیدایش کنی.
         """
         try:
             if runtime.bot is None:
@@ -344,6 +381,18 @@ class AntiDeletePlugin(BasePlugin):
             if not uid or uid == self._my_id:
                 return
 
+            # حذف‌های قدیمی ارزش ساختن کارت ندارند (سابقه‌شان هست)
+            d = cached.get("date")
+            if d is not None:
+                try:
+                    if d.tzinfo is None:
+                        d = d.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - d).total_seconds()
+                    if age > CARD_MAX_AGE:
+                        return
+                except Exception:
+                    pass
+
             # روشن/خاموش (پیش‌فرض: روشن) — «.کاربر دکمه خاموش»
             try:
                 rows = {f["feature_name"]: f for f in await db.get_features(self.user_id)}
@@ -352,6 +401,21 @@ class AntiDeletePlugin(BasePlugin):
                     return
             except Exception:
                 pass
+
+            # طرف را در سابقه ثبت کن (با یوزرنیم!) — «فقط پیوی»
+            # همین است که «دسترسی به کاربری که چت را پاک کرده» را آسان می‌کند.
+            try:
+                await db.remember_user(
+                    self.user_id, uid,
+                    first_name=(cached.get("sender_name")
+                                if not str(cached.get("sender_name") or "").isdigit()
+                                else None),
+                    username=cached.get("sender_username"),
+                    chat_id=chat_id, source="ضدحذف", kind="pv",
+                    last_msg_id=cached.get("msg_id"),
+                )
+            except Exception as e:                 # noqa: BLE001
+                self.logger.debug(f"remember on delete skipped: {e}")
 
             owner = await db.get_user_by_db_id(self.user_id)
             owner_tg = (owner or {}).get("telegram_id")
@@ -377,20 +441,49 @@ class AntiDeletePlugin(BasePlugin):
             if not name:
                 name = str(uid)
 
-            from bot.user_panel import anti_delete_kb
+            # ── تجمیع: کارت قبلی همین کاربر را ویرایش کن ──
+            now = time.monotonic()
+            state = self._card_state.get(uid)
+            fresh = state and (now - state.get("ts", 0) < CARD_WINDOW)
+            count = (state.get("count", 0) + 1) if fresh else 1
+            head = ("🗑 <b>یک پیام حذف شد</b>" if count == 1
+                    else f"🗑 <b>{count} پیام حذف شد</b>")
+            link = cached.get("msg_link") or ""
             text = (
-                "🗑 <b>پیام حذف شد</b>\n"
-                f"👤 {_esc(name)} · <code>{uid}</code>\n\n"
-                "می‌خواهی دوباره پیام بدهی یا چت را بی‌صدا باز کنی؟\n"
+                f"{head}\n"
+                f"👤 {_esc(name)} · <code>{uid}</code>\n"
+                + (f"🔗 <a href=\"{_esc(link)}\">باز کردن همان پیام</a>\n" if link else "")
+                + "\nمی‌خواهی دوباره پیام بدهی یا چت را بی‌صدا باز کنی؟\n"
                 "<i>«آماده‌کردن چت» فقط پیش‌نویس می‌سازد — طرف هیچ اطلاعی "
                 "نمی‌گیرد.</i>"
             )
-            await runtime.notify_user(owner_tg, text,
-                                      reply_markup=anti_delete_kb(uid),
-                                      disable_web_page_preview=True)
+
+            from bot.user_panel import anti_delete_kb
+            kb = anti_delete_kb(uid, link=cached.get("msg_link"))
+
+            if fresh and state.get("msg_id"):
+                ok = await runtime.edit_card(owner_tg, state["msg_id"], text,
+                                             reply_markup=kb,
+                                             disable_web_page_preview=True)
+                if ok:
+                    state.update(ts=now, count=count)
+                    self._card_state[uid] = state
+                    return
+
+            sent = await runtime.send_card(owner_tg, text, reply_markup=kb,
+                                           disable_web_page_preview=True)
+            mid = getattr(sent, "message_id", None)
+            self._card_state[uid] = {"msg_id": mid, "ts": now, "count": count}
+            # سقف حافظه: قدیمی‌ترین‌ها بیرون
+            if len(self._card_state) > 200:
+                for old_uid in sorted(self._card_state,
+                                      key=lambda k: self._card_state[k].get("ts", 0)
+                                      )[:100]:
+                    self._card_state.pop(old_uid, None)
         except Exception as e:                     # noqa: BLE001
             self.logger.debug(f"quick_actions skipped: {type(e).__name__}: {e}")
 
     async def stop(self):
         self._cache.clear()
+        self._card_state.clear()
         await super().stop()

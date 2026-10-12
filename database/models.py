@@ -366,11 +366,17 @@ CREATE TABLE IF NOT EXISTS user_directory (
     msgs INT DEFAULT 0,
     chat_id BIGINT,
     source TEXT,
+    kind TEXT DEFAULT 'pv',      -- pv = پیوی | group = گپ | search = جست‌وجو
     last_text TEXT,
+    last_msg_id BIGINT,
     first_seen TIMESTAMPTZ DEFAULT NOW(),
     last_seen TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_id, tg_id)
 );
+
+-- برای دیتابیس‌های قدیمی‌تر که این ستون‌ها را ندارند
+ALTER TABLE user_directory ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'pv';
+ALTER TABLE user_directory ADD COLUMN IF NOT EXISTS last_msg_id BIGINT;
 
 CREATE INDEX IF NOT EXISTS idx_user_directory_user ON user_directory(user_id, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_user_directory_name ON user_directory(user_id, first_name);

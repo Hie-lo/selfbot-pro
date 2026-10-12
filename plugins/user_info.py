@@ -50,8 +50,9 @@ from core.digits import to_ascii
 from plugins.base import BasePlugin
 
 MAX_TEXT = 4000
-DIALOG_SCAN_LIMIT = 400          # جست‌وجوی معمولی در چت‌ها
-DIALOG_SCAN_LIMIT_DEEP = 4000    # «کامل»
+DIALOG_SCAN_LIMIT = 200          # جست‌وجوی معمولی در چت‌ها (سبک)
+DIALOG_SCAN_LIMIT_DEEP = 2000    # فقط با «کامل» — و آن هم محدود
+DIALOG_SCAN_GAP = 3.0            # ثانیه؛ بین دو اسکن چت‌ها (ضد درخواست پشت‌سرهم)
 LOOKUP_COOLDOWN = 2.0            # ثانیه بین دو جست‌وجو (ضد FloodWait)
 # جست‌وجو با شماره: هرکدام یک ImportContacts است و تلگرام محدودش می‌کند
 PHONE_COOLDOWN = 45.0            # فاصله‌ی اجباری بین دو جست‌وجوی شماره
@@ -132,6 +133,8 @@ class UserInfoPlugin(BasePlugin):
             self._phone_count = 0
         if not hasattr(self, "_seen_recent"):
             self._seen_recent = {}
+        if not hasattr(self, "_my_msgs"):
+            self._my_msgs = {}
 
     async def start(self):
         self._ensure_state()
@@ -158,14 +161,25 @@ class UserInfoPlugin(BasePlugin):
         # هر پیام ورودی → یک سابقه‌ی ماندگار از فرستنده (نام، یوزرنیم،
         # access_hash). همین سابقه است که بعداً اجازه می‌دهد چتِ پاک‌شده را
         # دوباره باز کنیم یا بدون گروه مشترک پروفایل/پیام داشته باشیم.
-        self._add_handler(self._remember_event,
-                          events.NewMessage(incoming=True))
+        # پیام‌های خودم در گپ‌ها: فقط برای تشخیص «ریپلای به من» (بدون
+        # هیچ نوشتنی در دیتابیس؛ در حافظه و سبک).
+        self._add_handler(self._remember_own,
+                          events.NewMessage(outgoing=True))
         self.logger.info("loaded")
 
     # ═══════════ ثبت سابقه‌ی کاربران ═══════════
 
     async def _remember_event(self, event):
-        """هر پیام ورودی را در دایرکتوری ثبت می‌کند (بی‌صدا و کم‌هزینه)"""
+        """
+        سابقه‌گیری هوشمند و سبک.
+
+        قاعده‌ها (خواسته‌ی کاربر):
+          • پیوی: هر کسی که در پیوی پیام بدهد ثبت می‌شود — «همیشه».
+          • گپ/کانال: **فقط** کسی که در همان گپ به پیامِ خودت ریپلای زده باشد،
+            و ثبتش هم موقتی است (چند روز، با `prune_directory` پاک می‌شود).
+            این‌طور سابقه با هر پیام گپ‌ها شلوغ نمی‌شود.
+          • جای دیگر نه.
+        """
         try:
             if not event.message or getattr(event.message, "action", None):
                 return
@@ -180,6 +194,12 @@ class UserInfoPlugin(BasePlugin):
                 return
 
             uid = sender.id
+            is_pv = bool(getattr(event, "is_private", False))
+            if not is_pv:
+                # در گپ‌ها فقط ریپلای به پیام خودم ارزش ثبت دارد
+                if not self._is_reply_to_me(event):
+                    return
+
             now = time.monotonic()
             last = self._seen_recent.get(uid, 0.0)
             first_time = uid not in self._seen_recent
@@ -188,9 +208,11 @@ class UserInfoPlugin(BasePlugin):
                 cutoff = now - 3600
                 self._seen_recent = {k: v for k, v in self._seen_recent.items()
                                      if v >= cutoff}
-            # هر بار hash/نام تازه را می‌گیریم ولی متن و شمارنده حداکثر هر
-            # ۱۰ دقیقه یک‌بار نوشته می‌شود (کاهش فشار روی دیتابیس)
-            heavy = first_time or (now - last) > 600
+            # در گپ‌ها فقط هر ۳۰ دقیقه یک‌بار می‌نویسیم (سبک و کم‌هزینه)
+            gap = 600 if is_pv else 1800
+            heavy = first_time or (now - last) > gap
+            if not heavy and not is_pv:
+                return
 
             from database import db
             await db.remember_user(
@@ -201,13 +223,91 @@ class UserInfoPlugin(BasePlugin):
                 username=getattr(sender, "username", None),
                 phone=getattr(sender, "phone", None),
                 is_bot=bool(getattr(sender, "bot", False)),
-                chat_id=event.chat_id, source="پیام ورودی",
+                chat_id=event.chat_id,
+                source="پیام پیوی" if is_pv else "ریپلای در گپ",
+                kind="pv" if is_pv else "group",
+                last_msg_id=getattr(event.message, "id", None),
                 last_text=((event.raw_text or "")[:400] if heavy else None),
                 count_msg=heavy,
             )
             await self._fix_numeric_name(uid, sender)
         except Exception as e:              # noqa: BLE001
             self.logger.debug(f"remember failed: {type(e).__name__}: {e}")
+
+    async def _remember_own(self, event):
+        """
+        پیام‌های خودم:
+          • در **پیوی**: اگر طرف را در سابقه نداشته باشیم، همین‌جا با
+            access_hash ذخیره‌اش می‌کنیم. این «مسیر بازیابی» است: وقتی خودت
+            چتی را از لینک/جست‌وجوی تلگرام باز کردی و یک پیام فرستادی، از
+            همان لحظه ربات می‌تواند هر جا پیدایش کند.
+          • در **گپ**: فقط آیدی پیام‌هایم را نگه می‌دارم تا بفهمم کی به آن‌ها
+            ریپلای زده (بدون درخواست به تلگرام/دیتابیس).
+        """
+        try:
+            if not event.message or getattr(event.message, "action", None):
+                return
+
+            if getattr(event, "is_private", False):
+                peer = None
+                try:
+                    peer = await event.get_chat()
+                except Exception:
+                    peer = None
+                uid = getattr(peer, "id", None)
+                if not uid or getattr(peer, "bot", False):
+                    return
+                now = time.monotonic()
+                last = self._seen_recent.get(uid, 0.0)
+                if uid in self._seen_recent and (now - last) < 600:
+                    return                      # همین چند دقیقه پیش ثبتش کردیم
+                self._seen_recent[uid] = now
+                from database import db
+                await db.remember_user(
+                    self.user_id, uid,
+                    access_hash=getattr(peer, "access_hash", None),
+                    first_name=getattr(peer, "first_name", None),
+                    last_name=getattr(peer, "last_name", None),
+                    username=getattr(peer, "username", None),
+                    chat_id=event.chat_id, source="پیام خودم", kind="pv",
+                    last_msg_id=getattr(event.message, "id", None),
+                    count_msg=True,
+                )
+                return
+
+            cid = event.chat_id
+            bucket = self._my_msgs.setdefault(cid, {})
+            bucket[int(event.message.id)] = time.monotonic()
+            if len(bucket) > 300:
+                for mid in sorted(bucket, key=lambda k: bucket[k])[:-250]:
+                    bucket.pop(mid, None)
+            if len(self._my_msgs) > 300:
+                for cid_old in list(self._my_msgs)[:-250]:
+                    self._my_msgs.pop(cid_old, None)
+        except Exception:
+            pass
+
+    def _is_reply_to_me(self, event) -> bool:
+        """آیا این پیام، ریپلای به پیام خودم است؟"""
+        try:
+            reply = getattr(event.message, "reply_to", None)
+            if reply is None:
+                return False
+            from_id = None
+            for attr in ("reply_to_msg_id", "reply_to_top_id"):
+                if getattr(reply, attr, None):
+                    from_id = getattr(reply, attr)
+                    break
+            if not from_id:
+                return False
+            # در سابقه‌ی کش‌شده‌ی خودمان بگرد (بدون درخواست به تلگرام)
+            for msgs in self._my_msgs.values():
+                if from_id in msgs:
+                    return True
+            # ردیف‌های دیتابیس: پیام‌هایی که خودم در این گپ فرستاده‌ام
+            return False
+        except Exception:
+            return False
 
     async def _fix_numeric_name(self, uid: int, sender) -> None:
         """
@@ -398,6 +498,21 @@ class UserInfoPlugin(BasePlugin):
                 how = "چت‌هایت"
 
         if ent is None:
+            # تلاش آخر: اگر در سابقه یوزرنیم داریم، با همان امتحان کن
+            # (یوزرنیم همیشه جواب می‌دهد، حتی بدون access_hash).
+            try:
+                from database import db
+                rec_u = await db.get_user_record(self.user_id, uid)
+                uname = (rec_u or {}).get("username")
+                if uname:
+                    got_u = await self._lookup_username(uname)
+                    if got_u.get("ok"):
+                        got_u["how"] = "یوزرنیم (از سابقه)"
+                        return got_u
+            except Exception as e:                 # noqa: BLE001
+                self.logger.debug(f"username fallback failed: {e}")
+
+        if ent is None:
             self._last_fail[uid] = time.monotonic()
             # شاید شماره‌ی تلفن باشد که بدون صفر اول نوشته شده
             # (مثل 8904799614) — یک بار دیگر به‌عنوان شماره امتحان کن.
@@ -413,7 +528,10 @@ class UserInfoPlugin(BasePlugin):
                 "reason": "آیدی را نشناخت (نه در چت‌ها، نه مخاطبین، نه سابقه، نه نشست)",
                 "hint": "• اگر شماره‌اش را داری: <code>.کاربر 09121234567</code>\n"
                         "• اگر یوزرنیم دارد: <code>.کاربر @username</code>\n"
-                        "• اگر تا حالا به تو پیام داده، با «.کاربر سابقه» پیدایش کن."
+                        "• اگر تا حالا به تو پیام داده، با «.کاربر سابقه» پیدایش کن.\n"
+                        "• اگر هیچ‌کدام نشد: روی لینک چت (یا کارت ضدحذف) بزن و "
+                        "در تلگرام خودت یک پیام کوتاه برایش بفرست — از همان "
+                        "لحظه ربات هویت او را ذخیره می‌کند و دیگر گم نمی‌شود."
                         + note,
             }
 
@@ -446,12 +564,27 @@ class UserInfoPlugin(BasePlugin):
 
     async def _phone_fallback(self, raw: str) -> dict | None:
         """
-        وقتی عددی نه آیدی بوده و نه با صفر/+ نوشته شده، ممکن است شماره‌ی
-        تلفن باشد. فقط برای عددهای ۹ تا ۱۳ رقمی و یک‌بار (با سهمیه) امتحان
-        می‌شود تا سهمیه‌ی روزانه بی‌دلیل مصرف نشود.
+        وقتی عددی به‌عنوان آیدی پیدا نشد، ممکن است شماره‌ی تلفن باشد که
+        بدون صفر/+ نوشته شده. اما این کار سهمیه‌ی روزانه (۲۵ بار) را مصرف
+        می‌کند، پس فقط وقتی امتحان می‌شود که شکل شماره‌ی محلی داشته باشد:
+
+          • ۱۰ رقم که با ۹ شروع شود → موبایل بدون صفر (‎9121234567)
+          • ۱۰ رقم که با ۸ شروع شود → تلفن ثابت بدون صفر (‎8904799614)
+          • ۱۲ رقم که با ۹۸ شروع شود
+          • ۱۱ رقم که با ۰ شروع شود
+
+        آیدی‌های واقعی تلگرام امروزی ۹ رقمی‌اند و با ۵/۶/۷ شروع می‌شوند؛
+        پس با این شرط، دیگر هیچ آیدی‌ای بی‌دلیل «مخاطب موقت» نمی‌سازد.
         """
         digits = (raw or "").replace(" ", "").replace("-", "")
-        if not digits.isdigit() or not (9 <= len(digits) <= 13):
+        if not digits.isdigit():
+            return None
+        looks = (
+            (len(digits) == 10 and digits[0] in "89")
+            or (len(digits) == 11 and digits[0] == "0")
+            or (len(digits) == 12 and digits.startswith("98"))
+        )
+        if not looks:
             return None
         return await self.lookup_phone(digits)
 
@@ -541,14 +674,19 @@ class UserInfoPlugin(BasePlugin):
         ent = None
         if hash_:
             try:
+                # مستقیم InputPeerUser: بدون هیچ جست‌وجوی اضافه، حتی وقتی
+                # هیچ چت/گروه مشترکی نیست (کلید حل مشکل کاربر).
                 peer = tl.InputPeerUser(user_id=uid, access_hash=int(hash_))
                 ent = await self.client.get_entity(peer)
+                if ent is not None:
+                    self._known[uid] = ent
             except Exception as e:                # noqa: BLE001
                 self.logger.debug(f"hash lookup failed for {uid}: "
                                   f"{type(e).__name__}: {e}")
                 ent = None
         if ent is None:
-            ent = await self._find_in_dialogs(uid, True)
+            # ناموفق بود → جست‌وجوی محدود در چت‌ها (نه اسکن کامل)
+            ent = await self._find_in_dialogs(uid, False)
         if ent is None:
             return {"ok": False, "reason": "سابقه دارد ولی تلگرام قبولش نکرد"}
 
@@ -557,6 +695,11 @@ class UserInfoPlugin(BasePlugin):
             # فیلدهای سابقه را پر کن (اگر تلگرام نداشت)
             got["phone"] = got.get("phone") or rec.get("phone")
             got["msgs"] = rec.get("msgs")
+            got["kind"] = rec.get("kind")
+            # لینک مستقیم پریدن به همان آخرین پیام
+            if rec.get("last_msg_id"):
+                got["msg_link"] = (f"tg://openmessage?user_id={uid}"
+                                   f"&message_id={int(rec['last_msg_id'])}")
             got["last_seen"] = got.get("last_seen") or (
                 rec["last_seen"].strftime("%Y-%m-%d %H:%M") if rec.get("last_seen") else None)
             got["from_history"] = True
@@ -565,15 +708,36 @@ class UserInfoPlugin(BasePlugin):
     async def history_card(self, query: str = "") -> str:
         """کارت «سابقه» — کسانی که دیده‌ایم (برای وقتی چت پاک شده)"""
         from database import db
+        # سابقه را کوتاه نگه دار (خواسته‌ی کاربر: «هر دفعه یک عالمه کاربر
+        # سرچ نشه و تاریخچه خیلی عقب نره»): آدم‌های گپِ قدیمی پاک می‌شوند.
+        try:
+            await db.prune_directory(self.user_id)
+        except Exception as e:                 # noqa: BLE001
+            self.logger.debug(f"prune skipped: {e}")
+
+        # فقط پیوی‌ها (و کسانی که خودت جست‌وجو کرده‌ای). آدم‌های گپ این‌جا
+        # نمی‌آیند تا سابقه شلوغ نشود — خواسته‌ی صریح کاربر.
         if query:
-            rows = await db.search_directory(self.user_id, query, limit=20)
+            rows = await db.search_directory(self.user_id, query, limit=20,
+                                             exclude_kind="group")
         else:
-            rows = await db.list_directory(self.user_id, limit=25)
+            rows = await db.list_directory(self.user_id, limit=25,
+                                           exclude_kind="group")
+        groups = 0
+        try:
+            groups = await db.directory_count(self.user_id, kind="group")
+        except Exception:
+            groups = 0
         if not rows:
-            return ("📇 <b>سابقه خالی است</b>\n\nاز این به بعد هر کسی که به تو "
-                    "پیام بدهد یا هر کاربری که خودت جست‌وجو کنی، این‌جا ذخیره "
-                    "می‌شود تا حتی بعد از پاک کردن چت هم بتوانی پیدایش کنی.")
-        total = await db.directory_count(self.user_id)
+            extra = ""
+            if groups:
+                extra = (f"\n\n({groups} نفر هم در گپ‌ها به تو ریپلای زده‌اند که "
+                         "به‌صورت موقت نگه داشته می‌شوند و این‌جا نمی‌آیند.)")
+            return ("📇 <b>سابقه خالی است</b>\n\nاز این به بعد هر کسی که در "
+                    "<b>پیوی</b> به تو پیام بدهد یا هر کاربری که خودت جست‌وجو "
+                    "کنی، این‌جا ذخیره می‌شود تا حتی بعد از پاک کردن چت هم "
+                    "بتوانی پیدایش کنی." + extra)
+        total = await db.directory_count(self.user_id, exclude_kind="group")
         lines = [f"📇 <b>سابقه‌ی کاربران</b> (نمایش {len(rows)} از {total})", ""]
         for r in rows:
             name = " ".join(x for x in (r.get("first_name"), r.get("last_name")) if x) \
@@ -589,6 +753,9 @@ class UserInfoPlugin(BasePlugin):
             bits.append(f"🕐 {_esc(str(r.get('last_seen') or '')[:16])}")
             lines.append(" • " + " · ".join(bits))
         lines += ["", "برای کارت کامل هر نفر: <code>.کاربر ‹آیدی›</code>"]
+        if groups:
+            lines.append(f"<i>({groups} نفر از گپ‌ها موقتاً نگه داشته شده‌اند "
+                         "و این‌جا نمایش داده نمی‌شوند.)</i>")
         return "\n".join(lines)
 
     async def _lookup_username(self, username: str) -> dict:
@@ -617,6 +784,12 @@ class UserInfoPlugin(BasePlugin):
         return None
 
     async def _find_in_dialogs(self, uid: int, deep: bool = False):
+        # گارد نرخ: اگر همین چند لحظه پیش اسکن کرده‌ایم، دوباره نزن
+        now = time.monotonic()
+        if not deep and (now - getattr(self, "_last_scan", 0.0)) < DIALOG_SCAN_GAP:
+            self.logger.debug("dialog scan skipped (rate guard)")
+            return None
+        self._last_scan = now
         limit = DIALOG_SCAN_LIMIT_DEEP if deep else DIALOG_SCAN_LIMIT
         try:
             async for dialog in self.client.iter_dialogs(limit=limit,
@@ -738,6 +911,7 @@ class UserInfoPlugin(BasePlugin):
                 username=getattr(ent, "username", None),
                 phone=info.get("phone"), is_bot=bool(info.get("bot")),
                 source=(info.get("how") or "جست‌وجو")[:60],
+                kind="search",
             )
         except Exception as e:                    # noqa: BLE001
             self.logger.debug(f"directory write skipped: {e}")

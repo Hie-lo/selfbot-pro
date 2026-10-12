@@ -36,6 +36,36 @@ async def notify_photo(telegram_id: int, photo: bytes, caption: str = "",
         return False
 
 
+async def send_card(telegram_id: int, text: str, **kwargs):
+    """
+    مثل notify_user ولی «پیام ارسال‌شده» را برمی‌گرداند تا بعداً بتوان
+    همان را ویرایش کرد (ویرایش = هیچ درخواست/اعلان جدیدی نمی‌سازد).
+    """
+    if bot is None or not telegram_id:
+        return None
+    try:
+        kwargs.setdefault("parse_mode", "HTML")
+        return await bot.send_message(chat_id=telegram_id, text=text, **kwargs)
+    except Exception as e:
+        logger.debug(f"send_card {telegram_id} skipped: {e}")
+        return None
+
+
+async def edit_card(telegram_id: int, message_id: int, text: str,
+                    **kwargs) -> bool:
+    """ویرایش کارت قبلی (بدون ساخت پیام/اعلان جدید)"""
+    if bot is None or not telegram_id or not message_id:
+        return False
+    try:
+        kwargs.setdefault("parse_mode", "HTML")
+        await bot.edit_message_text(chat_id=telegram_id, message_id=message_id,
+                                    text=text, **kwargs)
+        return True
+    except Exception as e:
+        logger.debug(f"edit_card {telegram_id}/{message_id} skipped: {e}")
+        return False
+
+
 async def notify_user(telegram_id: int, text: str, **kwargs) -> bool:
     """ارسال پیام از طرف ربات کنترلی به کاربر (بی‌صدا در صورت خطا)"""
     if bot is None or not telegram_id:

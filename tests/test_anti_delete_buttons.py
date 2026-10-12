@@ -36,13 +36,25 @@ def check(name, ok, extra=""):
     print(("✅ " if ok else "❌ ") + name + (f"   {extra}" if extra else ""))
 
 
+class FakeSentMsg:
+    def __init__(self, mid):
+        self.message_id = mid
+
+
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.edits = []
+        self._mid = 100
 
     async def send_message(self, chat_id=None, text=None, **kw):
+        self._mid += 1
         self.sent.append((chat_id, text, kw.get("reply_markup")))
-        return None
+        return FakeSentMsg(self._mid)
+
+    async def edit_message_text(self, chat_id=None, message_id=None, text=None, **kw):
+        self.edits.append((chat_id, message_id, text, kw.get("reply_markup")))
+        return FakeSentMsg(message_id)
 
 
 class FakeClient:
@@ -75,17 +87,29 @@ async def main():
     async def owner(uid):
         return {"telegram_id": 42}
 
+    remembered = []
+
+    async def remember(user_id, tg_id, **kw):
+        remembered.append((tg_id, kw))
+
     dbmod.get_user_by_db_id = owner               # قبل از استفاده
     dbmod.get_features = features_on
+    dbmod.remember_user = remember
 
     bot = FakeBot()
     runtime.bot = bot
     plugin = AntiDeletePlugin(FakeClient(), 1)
     plugin._my_id = 999
 
+    def fresh(**extra):
+        """پیام تازه‌حذف‌شده (چند لحظه پیش)"""
+        from datetime import datetime, timezone
+        d = dict({"chat_id": 555123, "chat_name": "علی", "sender_name": "علی",
+                  "msg_id": 700, "date": datetime.now(timezone.utc)}, **extra)
+        return d
+
     # ۱) پیوی → کارت با دکمه‌ها
-    await plugin._quick_actions({"chat_id": 555123, "chat_name": "علی",
-                                 "sender_name": "علی"})
+    await plugin._quick_actions(fresh())
     check("کارت ضدحذف برای پیوی فرستاده می‌شود", len(bot.sent) == 1,
           f"sent={len(bot.sent)}")
     if bot.sent:
@@ -101,25 +125,26 @@ async def main():
 
     # ۲) گروه/کانال → هیچ کارتی (دکمه لازم نیست)
     bot.sent.clear()
-    await plugin._quick_actions({"chat_id": -100123456789, "chat_name": "گروه"})
+    bot.edits.clear()
+    await plugin._quick_actions(fresh(chat_id=-100123456789, chat_name="گروه"))
     check("برای سوپرگروه کارت نمی‌فرستد", not bot.sent)
-    await plugin._quick_actions({"chat_id": -12345, "chat_name": "گروه قدیمی"})
+    await plugin._quick_actions(fresh(chat_id=-12345, chat_name="گروه قدیمی"))
     check("برای گروه معمولی هم کارت نمی‌فرستد", not bot.sent)
 
     # ۳) پیام خودم (به خودم) → نه
-    await plugin._quick_actions({"chat_id": 999, "chat_name": "خودم"})
+    await plugin._quick_actions(fresh(chat_id=999, chat_name="خودم"))
     check("برای پیام خودم کارت نمی‌فرستد", not bot.sent)
 
     # ۴) خاموش با «.کاربر دکمه خاموش»
     dbmod.get_features = features_off
-    await plugin._quick_actions({"chat_id": 555, "chat_name": "x"})
+    await plugin._quick_actions(fresh(chat_id=555, chat_name="x"))
     check("با خاموش بودن دکمه‌ها کارت نمی‌آید", not bot.sent)
     dbmod.get_features = features_on
 
     # ۵) بدون ربات کنترلی → خطا نمی‌دهد
     runtime.bot = None
     try:
-        await plugin._quick_actions({"chat_id": 555, "chat_name": "x"})
+        await plugin._quick_actions(fresh(chat_id=555, chat_name="x"))
         check("بدون ربات کنترلی خطا نمی‌دهد", True)
     except Exception as e:                        # noqa: BLE001
         check("بدون ربات کنترلی خطا نمی‌دهد", False, f"{type(e).__name__}: {e}")
@@ -129,12 +154,62 @@ async def main():
     import core.plugin_manager as pm
     pm._active_plugins[1] = {"user_info": FakeUserInfo()}
     bot.sent.clear()
-    await plugin._quick_actions({"chat_id": 777, "chat_name": "777",
-                                 "sender_name": "777"})
+    bot.edits.clear()
+    plugin._card_state.clear()
+    await plugin._quick_actions(fresh(chat_id=777, chat_name="777",
+                                      sender_name="777"))
     check("اگر کش فقط آیدی داشت، نام از سابقه می‌آید",
           bool(bot.sent) and "سارا محمدی" in bot.sent[-1][1],
           (bot.sent[-1][1][:70] if bot.sent else "نرفت"))
     pm._active_plugins.pop(1, None)
+
+    # ── ۷) بهینه: ۱۰۰۰ حذف = یک کارت (ویرایش به‌جای پیام جدید) ──
+    plugin._card_state.clear()
+    bot.sent.clear()
+    bot.edits.clear()
+    for i in range(5):
+        await plugin._quick_actions(fresh(chat_id=888001, chat_name="مهسا",
+                                          msg_id=800 + i))
+    check("۵ پیام حذف از یک نفر → فقط یک کارت فرستاده می‌شود",
+          len(bot.sent) == 1, f"sent={len(bot.sent)} edits={len(bot.edits)}")
+    check("بقیه روی همان کارت به‌روز می‌شوند (نه پیام جدید)",
+          len(bot.edits) == 4, f"edits={len(bot.edits)}")
+    check("شمارش روی کارت هست", bool(bot.edits) and "5 پیام حذف شد" 
+          in bot.edits[-1][2], (bot.edits[-1][2][:60] if bot.edits else "—"))
+    check("دکمه‌ها روی کارتِ به‌روزشده هم هستند",
+          bool(bot.edits) and "u:msg:888001" in str(bot.edits[-1][3]))
+
+    # ۷ب) بعد از پنجره‌ی تجمیع → کارت تازه
+    plugin._card_state[888001]["ts"] -= 10_000
+    await plugin._quick_actions(fresh(chat_id=888001, chat_name="مهسا"))
+    check("بعد از تمام‌شدن پنجره، کارت تازه ساخته می‌شود",
+          len(bot.sent) == 2, f"sent={len(bot.sent)}")
+
+    # ── ۸) حذف‌های قدیمی کارت نمی‌گیرند ──
+    from datetime import datetime, timezone, timedelta
+    plugin._card_state.clear()
+    bot.sent.clear()
+    bot.edits.clear()
+    await plugin._quick_actions(fresh(chat_id=999002,
+        date=datetime.now(timezone.utc) - timedelta(days=10)))
+    check("حذف قدیمی (۱۰ روز پیش) کارت دکمه‌دار نمی‌گیرد", not bot.sent)
+
+    # ── ۹) طرفِ حذف‌کننده در سابقه ثبت می‌شود (با یوزرنیم) ──
+    remembered.clear()
+    plugin._card_state.clear()
+    await plugin._quick_actions(fresh(chat_id=888003, chat_name="نیما",
+                                      sender_username="nima",
+                                      msg_link="tg://openmessage?user_id=888003"))
+    check("طرفِ حذف در سابقه ثبت می‌شود", any(t == 888003 for t, _ in remembered),
+          str(remembered))
+    kw = dict(remembered[-1][1]) if remembered else {}
+    check("یوزرنیم در سابقه ذخیره می‌شود (کلید پیدا کردن بعدی)",
+          kw.get("username") == "nima", str(kw.get("username")))
+    check("نوع سابقه «pv» است", kw.get("kind") == "pv", str(kw.get("kind")))
+    check("آیدی پیام ذخیره می‌شود (برای لینک)", kw.get("last_msg_id"),
+          str(kw.get("last_msg_id")))
+    check("دکمه‌ی «باز کردن همان پیام» روی کارت هست",
+          bool(bot.sent) and "888003" in str(bot.sent[-1][2]))
 
     print("\n" + "=" * 60)
     print(f"نتیجه: {len(PASS)}/{len(PASS) + len(FAIL)} چک موفق")

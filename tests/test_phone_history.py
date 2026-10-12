@@ -69,9 +69,28 @@ class FakeDB:
                 continue
             if k == "last_text" and v is None:
                 continue
+            if k == "kind" and v is not None:
+                # «پیوی» از «گپ» بالاتر است
+                if v == "pv" or rec.get("kind") is None:
+                    rec["kind"] = v
+                continue
             if v is not None:
                 rec[k] = v
         rec["last_seen"] = "2026-10-13 10:00"
+        rec["_ts"] = time.time()          # برای تست پاک‌سازی گپ‌های قدیمی
+
+    async def prune_directory(self, user_id, *, group_keep_days=7, max_rows=1500):
+        """مثل دیتابیس واقعی: فقط گپ‌های قدیمی حذف می‌شوند"""
+        now = time.time()
+        cutoff = group_keep_days * 86400
+        before = len(self.records)
+        self.records = {
+            (u, t): r for (u, t), r in self.records.items()
+            if not (u == user_id and r.get("kind") == "group"
+                    and (now - r.get("_ts", 0)) > cutoff)
+        }
+        return {"groups": before - len(self.records), "capped": 0,
+                "total": len(self.records)}
 
     async def get_user_record(self, user_id, tg_id):
         return self.records.get((user_id, tg_id))
@@ -86,7 +105,8 @@ class FakeDB:
                 return rec
         return None
 
-    async def search_directory(self, user_id, query, limit=20):
+    async def search_directory(self, user_id, query, limit=20, kind=None,
+                               exclude_kind=None):
         q = (query or "").lower()
         out = []
         for (u, _), rec in self.records.items():
@@ -95,13 +115,28 @@ class FakeDB:
             name = f"{rec.get('first_name') or ''} {rec.get('last_name') or ''}".lower()
             if q in name or q in str(rec.get("tg_id")):
                 out.append(rec)
+        if kind:
+            out = [r for r in out if r.get("kind") == kind]
+        if exclude_kind:
+            out = [r for r in out if r.get("kind") != exclude_kind]
         return out[:limit]
 
-    async def list_directory(self, user_id, limit=30):
-        return [r for (u, _), r in self.records.items() if u == user_id][:limit]
+    async def list_directory(self, user_id, limit=30, kind=None,
+                             exclude_kind=None):
+        rows = [r for (u, _), r in self.records.items() if u == user_id]
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        if exclude_kind:
+            rows = [r for r in rows if r.get("kind") != exclude_kind]
+        return rows[:limit]
 
-    async def directory_count(self, user_id):
-        return len([1 for (u, _) in self.records if u == user_id])
+    async def directory_count(self, user_id, kind=None, exclude_kind=None):
+        rows = [r for (u, _), r in self.records.items() if u == user_id]
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        if exclude_kind:
+            rows = [r for r in rows if r.get("kind") != exclude_kind]
+        return len(rows)
 
     async def get_ai_profile(self, user_id, target_id):
         return self.ai_profiles.get((user_id, target_id))
@@ -142,8 +177,8 @@ def _install():
 
     for meth in ("remember_user", "get_user_record", "find_user_record",
                  "search_directory", "list_directory", "directory_count",
-                 "get_ai_profile", "upsert_ai_profile", "get_features",
-                 "set_feature"):
+                 "prune_directory", "get_ai_profile", "upsert_ai_profile",
+                 "get_features", "set_feature"):
         setattr(dbmod, meth, wrap(meth))
 
     # توابعی که ماکت لازم ندارند تا ماژول بی‌دردسر import شود
@@ -415,7 +450,8 @@ async def main():
     class MemEvent:
         chat_id = 555
         raw_text = "سلام، خوبی؟"
-        message = type("M", (), {"action": None})()
+        is_private = True
+        message = type("M", (), {"action": None, "id": 15})()
 
         async def get_sender(self):
             return FakeUser(uid=555, first="سارا", last="محمدی", username="sara")
@@ -428,9 +464,14 @@ async def main():
     check("متن آخرین پیام ذخیره شد",
           "سلام" in ((rec555 or {}).get("last_text") or ""),
           str((rec555 or {}).get("last_text")))
-    check("منبع «پیام ورودی» است",
-          (rec555 or {}).get("source") == "پیام ورودی",
+    check("منبع «پیام پیوی» است",
+          (rec555 or {}).get("source") == "پیام پیوی",
           str((rec555 or {}).get("source")))
+    check("نوع سابقه «pv» است", (rec555 or {}).get("kind") == "pv",
+          str((rec555 or {}).get("kind")))
+    check("آیدی آخرین پیام ذخیره شد (برای لینک مستقیم)",
+          (rec555 or {}).get("last_msg_id") == 15,
+          str((rec555 or {}).get("last_msg_id")))
 
     class BotEvent(MemEvent):
         async def get_sender(self):
@@ -555,6 +596,119 @@ async def main():
           (await make_plugin(FakeClient(user=FakeUser(uid=777),
                                        raise_id=True), db).lookup("777")).get("ok")
           is True)
+
+    # ── ۱۳) راند ۳۷: گپ‌ها سابقه را شلوغ نمی‌کنند ──
+    gdb = FakeDB()
+    gc = FakeClient()
+    gp = make_plugin(gc, gdb)
+
+    class PvEvent:
+        chat_id = 555
+        raw_text = "سلام"
+        is_private = True
+        message = type("M", (), {"action": None, "id": 20})()
+
+        async def get_sender(self):
+            return FakeUser(uid=555, first="سارا", last="محمدی")
+
+    class GroupEvent:
+        chat_id = -100123
+        raw_text = "چی می‌گی"
+        is_private = False
+        message = type("M", (), {"action": None, "id": 21,
+                                 "reply_to": type("R", (), {"reply_to_msg_id": 99})()})()
+
+        async def get_sender(self):
+            return FakeUser(uid=556, first="رضا", last="کریمی")
+
+    class GroupPlain(GroupEvent):
+        message = type("M", (), {"action": None, "id": 22, "reply_to": None})()
+
+    await gp._remember_event(PvEvent())
+    await gp._remember_event(GroupEvent())        # ریپلای، ولی به پیام من نیست
+    await gp._remember_event(GroupPlain())        # بدون ریپلای
+    check("پیوی ثبت می‌شود ولی پیام‌های گپ نه",
+          (1, 555) in gdb.records and (1, 556) not in gdb.records,
+          str(list(gdb.records)))
+
+    gp._my_msgs[-100123] = {99: 0.0}              # پیام خودم در گپ
+    await gp._remember_event(GroupEvent())
+    check("ریپلای به پیام خودم در گپ ثبت می‌شود (kind=گپ)",
+          gdb.records.get((1, 556), {}).get("kind") == "group",
+          str(gdb.records.get((1, 556))))
+
+    gdb.records[(1, 777)] = {"tg_id": 777, "kind": "group",
+                             "first_name": "قاسم", "_ts": time.time()}
+    gdb.records[(1, 888)] = {"tg_id": 888, "kind": "group",
+                             "first_name": "گرگین", "_ts": time.time()}
+    gdb.records[(1, 999)] = {"tg_id": 999, "kind": "group", "first_name": "قدیمی",
+                             "_ts": time.time() - 10 * 86400}
+    gcard = await gp.history_card()
+    check("آدم‌های گپ در کارت سابقه نمی‌آیند",
+          "رضا" not in gcard and "قاسم" not in gcard and "گرگین" not in gcard,
+          gcard[:120])
+    check("کارت سابقه تعداد گپ‌های نگه‌داشته‌شده را جدا می‌گوید",
+          "گپ" in gcard, gcard[-120:])
+    check("پیوی در کارت سابقه هست", "سارا محمدی" in gcard)
+    check("پاکسازی، گپِ قدیمی (۱۰ روز پیش) را حذف می‌کند",
+          (1, 999) not in gdb.records, str(list(gdb.records)))
+    check("گپِ تازه (که همین چند وقت پیش ریپلای زده) می‌ماند",
+          (1, 556) in gdb.records)
+
+    # ── ۱۴) فالبک شماره فقط برای شکل شماره‌ی محلی ──
+    heur = FakeDB()
+    hc = FakeClient(user=None, raise_id=True, phone_users=[])
+    hp = make_plugin(hc, heur)
+    await hp.lookup("8904799614")
+    check("۸۹۰۴۷۹۹۶۱۴ به‌عنوان شماره امتحان می‌شود (تلفن ثابت)",
+          hc.import_contacts == 1, str(hc.import_contacts))
+    hc2 = FakeClient(user=None, raise_id=True, phone_users=[])
+    hp2 = make_plugin(hc2, FakeDB())
+    await hp2.lookup("7410222506")               # شکل آیدی، نه شماره
+    check("آیدیِ ۱۰ رقمی که شکل شماره ندارد، سهمیه‌ی شماره را مصرف نمی‌کند",
+          hc2.import_contacts == 0, str(hc2.import_contacts))
+
+    # ── ۱۵) فالبک یوزرنیم از سابقه ──
+    udb = FakeDB()
+    udb.records[(1, 999999)] = {"tg_id": 999999, "username": "ali_gh",
+                                "first_name": "علی"}
+    uc = FakeClient(user=None, raise_id=True)    # آیدی و hash جواب نمی‌دهد
+    uc.user = FakeUser(uid=999999, first="علی", last=None, username="ali_gh")
+    up = make_plugin(uc, udb)
+    # فقط مسیر یوزرنیم جواب می‌دهد: get_entity(int) خطا می‌دهد ولی str نه
+    r_u = await up.lookup("999999")
+    check("اگر آیدی/هش جواب نداد، با یوزرنیمِ سابقه پیدا می‌شود",
+          r_u.get("ok") is True, str(r_u.get("reason") or ""))
+
+    # ── ۱۶) مسیر بازیابی: پیامِ خودم در پیوی، طرف را با hash ذخیره می‌کند ──
+    rdb = FakeDB()
+    rc = FakeClient()
+    rp = make_plugin(rc, rdb)
+
+    class MyPvEvent:
+        chat_id = 3210
+        is_private = True
+        raw_text = "سلام از طرف من"
+        message = type("M", (), {"action": None, "id": 55})()
+
+        async def get_chat(self):
+            return FakeUser(uid=3210, first="نیلوفر", last="رستمی")
+
+        async def get_sender(self):
+            return FakeUser(uid=999, first="من", is_self=True) if False else None
+
+    await rp._remember_own(MyPvEvent())
+    rec_r = rdb.records.get((1, 3210))
+    check("پیام خودم در پیوی، طرف را در سابقه ثبت می‌کند", bool(rec_r))
+    check("و access_hash را ذخیره می‌کند (مسیر بازیابی)",
+          (rec_r or {}).get("access_hash") == 987654321,
+          str((rec_r or {}).get("access_hash")))
+    check("منبع «پیام خودم» است", (rec_r or {}).get("source") == "پیام خودم",
+          str((rec_r or {}).get("source")))
+    before_cnt = len(rdb.remember_calls)
+    await rp._remember_own(MyPvEvent())          # پشت‌سرهم → بدون نوشتن دوباره
+    check("برای پیام‌های پشت‌سرهم خودم هر بار نمی‌نویسد",
+          len(rdb.remember_calls) == before_cnt, str(len(rdb.remember_calls)))
 
     print("\n" + "=" * 68)
     print(f"نتیجه: {len(PASS)}/{len(PASS) + len(FAIL)} چک موفق")
