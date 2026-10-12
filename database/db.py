@@ -1099,6 +1099,118 @@ async def update_forward_job_phase(
 # ═══════ AI Reply — پروفایل مخاطب ═══════
 
 
+# ═══════════ سابقه‌ی کاربران (دایرکتوری) ═══════════
+# چرا: آیدی تنهایی برای تلگرام کافی نیست — برای باز کردن چت یا گرفتن
+# پروفایل، «access_hash» لازم است. این‌جا هر کاربری که می‌بینیم (پیام
+# ورودی، چت، جست‌وجو، مخاطبین) با hash ذخیره می‌شود تا بعداً — حتی بعد از
+# پاک شدن چت — بتوان دوباره پیدایش کرد و به او پیام داد.
+
+
+async def remember_user(user_id: int, tg_id: int, *, access_hash: int | None = None,
+                        first_name: str | None = None, last_name: str | None = None,
+                        username: str | None = None, phone: str | None = None,
+                        is_bot: bool | None = None, chat_id: int | None = None,
+                        source: str | None = None, last_text: str | None = None,
+                        count_msg: bool = False) -> None:
+    """
+    ثبت/به‌روزرسانی سابقه‌ی یک کاربر.
+    فیلدهای None دست‌نخورده می‌مانند (تا نامِ خوب با مقدار خالی خراب نشود).
+    count_msg=True شمارنده‌ی پیام را یکی جلو می‌برد.
+    """
+    if not user_id or not tg_id:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_directory
+                (user_id, tg_id, access_hash, first_name, last_name, username,
+                 phone, is_bot, chat_id, source, last_text, msgs)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (user_id, tg_id) DO UPDATE SET
+                access_hash = COALESCE(EXCLUDED.access_hash, user_directory.access_hash),
+                first_name  = COALESCE(EXCLUDED.first_name, user_directory.first_name),
+                last_name   = COALESCE(EXCLUDED.last_name, user_directory.last_name),
+                username    = COALESCE(EXCLUDED.username, user_directory.username),
+                phone       = COALESCE(EXCLUDED.phone, user_directory.phone),
+                is_bot      = COALESCE(EXCLUDED.is_bot, user_directory.is_bot),
+                chat_id     = COALESCE(EXCLUDED.chat_id, user_directory.chat_id),
+                source      = COALESCE(EXCLUDED.source, user_directory.source),
+                last_text   = COALESCE(EXCLUDED.last_text, user_directory.last_text),
+                msgs        = user_directory.msgs + EXCLUDED.msgs,
+                last_seen   = NOW()
+            """,
+            user_id, tg_id, access_hash, first_name, last_name, username,
+            phone, is_bot, chat_id, source, (last_text or None), 1 if count_msg else 0,
+        )
+
+
+async def get_user_record(user_id: int, tg_id: int) -> dict | None:
+    """سابقه‌ی یک کاربر (None اگر ندیده باشیمش)"""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM user_directory WHERE user_id = $1 AND tg_id = $2",
+        user_id, tg_id,
+    )
+    return dict(row) if row else None
+
+
+async def find_user_record(user_id: int, *, username: str | None = None,
+                           phone: str | None = None) -> dict | None:
+    """جست‌وجو با یوزرنیم یا شماره (برای وقتی آیدی را نداریم)"""
+    pool = get_pool()
+    if username:
+        row = await pool.fetchrow(
+            "SELECT * FROM user_directory WHERE user_id = $1 AND lower(username) = lower($2)",
+            user_id, username.lstrip("@"),
+        )
+        if row:
+            return dict(row)
+    if phone:
+        row = await pool.fetchrow(
+            "SELECT * FROM user_directory WHERE user_id = $1 AND phone = $2",
+            user_id, phone,
+        )
+        if row:
+            return dict(row)
+    return None
+
+
+async def search_directory(user_id: int, query: str, limit: int = 20) -> list[dict]:
+    """جست‌وجو در سابقه بر اساس نام/یوزرنیم/آیدی"""
+    pool = get_pool()
+    q = f"%{(query or '').strip()}%"
+    rows = await pool.fetch(
+        """
+        SELECT * FROM user_directory
+        WHERE user_id = $1
+          AND (first_name ILIKE $2 OR last_name ILIKE $2 OR username ILIKE $2
+               OR CAST(tg_id AS TEXT) LIKE $2)
+        ORDER BY last_seen DESC
+        LIMIT $3
+        """,
+        user_id, q, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def list_directory(user_id: int, limit: int = 30) -> list[dict]:
+    """آخرین کاربرانی که دیده‌ایم"""
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM user_directory WHERE user_id = $1 "
+        "ORDER BY last_seen DESC LIMIT $2",
+        user_id, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def directory_count(user_id: int) -> int:
+    pool = get_pool()
+    return int(await pool.fetchval(
+        "SELECT COUNT(*) FROM user_directory WHERE user_id = $1", user_id) or 0)
+
+
 async def get_ai_profile(user_id: int, target_id: int) -> dict | None:
     pool = get_pool()
     async with pool.acquire() as conn:

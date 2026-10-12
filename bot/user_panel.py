@@ -146,6 +146,20 @@ def card_kb(uid: int | None, username: str | None = None) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(rows)
 
 
+def anti_delete_kb(uid: int) -> InlineKeyboardMarkup:
+    """
+    دکمه‌های کارتِ «پیام حذف‌شده» — برای وقتی طرف چتش را پاک کرده و
+    می‌خواهی دوباره پیام بدهی یا چت را بی‌صدا باز کنی.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✉️ پیام بده", callback_data=f"u:msg:{uid}")],
+        [InlineKeyboardButton("📂 آماده‌کردن چت (بی‌صدا)",
+                              callback_data=f"u:draft:{uid}")],
+        [InlineKeyboardButton("🔗 لینک چت", callback_data=f"u:link:{uid}"),
+         InlineKeyboardButton("🗑 بستن", callback_data=f"u:close:{uid}")],
+    ])
+
+
 def confirm_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ ارسال کن", callback_data=f"u:send:{uid}"),

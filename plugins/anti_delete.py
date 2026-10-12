@@ -5,6 +5,7 @@
 from datetime import datetime, timezone
 from telethon import events
 from plugins.base import BasePlugin
+from core import runtime
 from core.media import send_media_clean
 from database import db
 
@@ -318,6 +319,77 @@ class AntiDeletePlugin(BasePlugin):
             self.logger.error(f"❌ Send failed: {type(e).__name__}: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
+
+        # کارت دکمه‌دار جدا: «پیام بده» / «آماده‌کردن چت (بی‌صدا)»
+        # گزارش بالا از کلاینت سلف‌بات می‌رود و دکمه‌ی شیشه‌ای نمی‌پذیرد؛
+        # دکمه فقط از طرف ربات کنترلی ممکن است.
+        await self._quick_actions(cached)
+
+    async def _quick_actions(self, cached: dict) -> None:
+        """
+        کارت دکمه‌دار در پیوی ربات کنترلی.
+        هدف: کاربری که چتش را پاک کرده، با یک ضربه دوباره قابل پیام‌دادن یا
+        باز کردن (پیش‌نویس) باشد — بدون نیاز به هیچ گروه/چت مشترک، چون از
+        سابقه‌ی خودمان (access_hash) استفاده می‌کند.
+        """
+        try:
+            if runtime.bot is None:
+                return
+            chat_id = int(cached.get("chat_id") or 0)
+            # در تلگرام آیدی پی‌وی مثبت است و گروه/کانال منفی
+            # (-N برای گروه معمولی و ‎-100… برای سوپرگروه/کانال)
+            if chat_id < 0:
+                return                             # گروه/کانال → دکمه لازم نیست
+            uid = abs(chat_id)
+            if not uid or uid == self._my_id:
+                return
+
+            # روشن/خاموش (پیش‌فرض: روشن) — «.کاربر دکمه خاموش»
+            try:
+                rows = {f["feature_name"]: f for f in await db.get_features(self.user_id)}
+                cfg = dict((rows.get("anti_delete") or {}).get("config_json") or {})
+                if cfg.get("quick_buttons", True) is False:
+                    return
+            except Exception:
+                pass
+
+            owner = await db.get_user_by_db_id(self.user_id)
+            owner_tg = (owner or {}).get("telegram_id")
+            if not owner_tg:
+                return
+
+            import html as _h
+
+            def _esc(value):
+                return _h.escape(str(value or ""))
+
+            name = cached.get("chat_name") or ""
+            if not name or name.isdigit():
+                name = cached.get("sender_name") or ""
+            if not name or name.isdigit():
+                try:                               # نام واقعی از سابقه
+                    from core.plugin_manager import get_active_plugins
+                    plugin = get_active_plugins(self.user_id).get("user_info")
+                    if plugin is not None:
+                        name = await plugin.display_name(uid)
+                except Exception:
+                    pass
+            if not name:
+                name = str(uid)
+
+            from bot.user_panel import anti_delete_kb
+            text = (
+                "🗑 <b>پیام حذف شد</b>\n"
+                f"👤 {_esc(name)} · <code>{uid}</code>\n\n"
+                "می‌خواهی دوباره پیام بدهی یا چت را بی‌صدا باز کنی؟\n"
+                "<i>«آماده‌کردن چت» فقط پیش‌نویس می‌سازد — طرف هیچ اطلاعی "
+                "نمی‌گیرد.</i>"
+            )
+            await runtime.notify_user(owner_tg, text,
+                                      reply_markup=anti_delete_kb(uid),
+                                      disable_web_page_preview=True)
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"quick_actions skipped: {type(e).__name__}: {e}")
 
     async def stop(self):
         self._cache.clear()

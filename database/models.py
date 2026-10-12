@@ -354,6 +354,28 @@ CREATE INDEX IF NOT EXISTS idx_fwc_pending
 -- ═══════════════════════════════════
 
 -- پروفایل هر مخاطب: جایگاهش در زندگی + رفتار من با او
+CREATE TABLE IF NOT EXISTS user_directory (
+    user_id BIGINT NOT NULL,
+    tg_id BIGINT NOT NULL,
+    access_hash BIGINT,
+    first_name TEXT,
+    last_name TEXT,
+    username TEXT,
+    phone TEXT,
+    is_bot BOOLEAN DEFAULT FALSE,
+    msgs INT DEFAULT 0,
+    chat_id BIGINT,
+    source TEXT,
+    last_text TEXT,
+    first_seen TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (user_id, tg_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_directory_user ON user_directory(user_id, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_user_directory_name ON user_directory(user_id, first_name);
+CREATE INDEX IF NOT EXISTS idx_user_directory_phone ON user_directory(user_id, phone);
+
 CREATE TABLE IF NOT EXISTS ai_profiles (
     id              SERIAL PRIMARY KEY,
     user_id         INT REFERENCES users(id) ON DELETE CASCADE,

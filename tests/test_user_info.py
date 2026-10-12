@@ -22,6 +22,83 @@ from telethon.tl.functions.users import GetFullUserRequest  # noqa: E402
 
 from plugins.user_info import UserInfoPlugin               # noqa: E402
 
+# ── دیتابیس جعلی ──
+# راند ۳۶ «سابقه‌ی کاربران» (دایرکتوری) اضافه شد و جست‌وجو اول از آن می‌خواند،
+# پس این تست باید بدون پستگرس هم اجرا شود: توابع دیتابیس را در حافظه
+# جایگزین می‌کنیم تا تست به سرور دیتابیس وابسته نباشد.
+import database.db as dbmod                                # noqa: E402
+
+_MEM: dict = {}
+_AI: dict = {}
+_FEATURES: dict = {}
+
+
+async def _remember_user(user_id, tg_id, **kw):
+    rec = _MEM.setdefault((user_id, tg_id), {"tg_id": tg_id, "msgs": 0})
+    for k, v in kw.items():
+        if k == "count_msg":
+            if v:
+                rec["msgs"] = rec.get("msgs", 0) + 1
+            continue
+        if v is not None:
+            rec[k] = v
+    return rec
+
+
+async def _get_user_record(user_id, tg_id):
+    return _MEM.get((user_id, tg_id))
+
+
+async def _find_user_record(user_id, *, username=None, phone=None):
+    for (u, _), rec in _MEM.items():
+        if u != user_id:
+            continue
+        if username and (rec.get("username") or "").lower() == username.lower():
+            return rec
+        if phone and (rec.get("phone") or "") == phone:
+            return rec
+    return None
+
+
+async def _empty_list(*a, **kw):
+    return []
+
+
+async def _zero(*a, **kw):
+    return 0
+
+
+async def _get_ai_profile(user_id, target_id):
+    return _AI.get((user_id, target_id))
+
+
+async def _upsert_ai_profile(user_id, target_id, **fields):
+    prof = _AI.setdefault((user_id, target_id), {})
+    prof.update(fields)
+    return prof
+
+
+async def _get_features(user_id):
+    return list(_FEATURES.values())
+
+
+async def _set_feature(user_id, feature, enabled, config=None):
+    _FEATURES[feature] = {"feature_name": feature, "is_enabled": enabled,
+                          "config_json": config or {}}
+
+
+for _name, _fn in (("remember_user", _remember_user),
+                   ("get_user_record", _get_user_record),
+                   ("find_user_record", _find_user_record),
+                   ("search_directory", _empty_list),
+                   ("list_directory", _empty_list),
+                   ("directory_count", _zero),
+                   ("get_ai_profile", _get_ai_profile),
+                   ("upsert_ai_profile", _upsert_ai_profile),
+                   ("get_features", _get_features),
+                   ("set_feature", _set_feature)):
+    setattr(dbmod, _name, _fn)
+
 PASS, FAIL = [], []
 
 
@@ -180,7 +257,6 @@ class FakeClient:
 def make_plugin(client, monkeypatch_runtime=True):
     plugin = UserInfoPlugin(client, user_id=1)
     plugin._known = {}
-    plugin._last_lookup = {}
     plugin._owner_tg = None          # هیچ ربات کنترلی → فالبک: پیام‌های ذخیره‌شده
     return plugin
 
@@ -374,7 +450,8 @@ async def main():
     c5 = FakeClient(user=FakeUser(uid=555), personal=FakeChannel())
     p5 = make_plugin(c5)
     check("آیدی با ارقام فارسی کار می‌کند", (await p5.lookup("۵۵۵")).get("ok") is True)
-    p5._last_lookup.clear()
+    p5._last_ok.clear()
+    p5._last_fail.clear()
     check("یوزرنیم با @ کار می‌کند", (await p5.lookup("@ali")).get("ok") is True)
     r5c = await p5.lookup("https://t.me/ali")
     check("لینک t.me کار می‌کند", r5c.get("ok") is True)
@@ -390,12 +467,45 @@ async def main():
     p6._me_id = 999          # همان کاری که start() می‌کند
     r6 = await p6.lookup("999")
     check("آیدی خودم رد می‌شود", r6.get("ok") is False, str(r6.get("reason")))
-    p6._last_lookup.clear()
-    await p6.lookup("555")
+    p6._last_ok.clear()
+    p6._last_fail.clear()
+    await p6.lookup("555")          # بار اول واقعاً از تلگرام خوانده شد
+    before = len(c6.calls)
     r6b = await p6.lookup("555")
-    check("دو جست‌وجوی پشت‌سرهم محدود می‌شود (ضد فلود)",
-          r6b.get("ok") is False and "فاصله" in str(r6b.get("reason")),
-          str(r6b.get("reason")))
+    check("بار دوم همان کاربر از «سابقه» می‌آید (نه از تلگرام)",
+          r6b.get("ok") is True and "سابقه" in str(r6b.get("how")), str(r6b.get("how")))
+    extra = [c for c in c6.calls[before:]
+             if c not in ("GetFullUserRequest", "GetPeerDialogsRequest")]
+    check("برای سابقه دنبال مخاطبین/چت‌های تلگرام نمی‌گردد",
+          not extra, str(extra))
+
+    # ضد فلود: جست‌وجوی ناموفقِ پشت‌سرهم محدود می‌شود (ولی قفل همیشگی نیست)
+    _MEM.clear()
+    c6b = FakeClient(user=None, get_entity_raises=("id", "username"))
+    p6b = make_plugin(c6b)
+    f1 = await p6b.lookup("123456")
+    f2 = await p6b.lookup("123456")
+    check("دو جست‌وجوی ناموفقِ پشت‌سرهم محدود می‌شود (ضد فلود)",
+          f1.get("ok") is False and f2.get("ok") is False
+          and "صبر" in str(f2.get("reason")), str(f2.get("reason")))
+    p6b._last_fail.clear()
+    f3 = await p6b.lookup("123456")
+    check("ولی بعد از یک ثانیه دوباره تلاش می‌شود (قفل نمی‌ماند)",
+          f3.get("ok") is False and "صبر" not in str(f3.get("reason")),
+          str(f3.get("reason")))
+
+    # همان بارِ موفق هم پشت‌سرهم دوباره اجرا نمی‌شود (۲ ثانیه)
+    p6._last_ok.clear()
+    _MEM.clear()
+    c6c = FakeClient(user=FakeUser(uid=901))
+    p6c = make_plugin(c6c)
+    okc1 = await p6c.lookup("901")
+    _MEM.clear()                    # سابقه را پاک کن تا کول‌داون تست شود
+    p6c._known.clear()
+    okc2 = await p6c.lookup("901")
+    check("جست‌وجوی موفقِ پشت‌سرهم با فاصله‌ی کم رد می‌شود",
+          okc1.get("ok") is True and okc2.get("ok") is False
+          and "صبر" in str(okc2.get("reason")), str(okc2.get("reason")))
 
     # ── ۷) پیش‌نویس: چت آماده می‌شود، طرف مطلع نمی‌شود ──
     c7 = FakeClient(user=FakeUser(uid=555))
