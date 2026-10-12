@@ -163,7 +163,7 @@ async def main():
           (bot.sent[-1][1][:70] if bot.sent else "نرفت"))
     pm._active_plugins.pop(1, None)
 
-    # ── ۷) بهینه: ۱۰۰۰ حذف = یک کارت (ویرایش به‌جای پیام جدید) ──
+    # ── ۷) بهینه: ۱۰۰۰ حذف = یک کارت و ویرایش‌های محدود ──
     plugin._card_state.clear()
     bot.sent.clear()
     bot.edits.clear()
@@ -172,12 +172,22 @@ async def main():
                                           msg_id=800 + i))
     check("۵ پیام حذف از یک نفر → فقط یک کارت فرستاده می‌شود",
           len(bot.sent) == 1, f"sent={len(bot.sent)} edits={len(bot.edits)}")
-    check("بقیه روی همان کارت به‌روز می‌شوند (نه پیام جدید)",
-          len(bot.edits) == 4, f"edits={len(bot.edits)}")
-    check("شمارش روی کارت هست", bool(bot.edits) and "5 پیام حذف شد" 
-          in bot.edits[-1][2], (bot.edits[-1][2][:60] if bot.edits else "—"))
+    check("ویرایش هم برای هر حذف تکرار نمی‌شود (حداکثر هر ۱۰ ثانیه)",
+          len(bot.edits) == 0, f"edits={len(bot.edits)}")
+    check("شمارنده در حافظه درست نگه داشته می‌شود",
+          plugin._card_state[888001]["count"] == 5,
+          str(plugin._card_state[888001]))
+    # بعد از گذشتن بازه، ویرایش انجام می‌شود (شمارنده‌ی روی کارت به‌روز)
+    plugin._card_state[888001]["edit_ts"] -= 11
+    await plugin._quick_actions(fresh(chat_id=888001, chat_name="مهسا",
+                                      msg_id=805))
+    check("بعد از بازه، کارت با شمارنده‌ی تازه ویرایش می‌شود",
+          bool(bot.edits) and "6 پیام حذف شد" in bot.edits[-1][2],
+          (bot.edits[-1][2][:50] if bot.edits else "—"))
     check("دکمه‌ها روی کارتِ به‌روزشده هم هستند",
           bool(bot.edits) and "u:msg:888001" in str(bot.edits[-1][3]))
+    check("بازه‌ی ویرایش در کد قابل تنظیم است",
+          __import__("plugins.anti_delete", fromlist=["x"]).CARD_EDIT_GAP == 10.0)
 
     # ۷ب) بعد از پنجره‌ی تجمیع → کارت تازه
     plugin._card_state[888001]["ts"] -= 10_000

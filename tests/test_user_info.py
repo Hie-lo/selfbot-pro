@@ -230,8 +230,15 @@ class FakeClient:
         self._raises = set(get_entity_raises)
         self.sent = []              # (peer, text) — ارسال‌های واقعی
         self.drafts = []            # (peer, text)
-        self.handlers = {}
+        self.handlers = []          # [(callback, event)]
         self.calls = []
+
+    # ── ثبت هندلر (مثل کلاینت واقعی) ──
+    def add_event_handler(self, cb, ev):
+        self.handlers.append((cb, ev))
+
+    def remove_event_handler(self, cb, ev):
+        pass
 
     # ── Telethon API ──
     async def get_me(self):
@@ -449,6 +456,9 @@ async def flows(plugin_cls=FakeClient):
     # ۹) منوی تعاملی سابقه
     await menu_flow()
 
+    # ۱۰) ثبت هندلرهای سابقه‌گیری (رگرسیون)
+    await handler_registration()
+
 
 async def menu_flow():
     """منوی تعاملی سابقه: دکمه‌ها، صفحه‌بندی، باز کردن کارت هر نفر"""
@@ -513,6 +523,58 @@ async def menu_flow():
           str(u4.callback_query.answers))
 
     panel._plugin = lambda user_id: plugin
+
+
+async def handler_registration():
+    """
+    رگرسیون مهم (باگ راند ۳۷–۳۸): هندلر پیام‌های *ورودی* نباید فراموش شود.
+    اگر ثبت نشود، کاربران فقط وقتی به سابقه می‌آیند که پیامی در چتشان حذف
+    شود — همان چیزی که کاربر گزارش داد.
+    """
+    import bot.user_panel  # noqa: F401  (بی‌خطر)
+
+    client = FakeClient(user=FakeUser(uid=555))
+    plugin = UserInfoPlugin(client, user_id=1)
+    plugin._owner_tg = None
+    await plugin.start()
+
+    names = [getattr(cb, "__name__", "") for cb, _ in client.handlers]
+    check("هندلر دستور «کاربر/مالک» ثبت می‌شود", "_on_command" in names,
+          str(names))
+    check("هندلر پیام ورودی (سابقه‌ی لحظه‌ای) ثبت می‌شود",
+          "_remember_event" in names, str(names))
+    check("هندلر پیام خودم (مسیر بازیابی) هم ثبت می‌شود",
+          "_remember_own" in names, str(names))
+
+    # ثبت نشدنش دقیقاً یعنی سابقه‌گیری با پیام ورودی کار نمی‌کند → چک عملی
+    _MEM.clear()
+    incoming = client.handler_for("incoming") if hasattr(client, "handler_for") else None
+    if incoming is None:
+        # همان هندلری که برای NewMessage(incoming=True) ثبت شده
+        for cb, ev in client.handlers:
+            if getattr(cb, "__name__", "") == "_remember_event":
+                incoming = cb
+                break
+    check("هندلر ورودی واقعاً به _remember_event وصل است", incoming is not None)
+
+    if incoming is not None:
+        class Ev:
+            chat_id = 777001
+            raw_text = "سلام تازه"
+            is_private = True
+            message = type("M", (), {"action": None, "id": 7})()
+
+            async def get_sender(self):
+                return FakeUser(uid=777001, first="تازه", last="وارد")
+
+        await incoming(Ev())
+        check("با رسیدن پیام، کاربر فوراً در سابقه ثبت می‌شود",
+              (1, 777001) in _MEM, str(list(_MEM)[:5]))
+        rec = _MEM.get((1, 777001)) or {}
+        check("access_hash همان لحظه ذخیره می‌شود",
+              rec.get("access_hash") == 1, str(rec.get("access_hash")))
+        check("نام واقعی ذخیره می‌شود", rec.get("first_name") == "تازه",
+              str(rec.get("first_name")))
 
 
 async def main():

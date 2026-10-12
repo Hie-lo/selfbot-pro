@@ -204,8 +204,12 @@ async def main():
     await del_h(FakeDeletedEvent(555, [12], True))
     check("حذف بعدی پیام جدید نمی‌سازد", len(bot.sent) == 1,
           f"cards={len(bot.sent)}")
-    check("روی همان کارت به‌روز می‌شود", len(bot.edits) == 1,
-          f"edits={len(bot.edits)}")
+    # ویرایش حداکثر هر ۱۰ ثانیه یک‌بار (کم‌کردن درخواست‌ها) → الان صفر
+    check("برای حذف دوم ویرایش اضافه نمی‌زند (ضد ریت‌لیمیت)",
+          len(bot.edits) == 0, f"edits={len(bot.edits)}")
+    check("شمارنده در حافظه جلو می‌رود",
+          plugin._card_state[555]["count"] == 2,
+          str(plugin._card_state.get(555)))
     check("گزارش ذخیره‌سازی برای هر پیام می‌رود (داده گم نمی‌شود)",
           len(sb.sent) == 2, str(len(sb.sent)))
     check("کش بعد از حذف پاک می‌شود", not plugin._cache.get(555))

@@ -180,6 +180,23 @@ def card_kb(uid: int | None, username: str | None = None,
     return InlineKeyboardMarkup(rows)
 
 
+def member_kb(page: dict) -> InlineKeyboardMarkup:
+    """دکمه‌های منوی گروه/کانال (هر چت + صفحه‌بندی)"""
+    rows = []
+    for cid, label in (page.get("rows") or []):
+        rows.append([InlineKeyboardButton(label, callback_data=f"u:mo:{cid}")])
+    p, pages = int(page.get("page") or 0), int(page.get("pages") or 1)
+    nav = []
+    if p > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"u:ml:{p - 1}"))
+    nav.append(InlineKeyboardButton(f"صفحه {p + 1}/{pages}", callback_data="u:noop:0"))
+    if p + 1 < pages:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"u:ml:{p + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("🗑 بستن", callback_data="u:close:0")])
+    return InlineKeyboardMarkup(rows)
+
+
 def history_kb(page: dict) -> InlineKeyboardMarkup:
     """دکمه‌های منوی تعاملی سابقه: هر کاربر + صفحه‌بندی"""
     rows = []
@@ -192,10 +209,7 @@ def history_kb(page: dict) -> InlineKeyboardMarkup:
     nav.append(InlineKeyboardButton(f"صفحه {p + 1}/{pages}", callback_data="u:noop:0"))
     if p + 1 < pages:
         nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"u:hist:{p + 1}"))
-    if len(nav) > 1:
-        rows.append(nav)
-    elif not rows:
-        rows.append([InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="u:hist:0")])
+    rows.append(nav)
     rows.append([InlineKeyboardButton("🗑 بستن", callback_data="u:close:0")])
     return InlineKeyboardMarkup(rows)
 
@@ -410,6 +424,38 @@ async def cb_user(update, context, user_id: int) -> bool:
             kb=card_kb(payload.get("id") if payload.get("ok") else None,
                        payload.get("username"), payload.get("msg_link"),
                        back="u:hist:0"))
+        return True
+
+    if action == "ml":
+        if plugin is None:
+            await q.answer("قابلیت کاربر بالا نیامده — ربات را ری‌استارت کن",
+                           show_alert=True)
+            return True
+        page_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        await q.answer("…")
+        try:
+            page = await plugin.member_page(page_num)
+            await _edit(q, page.get("text") or "—", kb=member_kb(page))
+        except Exception as e:                      # noqa: BLE001
+            logger.error(f"member page failed: {e}")
+            await q.answer("خطا در خواندن لیست", show_alert=True)
+        return True
+
+    if action == "mo":
+        if plugin is None or uid is None:
+            await q.answer("قابلیت کاربر بالا نیامده", show_alert=True)
+            return True
+        await q.answer("دارم مالک را پیدا می‌کنم…")
+        try:
+            res = await plugin.chat_owner_card(str(uid))
+        except Exception as e:                      # noqa: BLE001
+            logger.error(f"owner card failed: {e}")
+            await q.answer("خطا در خواندن اطلاعات", show_alert=True)
+            return True
+        if not res.get("ok"):
+            await q.answer(f"پیدا نشد: {res.get('reason')}", show_alert=True)
+            return True
+        await _edit(q, res["text"], kb=res.get("kb"))
         return True
 
     if action == "scan":

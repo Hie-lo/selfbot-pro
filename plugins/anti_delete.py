@@ -12,6 +12,7 @@ from database import db
 
 
 CARD_WINDOW = 180.0        # ثانیه؛ حذف‌های یک نفر در این بازه روی یک کارت جمع می‌شوند
+CARD_EDIT_GAP = 10.0       # ثانیه؛ حداقل فاصله‌ی دو ویرایش روی همان کارت
 CARD_MAX_AGE = 48 * 3600   # حذف قدیمی‌تر از این، کارت دکمه‌دار نمی‌گیرد
 
 
@@ -462,18 +463,28 @@ class AntiDeletePlugin(BasePlugin):
             kb = anti_delete_kb(uid, link=cached.get("msg_link"))
 
             if fresh and state.get("msg_id"):
+                # ویرایش هم یک درخواست است؛ پس حداکثر هر ۱۰ ثانیه یک‌بار.
+                # شمارنده‌ی کارت ممکن است چند ثانیه عقب بماند — مهم نیست
+                # (خواسته‌ی کاربر: «لازم نیست لحظه‌ای باشه»)، ولی تعداد
+                # درخواست‌ها خیلی کمتر می‌شود.
+                if (now - state.get("edit_ts", 0.0)) < CARD_EDIT_GAP:
+                    state.update(ts=now, count=count)
+                    self._card_state[uid] = state
+                    return
                 ok = await runtime.edit_card(owner_tg, state["msg_id"], text,
                                              reply_markup=kb,
                                              disable_web_page_preview=True)
                 if ok:
-                    state.update(ts=now, count=count)
+                    state.update(ts=now, count=count, edit_ts=now)
                     self._card_state[uid] = state
                     return
 
             sent = await runtime.send_card(owner_tg, text, reply_markup=kb,
                                            disable_web_page_preview=True)
             mid = getattr(sent, "message_id", None)
-            self._card_state[uid] = {"msg_id": mid, "ts": now, "count": count}
+            # edit_ts = الان: تا ۱۰ ثانیه‌ی اول نیازی به ویرایش کارتِ تازه نیست
+            self._card_state[uid] = {"msg_id": mid, "ts": now, "count": count,
+                                     "edit_ts": now}
             # سقف حافظه: قدیمی‌ترین‌ها بیرون
             if len(self._card_state) > 200:
                 for old_uid in sorted(self._card_state,

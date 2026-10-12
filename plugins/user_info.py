@@ -54,6 +54,9 @@ MAX_TEXT = 4000
 DIALOG_SCAN_LIMIT = 200          # جست‌وجوی معمولی در چت‌ها (سبک)
 DIALOG_SCAN_LIMIT_DEEP = 2000    # فقط با «کامل» — و آن هم محدود
 DIALOG_SCAN_GAP = 3.0            # ثانیه؛ بین دو اسکن چت‌ها (ضد درخواست پشت‌سرهم)
+OWNER_ADMIN_SCAN = 100           # سقف خواندن مدیران برای پیدا کردن مالک
+MEMBER_SCAN_LIMIT = 400          # سقف اسکن چت‌ها برای منوی «گروه/کانال»
+MEMBER_CACHE_TTL = 300           # ثانیه؛ کش لیست گروه/کانال‌ها
 LOOKUP_COOLDOWN = 2.0            # ثانیه بین دو جست‌وجو (ضد FloodWait)
 # جست‌وجو با شماره: هرکدام یک ImportContacts است و تلگرام محدودش می‌کند
 PHONE_COOLDOWN = 45.0            # فاصله‌ی اجباری بین دو جست‌وجوی شماره
@@ -140,6 +143,8 @@ class UserInfoPlugin(BasePlugin):
             self._report_cache = {}
         if not hasattr(self, "_record_fail"):
             self._record_fail = None
+        if not hasattr(self, "_member_cache"):
+            self._member_cache = None
 
     async def start(self):
         self._ensure_state()
@@ -161,13 +166,18 @@ class UserInfoPlugin(BasePlugin):
 
         self._add_handler(
             self._on_command,
-            events.NewMessage(pattern=r"^\.کاربر(?:\s.*)?$", outgoing=True),
+            events.NewMessage(pattern=r"^\.(کاربر|مالک)(?:\s.*)?$", outgoing=True),
         )
-        # هر پیام ورودی → یک سابقه‌ی ماندگار از فرستنده (نام، یوزرنیم،
+        # ── سابقه‌گیری لحظه‌ای (مهم) ──
+        # هر پیام ورودی → همان لحظه در سابقه ثبت می‌شود (نام، یوزرنیم،
         # access_hash). همین سابقه است که بعداً اجازه می‌دهد چتِ پاک‌شده را
         # دوباره باز کنیم یا بدون گروه مشترک پروفایل/پیام داشته باشیم.
-        # پیام‌های خودم در گپ‌ها: فقط برای تشخیص «ریپلای به من» (بدون
-        # هیچ نوشتنی در دیتابیس؛ در حافظه و سبک).
+        # ⚠️ اگر این هندلر ثبت نشود، کاربران فقط وقتی به سابقه می‌آیند که
+        # پیامی در چتشان حذف شود — همان باگی که کاربر گزارش داد.
+        self._add_handler(self._remember_event,
+                          events.NewMessage(incoming=True))
+        # پیام‌های خودم: در پیوی هویت طرف را ثبت می‌کند (مسیر بازیابی) و در
+        # گپ‌ها فقط آیدی پیام‌هایم را نگه می‌دارد تا ریپلای‌ها را بشناسم.
         self._add_handler(self._remember_own,
                           events.NewMessage(outgoing=True))
         self.logger.info("loaded")
@@ -345,6 +355,12 @@ class UserInfoPlugin(BasePlugin):
             await event.delete()
         except Exception:
             pass
+
+        # «.مالک …» → اطلاعات گروه/کانال + مالکش
+        verb = raw.split(maxsplit=1)[0].lstrip(".")
+        if verb in ("مالک", "مالکین", "owner"):
+            await self._owner_command(body)
+            return
 
         if not body:
             await self._send_owner(self._usage())
@@ -709,6 +725,300 @@ class UserInfoPlugin(BasePlugin):
             self._last_ok[user.id] = time.monotonic()
             got["phone_input"] = phone
         return got
+
+    # ═══════════ گروه/کانال و مالک آن ═══════════
+
+    OWNER_BADGES = (("verified", "✅"), ("scam", "⚠️"), ("fake", "🚫"),
+                    ("restricted", "🔒"))
+
+    async def _owner_command(self, body: str) -> None:
+        """«.مالک» → منوی گروه/کانال‌ها، «.مالک ‹هدف›» → کارت با مالک"""
+        target = (body or "").strip()
+        if not target or target in ("لیست", "همه"):
+            page = await self.member_page(0)
+            await self._send_owner(page["text"], kb=self._member_kb(page))
+            return
+
+        res = await self.chat_owner_card(target)
+        if not res.get("ok"):
+            await self._send_owner(
+                f"🔍 <b>پیدا نشد</b>\nورودی: <code>{_esc(target)}</code>\n"
+                f"دلیل: {_esc(res.get('reason') or '—')}\n\n"
+                "• اسم یا یوزرنیم یا آیدی یا لینک گروه/کانال را بده\n"
+                "• یا <code>.مالک</code> را تنها بزن تا لیست چت‌هایت بیاید.",
+                kb=self._member_kb(await self.member_page(0)))
+            return
+        await self._send_owner(res["text"], kb=res.get("kb"))
+
+    @staticmethod
+    def _member_kb(page: dict):
+        try:
+            from bot.user_panel import member_kb
+            return member_kb(page)
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"member_kb failed: {e}")
+            return None
+
+    async def member_chats(self, limit: int = MEMBER_SCAN_LIMIT) -> list[dict]:
+        """گروه/کانال‌هایی که عضوی (با کش ۵ دقیقه‌ای — ضد اسکن تکراری)"""
+        now = time.monotonic()
+        cache = getattr(self, "_member_cache", None)
+        if cache and (now - cache.get("ts", 0)) < MEMBER_CACHE_TTL:
+            return cache["rows"]
+
+        rows: list[dict] = []
+        try:
+            async for d in self.client.iter_dialogs(limit=limit,
+                                                    ignore_migrated=True):
+                ent = getattr(d, "entity", None)
+                if not isinstance(ent, (tl.Chat, tl.Channel)):
+                    continue
+                is_channel = bool(getattr(ent, "broadcast", False))
+                is_super = bool(getattr(ent, "megagroup", False))
+                rows.append({
+                    "id": ent.id,
+                    "title": getattr(ent, "title", None) or str(ent.id),
+                    "username": getattr(ent, "username", None),
+                    "kind": ("کانال" if is_channel else
+                             ("سوپرگروه" if is_super else "گروه")),
+                    "count": getattr(ent, "participants_count", None),
+                    "entity": ent,
+                })
+        except FloodWaitError as e:
+            self.logger.warning(f"member scan flood {e.seconds}s")
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"member scan failed: {e}")
+
+        self._member_cache = {"ts": now, "rows": rows}
+        return rows
+
+    async def member_page(self, page: int = 0, per_page: int = 8) -> dict:
+        """یک صفحه از گروه/کانال‌های عضو (برای منوی دکمه‌ای)"""
+        chats = await self.member_chats()
+        page = max(0, int(page or 0))
+        pages = max(1, (len(chats) + per_page - 1) // per_page)
+        page = min(page, pages - 1)
+        chunk = chats[page * per_page:(page + 1) * per_page]
+
+        if not chats:
+            return {"ok": True, "text": ("📭 <b>گروه/کانالی پیدا نشد</b>\n\n"
+                                         "اگر تازه عضوی، چند لحظه بعد دوباره "
+                                         "امتحان کن."),
+                    "rows": [], "page": 0, "pages": 1}
+
+        lines = [f"🏷 <b>گروه‌ها و کانال‌های تو</b> — صفحه {page + 1} از {pages}",
+                 f"<i>مجموع {len(chats)} مورد · برای دیدن مالک، روی هر کدام "
+                 "بزن</i>", ""]
+        rows = []
+        for c in chunk:
+            extra = f" · {c['count']} عضو" if c.get("count") else ""
+            lines.append(f"• {c['kind']}: <b>{_esc(c['title'])}</b>{extra}")
+            label = f"{'📢' if c['kind'] == 'کانال' else '👥'} {c['title']}"
+            if len(label) > 30:
+                label = label[:29] + "…"
+            rows.append((c["id"], label))
+
+        return {"ok": True, "text": "\n".join(lines), "rows": rows,
+                "page": page, "pages": pages, "chats": chats}
+
+    async def _resolve_chat(self, target: str):
+        """
+        تبدیل اسم/یوزرنیم/آیدی/لینک به چت (گروه یا کانال).
+        خروجی: (entity، «چطور پیدا شد») یا (None، دلیل)
+        """
+        raw = to_ascii((target or "").strip()).lstrip("@")
+        if not raw:
+            return None, "ورودی خالی است"
+
+        # لینک دعوت → با CheckChatInvite می‌شود دید عضو هستیم یا نه
+        low = raw.lower()
+        if "t.me/" in low or "telegram.me/" in low:
+            tail = raw.rstrip("/").split("/")[-1]
+            if tail.startswith("+") or tail.lower().startswith("joinchat"):
+                try:
+                    res = await self.client(functions.messages.CheckChatInviteRequest(
+                        hash=tail.lstrip("+")))
+                    chat = getattr(res, "chat", None)
+                    if chat is not None:
+                        return chat, "لینک دعوت"
+                    return None, "لینک دعوت معتبر است ولی هنوز عضو نشده‌ای"
+                except Exception as e:             # noqa: BLE001
+                    return None, f"لینک دعوت خوانده نشد ({type(e).__name__})"
+            raw = tail
+
+        # یوزرنیم
+        if not raw.lstrip("-").isdigit():
+            try:
+                ent = await self.client.get_entity(raw)
+                if isinstance(ent, (tl.Chat, tl.Channel)):
+                    return ent, "یوزرنیم"
+            except FloodWaitError as e:
+                return None, f"محدودیت تلگرام — {e.seconds} ثانیه صبر کن"
+            except Exception:                      # noqa: BLE001
+                pass
+
+        # آیدی عددی
+        if raw.lstrip("-").isdigit():
+            n = int(raw)
+            for cand in (n, int(f"-100{n}") if n > 0 else n,
+                         int(f"-{n}") if n > 0 else n):
+                try:
+                    ent = await self.client.get_entity(cand)
+                    if isinstance(ent, (tl.Chat, tl.Channel)):
+                        return ent, "آیدی"
+                except Exception:                  # noqa: BLE001
+                    continue
+            # شاید در لیست چت‌هایمان باشد
+            for c in await self.member_chats():
+                if c["id"] in (abs(n), n):
+                    return c["entity"], "لیست چت‌ها"
+
+        # اسم (بخشی از عنوان)
+        needle = raw.lower()
+        for c in await self.member_chats():
+            if needle in (c["title"] or "").lower():
+                return c["entity"], "نام"
+        return None, "در گروه‌ها/کانال‌هایت چنین چیزی نبود"
+
+    async def chat_owner_card(self, target: str) -> dict:
+        """کارت اطلاعات گروه/کانال + مالکش"""
+        ent, how = await self._resolve_chat(target)
+        if ent is None:
+            return {"ok": False, "reason": how}
+
+        is_channel = isinstance(ent, tl.Channel)
+        title = getattr(ent, "title", None) or str(getattr(ent, "id", "?"))
+        cid = getattr(ent, "id", None)
+        username = getattr(ent, "username", None)
+        kind = ("کانال" if getattr(ent, "broadcast", False)
+                else ("سوپرگروه" if getattr(ent, "megagroup", False) else "گروه"))
+
+        about = None
+        members = getattr(ent, "participants_count", None)
+        created = getattr(ent, "date", None)
+        try:
+            if is_channel:
+                full = await self.client(functions.channels.GetFullChannelRequest(
+                    channel=ent))
+                fc = getattr(full, "full_chat", None)
+                about = getattr(fc, "about", None)
+                members = getattr(fc, "participants_count", None) or members
+            else:
+                full = await self.client(functions.messages.GetFullChatRequest(
+                    chat_id=cid))
+                fc = getattr(full, "full_chat", None)
+                about = getattr(fc, "about", None)
+                members = (len(getattr(getattr(fc, "participants", None),
+                                       "participants", []) or [])
+                           or members)
+        except FloodWaitError as e:
+            return {"ok": False, "reason": f"محدودیت تلگرام — {e.seconds} ثانیه صبر کن"}
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"full chat failed for {cid}: {e}")
+
+        owner = await self.chat_owner(ent)
+        badges = "".join(icon for attr, icon in self.OWNER_BADGES
+                         if getattr(ent, attr, False))
+
+        lines = [f"🏷 <b>{_esc(title)}</b> {badges}".strip(),
+                 f"<i>{kind} · پیدا شد از {how}</i>", ""]
+        if cid:
+            lines.append(f"🆔 آیدی: <code>{cid}</code>")
+        if username:
+            lines.append(f"🔗 یوزرنیم: @{_esc(username)}")
+        if members:
+            lines.append(f"👥 اعضا: {members:,}")
+        if created:
+            try:
+                lines.append(f"📅 ساخته‌شده: {created.strftime('%Y-%m-%d')}")
+            except Exception:
+                pass
+        if about:
+            lines.append(f"📝 درباره: <i>{_esc(str(about)[:300])}</i>")
+
+        lines.append("")
+        kb_rows = []
+        if owner.get("ok"):
+            uid = owner.get("user_id")
+            user = owner.get("user") or {}
+            name = (" ".join(x for x in (getattr(user, "first_name", None),
+                                         getattr(user, "last_name", None)) if x).strip()
+                    or owner.get("name") or f"کاربر {uid}")
+            uname = getattr(user, "username", None)
+            lines.append(f"👑 <b>مالک:</b> {_esc(name)}")
+            lines.append(f"    🆔 <code>{uid}</code>"
+                         + (f" · @{_esc(uname)}" if uname else ""))
+            lines.append(f"    <i>پیدا شد از {owner.get('how')}</i>")
+            # مالک را در سابقه ثبت کن (با access_hash) تا بعداً — حتی بدون
+            # گروه مشترک — بشود به او پیام داد.
+            try:
+                from database import db
+                await db.remember_user(
+                    self.user_id, int(uid),
+                    access_hash=getattr(user, "access_hash", None),
+                    first_name=getattr(user, "first_name", None),
+                    last_name=getattr(user, "last_name", None),
+                    username=uname, is_bot=bool(getattr(user, "bot", False)),
+                    chat_id=int(uid), source="مالک گروه", kind="pv")
+            except Exception as e:                 # noqa: BLE001
+                self.logger.debug(f"owner remember skipped: {e}")
+            from bot.user_panel import card_kb
+            kb = card_kb(int(uid), uname)
+            from telegram import InlineKeyboardButton as _IKB
+            kb_rows = [[_IKB("👤 پروفایل مالک", callback_data=f"u:card:{int(uid)}")]]
+            kb_rows += [list(row) for row in kb.inline_keyboard]
+        else:
+            lines.append("👑 <b>مالک:</b> مخفی یا در دسترس نیست")
+            lines.append(f"    <i>({_esc(owner.get('reason') or 'دسترسی ندارم')})</i>")
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        if username:
+            kb_rows = [[InlineKeyboardButton("📢 باز کردن کانال/گروه",
+                                             url=f"https://t.me/{username}")]] + kb_rows
+        lines += ["", "💡 برای پیام دادن به مالک، دکمه‌های بالا را بزن."]
+        kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+        return {"ok": True, "text": "\n".join(lines), "kb": kb,
+                "owner_id": owner.get("user_id"), "chat_id": cid}
+
+    async def chat_owner(self, ent) -> dict:
+        """
+        مالک گروه/کانال را پیدا می‌کند.
+          • کانال/سوپرگروه → از فهرست مدیران (ChannelParticipantCreator)
+          • گروه معمولی     → از فهرست اعضای ChatFull (ChatParticipantCreator)
+        """
+        try:
+            if isinstance(ent, tl.Channel):
+                res = await self.client(functions.channels.GetParticipantsRequest(
+                    channel=ent, filter=tl.ChannelParticipantsAdmins(),
+                    offset=0, limit=OWNER_ADMIN_SCAN, hash=0))
+                users = {getattr(u, "id", None): u
+                         for u in (getattr(res, "users", None) or [])}
+                for p in (getattr(res, "participants", None) or []):
+                    if isinstance(p, tl.ChannelParticipantCreator):
+                        uid = getattr(p, "user_id", None)
+                        return {"ok": True, "user_id": uid,
+                                "user": users.get(uid), "how": "فهرست مدیران"}
+                return {"ok": False, "reason": "در فهرست مدیران، مالک پیدا نشد"}
+
+            res = await self.client(functions.messages.GetFullChatRequest(
+                chat_id=getattr(ent, "id", None)))
+            fc = getattr(res, "full_chat", None)
+            parts = getattr(getattr(fc, "participants", None), "participants", None)
+            if not parts:
+                return {"ok": False, "reason": "فهرست اعضا برای اعضای عادی مخفی است"}
+            users = {getattr(u, "id", None): u
+                     for u in (getattr(res, "users", None) or [])}
+            for p in parts:
+                if isinstance(p, tl.ChatParticipantCreator):
+                    uid = getattr(p, "user_id", None)
+                    return {"ok": True, "user_id": uid,
+                            "user": users.get(uid), "how": "فهرست اعضا"}
+            return {"ok": False, "reason": "در فهرست اعضا، مالک علامت نخورده"}
+        except FloodWaitError as e:
+            return {"ok": False, "reason": f"محدودیت تلگرام — {e.seconds} ثانیه صبر کن"}
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"owner lookup failed: {type(e).__name__}: {e}")
+            return {"ok": False, "reason": f"{type(e).__name__}"}
 
     # ═══════════ بازیابی از گزارش‌های ضدحذف ═══════════
     #
@@ -1354,6 +1664,9 @@ class UserInfoPlugin(BasePlugin):
             "<code>.کاربر سابقه پاکسازی</code> — پاک کردن ردیف‌های گپ\n"
             "<code>.کاربر بازیابی</code> — برگرداندن کاربران از "
             "گزارش‌های ضدحذفِ قدیمی\n\n"
+            "🏷 <b>گروه/کانال و مالک</b>\n"
+            "<code>.مالک</code> — منوی گروه‌ها/کانال‌هایت\n"
+            "<code>.مالک ‹اسم|یوزرنیم|آیدی|لینک›</code> — کارت گروه + مالکش\n\n"
             "🛡 هیچ پیامی خودکار فرستاده نمی‌شود. برای این‌که طرف مقابل "
             "<b>هیچ اطلاعی نگیرد</b>، دکمه‌ی «📂 آماده‌کردن چت» را بزن: یک "
             "پیش‌نویس ساخته می‌شود و چت در لیست تلگرام خودت بالا می‌آید."
