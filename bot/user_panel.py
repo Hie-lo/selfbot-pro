@@ -56,6 +56,14 @@ def card_text(info: dict, note: str = "") -> str:
         ]
         if info.get("hint"):
             lines += ["", _esc(info["hint"])]
+        if info.get("msg_link"):
+            lines += [
+                "",
+                "🚑 <b>راه باز کردن دستی:</b> "
+                f'<a href="{_esc(info["msg_link"])}">برای باز کردن این چت بزن</a>',
+                "بعد از باز شدن، یک پیام کوتاه بفرست؛ از همان لحظه ربات "
+                "هویت طرف را ثبت می‌کند و دیگر گم نمی‌شود.",
+            ]
         if note:
             lines += ["", note]
         return "\n".join(lines)
@@ -140,10 +148,22 @@ def card_text(info: dict, note: str = "") -> str:
 # ═══════════ کیبوردها ═══════════
 
 def card_kb(uid: int | None, username: str | None = None,
-            msg_link: str | None = None) -> InlineKeyboardMarkup:
+            msg_link: str | None = None,
+            back: str | None = None) -> InlineKeyboardMarkup:
+    """
+    کیبورد کارت کاربر.
+
+    msg_link: لینک باز کردن چت (tg://openmessage?…) — روی دکمه می‌آید.
+      ⚠️ بعضی کلاینت‌ها دکمه‌ی URL با اسکیم tg:// را قبول نمی‌کنند؛ اگر
+      ارسال با این دکمه شکست بخورد، لایه‌ی ارسال نسخه‌ی بدون آن را
+      دوباره می‌فرستد (لینک در متن پیام هم هست، پس چیزی از دست نمی‌رود).
+    back: کالبک دکمه‌ی «بازگشت» (مثلاً برگشت به منوی سابقه)
+    """
     rows = []
     if msg_link:
-        rows.append([InlineKeyboardButton("↩️ باز کردن آخرین پیامش", url=msg_link)])
+        label = ("↩️ باز کردن همان پیام" if "message_id=" in msg_link
+                 else "↩️ باز کردن چت")
+        rows.append([InlineKeyboardButton(label, url=msg_link)])
     if uid:
         rows.append([InlineKeyboardButton(
             "📂 آماده‌کردن چت (بدون ارسال پیام)", callback_data=f"u:draft:{uid}")])
@@ -154,7 +174,29 @@ def card_kb(uid: int | None, username: str | None = None,
         if username:
             rows.append([InlineKeyboardButton(
                 "🌐 باز کردن با یوزرنیم", url=f"https://t.me/{username}")])
+    if back:
+        rows.append([InlineKeyboardButton("⬅️ بازگشت به سابقه", callback_data=back)])
     rows.append([InlineKeyboardButton("🗑 بستن", callback_data=f"u:close:{uid or 0}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def history_kb(page: dict) -> InlineKeyboardMarkup:
+    """دکمه‌های منوی تعاملی سابقه: هر کاربر + صفحه‌بندی"""
+    rows = []
+    for uid, label in (page.get("rows") or []):
+        rows.append([InlineKeyboardButton(label, callback_data=f"u:card:{uid}")])
+    p, pages = int(page.get("page") or 0), int(page.get("pages") or 1)
+    nav = []
+    if p > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"u:hist:{p - 1}"))
+    nav.append(InlineKeyboardButton(f"صفحه {p + 1}/{pages}", callback_data="u:noop:0"))
+    if p + 1 < pages:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"u:hist:{p + 1}"))
+    if len(nav) > 1:
+        rows.append(nav)
+    elif not rows:
+        rows.append([InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="u:hist:0")])
+    rows.append([InlineKeyboardButton("🗑 بستن", callback_data="u:close:0")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -328,6 +370,68 @@ async def cb_user(update, context, user_id: int) -> bool:
                 kb=card_kb(uid, res.get("username")))
         else:
             await q.answer(f"❌ ارسال نشد: {res.get('reason')}", show_alert=True)
+        return True
+
+    if action == "noop":
+        await q.answer()
+        return True
+
+    if action == "hist":
+        if plugin is None:
+            await q.answer("قابلیت کاربر بالا نیامده — ربات را ری‌استارت کن",
+                           show_alert=True)
+            return True
+        page_num = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        await q.answer("…")
+        try:
+            page = await plugin.history_page(page_num)
+            await _edit(q, page.get("text") or "—", kb=history_kb(page))
+        except Exception as e:                      # noqa: BLE001
+            logger.error(f"history page failed: {e}")
+            await q.answer("خطا در خواندن سابقه", show_alert=True)
+        return True
+
+    if action == "card":
+        if plugin is None or not uid:
+            await q.answer("قابلیت کاربر بالا نیامده", show_alert=True)
+            return True
+        await q.answer("…")
+        try:
+            res = await plugin.lookup(str(uid))
+        except Exception as e:                      # noqa: BLE001
+            logger.error(f"card lookup failed: {e}")
+            await q.answer("خطا در خواندن پروفایل", show_alert=True)
+            return True
+        payload = dict(res)
+        if not payload.get("ok"):
+            payload["target"] = str(uid)
+        await _edit(
+            q, card_text(payload),
+            kb=card_kb(payload.get("id") if payload.get("ok") else None,
+                       payload.get("username"), payload.get("msg_link"),
+                       back="u:hist:0"))
+        return True
+
+    if action == "scan":
+        if plugin is None or not uid:
+            await q.answer("قابلیت کاربر بالا نیامده", show_alert=True)
+            return True
+        await q.answer("دارم گزارش‌های ضدحذف را می‌گردم…")
+        try:
+            info = await plugin.find_in_reports(uid)
+        except Exception as e:                      # noqa: BLE001
+            logger.debug(f"report scan failed: {e}")
+            info = None
+        if not info:
+            await q.answer("در گزارش‌های ضدحذف چیزی برای این کاربر نبود",
+                           show_alert=True)
+            return True
+        res = await plugin.lookup(str(uid)) if hasattr(plugin, "lookup") else {"ok": False}
+        payload = dict(res) if res.get("ok") else {
+            "ok": False, "target": str(uid),
+            "reason": "با گزارش ضدحذف پیدا شد (خودِ چت در دسترس نیست)",
+            "id": uid, "msg_link": info.get("link")}
+        await _edit(q, card_text(payload), kb=card_kb(uid, None, info.get("link")))
         return True
 
     await q.answer()

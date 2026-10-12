@@ -1210,8 +1210,12 @@ async def search_directory(user_id: int, query: str, limit: int = 20,
 
 async def list_directory(user_id: int, limit: int = 30,
                          kind: str | None = None,
-                         exclude_kind: str | None = None) -> list[dict]:
-    """آخرین کاربرانی که دیده‌ایم"""
+                         exclude_kind: str | None = None,
+                         offset: int = 0) -> list[dict]:
+    """
+    آخرین کاربرانی که دیده‌ایم — مرتب بر اساس «آخرین پیام» (last_seen DESC).
+    offset برای صفحه‌بندی منوی تعاملی لازم است.
+    """
     pool = get_pool()
     rows = await pool.fetch(
         """
@@ -1220,11 +1224,33 @@ async def list_directory(user_id: int, limit: int = 30,
           AND ($2::text IS NULL OR kind = $2)
           AND ($3::text IS NULL OR kind IS DISTINCT FROM $3)
         ORDER BY last_seen DESC
-        LIMIT $4
+        LIMIT $4 OFFSET $5
         """,
-        user_id, kind, exclude_kind, int(limit),
+        user_id, kind, exclude_kind, int(limit), int(offset),
     )
     return [dict(r) for r in rows]
+
+
+async def purge_group_rows(user_id: int) -> int:
+    """حذف فوری ردیف‌های گپ از سابقه (دستور «.کاربر سابقه پاکسازی»)"""
+    pool = get_pool()
+    res = await pool.execute(
+        "DELETE FROM user_directory WHERE user_id = $1 AND kind = 'group'",
+        user_id)
+    return int(str(res).split()[-1] or 0)
+
+
+async def set_directory_link(user_id: int, tg_id: int, last_msg_id: int) -> None:
+    """ثبت لینک آخرین پیامِ یک کاربر (از گزارش‌های ضدحذف بازیابی می‌شود)"""
+    if not user_id or not tg_id or not last_msg_id:
+        return
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE user_directory SET last_msg_id = $3
+        WHERE user_id = $1 AND tg_id = $2
+        """,
+        user_id, tg_id, int(last_msg_id))
 
 
 async def directory_count(user_id: int, kind: str | None = None,

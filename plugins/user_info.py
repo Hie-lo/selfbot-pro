@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import html
 import io
+import re
 import time
 
 import random
@@ -135,6 +136,10 @@ class UserInfoPlugin(BasePlugin):
             self._seen_recent = {}
         if not hasattr(self, "_my_msgs"):
             self._my_msgs = {}
+        if not hasattr(self, "_report_cache"):
+            self._report_cache = {}
+        if not hasattr(self, "_record_fail"):
+            self._record_fail = None
 
     async def start(self):
         self._ensure_state()
@@ -352,10 +357,35 @@ class UserInfoPlugin(BasePlugin):
             await self._toggle_buttons(body)
             return
 
-        # «.کاربر سابقه [جست‌وجو]» → لیست کسانی که دیده‌ایم
+        # «.کاربر سابقه [جست‌وجو|پاکسازی]» → منوی تعاملی کسانی که دیده‌ایم
         if first_word in ("سابقه", "تاریخچه", "لیست"):
-            query = body.split(maxsplit=1)[1].strip() if len(body.split(maxsplit=1)) > 1 else ""
-            await self._send_owner(await self.history_card(query))
+            rest = body.split(maxsplit=1)[1].strip() if len(body.split(maxsplit=1)) > 1 else ""
+            if rest in ("پاکسازی", "پاک", "تمیز"):
+                from database import db
+                n = await db.purge_group_rows(self.user_id)
+                await self._send_owner(
+                    f"🧹 <b>{n} ردیف گپ</b> از سابقه پاک شد.\n"
+                    "پیوی‌ها دست‌نخورده ماندند.")
+                return
+            page = await self.history_page(0, rest)
+            await self._send_owner(page["text"], kb=self._history_kb(page))
+            return
+
+        # «.کاربر بازیابی» → از گزارش‌های ضدحذف، کاربران قدیمی را برگردان
+        if first_word in ("بازیابی", "ریکاوری", "recover"):
+            await self._send_owner("🔎 دارم گزارش‌های ضدحذف را می‌خوانم…")
+            n = await self.recover_reports()
+            if not n:
+                await self._send_owner(
+                    "📭 چیزی در گزارش‌های ضدحذف پیدا نشد.\n"
+                    "اگر پیامِ حذف‌شده‌ای داری، آیدی‌اش را بده:\n"
+                    "<code>.کاربر ‹آیدی›</code>")
+                return
+            page = await self.history_page(0)
+            await self._send_owner(
+                f"✅ <b>{n} کاربر</b> از گزارش‌های ضدحذف به سابقه برگشتند "
+                "(با آیدی همان پیام).\n\n" + page["text"],
+                kb=self._history_kb(page))
             return
 
         target, action, payload, deep = self._parse(body)
@@ -423,6 +453,7 @@ class UserInfoPlugin(BasePlugin):
 
     async def lookup(self, target: str, deep: bool = False) -> dict:
         self._ensure_state()
+        self._record_fail = None          # وضعیت جست‌وجوی قبلی پاک شود
         raw = to_ascii((target or "").strip())
         if not raw:
             return {"ok": False, "reason": "آیدی یا یوزرنیم ندادی"}
@@ -464,6 +495,8 @@ class UserInfoPlugin(BasePlugin):
             got = await self._from_record(rec, how="سابقه (قبلاً دیده‌شده)")
             if got.get("ok"):
                 return got
+            # نشد — ولی یادت بماند که سابقه داشتیم (برای پیام نهایی)
+            self._record_fail = uid
 
         # زمان انتظار فقط برای جلوگیری از هجوم درخواست‌هاست؛ جست‌وجوی قبلیِ
         # «ناموفق» پاک می‌شود تا کاربر برای تلاش دوباره گیر نکند.
@@ -523,22 +556,17 @@ class UserInfoPlugin(BasePlugin):
             if fb is not None and not fb.get("cooldown"):
                 note = (f"<br>🔎 به‌عنوان شماره هم امتحان شد: "
                         f"{_esc(fb.get('reason') or '')}")
-            # اگر در سابقه لینک آخرین پیامش را داریم، بده تا با یک ضربه در
-            # تلگرام خودت بازش کنی و با یک پیام، هویت‌اش دوباره ثبت شود.
-            link = None
-            try:
-                from database import db
-                rec_f = await db.get_user_record(self.user_id, uid)
-                if rec_f and rec_f.get("last_msg_id"):
-                    link = (f"tg://openmessage?user_id={uid}"
-                            f"&message_id={int(rec_f['last_msg_id'])}")
-            except Exception:
-                link = None
+            # لینکِ باز کردن چت: اول از سابقه، بعد از گزارش‌های ضدحذف، و در
+            # آخر حداقل لینک خود چت. با یک ضربه در اپ تلگرامِ خودت باز
+            # می‌شود و یک پیام کوتاه، هویتش را دوباره برای ربات ثبت می‌کند.
+            link = await self._recovery_link(uid)
             return {
                 "ok": False,
                 "id": uid,
                 "msg_link": link,
-                "reason": "آیدی را نشناخت (نه در چت‌ها، نه مخاطبین، نه سابقه، نه نشست)",
+                "reason": (f"سابقه دارد ولی تلگرام قبولش نکرد"
+                           if getattr(self, "_record_fail", None) == uid
+                           else "آیدی را نشناخت (نه در چت‌ها، نه مخاطبین، نه سابقه، نه نشست)"),
                 "hint": "• اگر شماره‌اش را داری: <code>.کاربر 09121234567</code>\n"
                         "• اگر یوزرنیم دارد: <code>.کاربر @username</code>\n"
                         "• اگر تا حالا به تو پیام داده، با «.کاربر سابقه» پیدایش کن.\n"
@@ -592,12 +620,20 @@ class UserInfoPlugin(BasePlugin):
         digits = (raw or "").replace(" ", "").replace("-", "")
         if not digits.isdigit():
             return None
+        # پیش‌شماره‌های واقعی موبایل ایران: 090/091/092/093/099
+        mobile2 = digits[1] if len(digits) > 1 else ""
+        mobile3 = digits[2] if len(digits) > 2 else ""
         looks = (
-            (len(digits) == 10 and digits[0] in "89")
-            or (len(digits) == 11 and digits[0] == "0")
-            or (len(digits) == 12 and digits.startswith("98"))
+            (len(digits) == 10 and digits[0] == "9" and mobile2 in "01239")
+            or (len(digits) == 11 and digits[0] == "0" and digits[1] == "9"
+                and mobile3 in "01239")
+            # تلفن ثابت: 0 + کد شهر (۲ تا ۳ رقم) + شماره
+            or (len(digits) == 11 and digits[0] == "0"
+                and digits[1] in "12345678")
         )
         if not looks:
+            # آیدی‌های تلگرام (حتی ۱۰ رقمی مثل 8904799614) این‌جا نمی‌آیند تا
+            # سهمیه‌ی روزانه‌ی جست‌وجوی شماره بی‌دلیل مصرف نشود.
             return None
         return await self.lookup_phone(digits)
 
@@ -674,6 +710,141 @@ class UserInfoPlugin(BasePlugin):
             got["phone_input"] = phone
         return got
 
+    # ═══════════ بازیابی از گزارش‌های ضدحذف ═══════════
+    #
+    # چرا لازم است؟ وقتی طرف چتش را پاک کرده و تلگرام هم access_hash نمی‌دهد،
+    # هیچ راه API‌ای برای رسیدن به او نیست. اما گزارش‌های ضدحذفِ قدیمی که در
+    # چت ذخیره‌سازی مانده‌اند، «آیدی کاربر» و «آیدی همان پیام» را دارند
+    # (tg://openmessage?user_id=X&message_id=Y). با همان لینک، اپ تلگرامِ
+    # خودِ کاربر چت را باز می‌کند و با یک پیام، هویت طرف دوباره ثبت می‌شود.
+
+    REPORT_LINK_RE = re.compile(r"user_id=(-?\d+)(?:&(?:amp;)?message_id=(\d+))?")
+    REPORT_NAME_RE = re.compile(r"فرستنده:\s*(.+?)\s*\((\d{5,})\)")
+
+    async def _storage_peer(self):
+        """چتی که گزارش‌های ضدحذف در آن ذخیره می‌شوند (پیش‌فرض: پیام‌های ذخیره‌شده)"""
+        try:
+            from database import db
+            tgt = await db.get_storage_target(self.user_id, "anti_delete")
+            tid = (tgt or {}).get("target_id")
+        except Exception:                          # noqa: BLE001
+            tid = None
+        if not tid or tid == self._me_id:
+            return "me"
+        for cand in (tid, int(f"-100{tid}") if isinstance(tid, int) and tid > 0 else tid):
+            try:
+                return await self.client.get_entity(cand)
+            except Exception:                      # noqa: BLE001
+                continue
+        return "me"
+
+    @classmethod
+    def parse_report(cls, text: str) -> dict | None:
+        """استخراج آیدی کاربر/پیام/نام از متن یک گزارش ضدحذف"""
+        if not text or "user_id=" not in text:
+            return None
+        m = cls.REPORT_LINK_RE.search(text)
+        if not m:
+            return None
+        uid = int(m.group(1))
+        msg_id = int(m.group(2)) if m.group(2) else None
+        name = None
+        nm = cls.REPORT_NAME_RE.search(text)
+        if nm:
+            name = (nm.group(1) or "").strip()
+            if name.isdigit():
+                name = None
+        return {"uid": uid, "msg_id": msg_id, "name": name,
+                "link": (f"tg://openmessage?user_id={uid}"
+                         + (f"&message_id={msg_id}" if msg_id else ""))}
+
+    async def find_in_reports(self, uid: int) -> dict | None:
+        """
+        جست‌وجوی یک کاربر در گزارش‌های ضدحذف (سبک: با search، حداکثر ۳۰ پیام).
+        نتیجه در حافظه کش می‌شود تا جست‌وجوی بعدی صفر درخواست باشد.
+        """
+        self._ensure_state()
+        if uid in self._report_cache:
+            return self._report_cache[uid]
+        out = None
+        try:
+            peer = await self._storage_peer()
+            async for msg in self.client.iter_messages(peer, search=str(uid),
+                                                       limit=30):
+                info = self.parse_report(msg.raw_text or "")
+                if info and info["uid"] == uid:
+                    out = info
+                    break
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"report search failed: {type(e).__name__}: {e}")
+            return None
+        if len(self._report_cache) > 200:
+            for k in list(self._report_cache)[:100]:
+                self._report_cache.pop(k, None)
+        self._report_cache[uid] = out
+        if out and out.get("msg_id"):
+            try:
+                from database import db
+                await db.set_directory_link(self.user_id, uid, out["msg_id"])
+            except Exception:                      # noqa: BLE001
+                pass
+        return out
+
+    async def recover_reports(self, limit: int = 400) -> int:
+        """
+        کل گزارش‌های ضدحذف را می‌خواند و از آن‌ها سابقه می‌سازد
+        (آیدی + لینک همان پیام + نام). برای «.کاربر بازیابی».
+        """
+        self._ensure_state()
+        found: dict[int, dict] = {}
+        try:
+            peer = await self._storage_peer()
+            async for msg in self.client.iter_messages(peer, limit=limit):
+                info = self.parse_report(msg.raw_text or "")
+                if not info:
+                    continue
+                cur = found.get(info["uid"])
+                # جدیدترین پیام (msg_id بزرگ‌تر) را نگه دار
+                if cur is None or (info["msg_id"] or 0) > (cur["msg_id"] or 0):
+                    found[info["uid"]] = info
+        except Exception as e:                     # noqa: BLE001
+            self.logger.warning(f"recover_reports failed: {type(e).__name__}: {e}")
+            return 0
+
+        if not found:
+            return 0
+        from database import db
+        for uid, info in found.items():
+            self._report_cache[uid] = info
+            try:
+                await db.remember_user(
+                    self.user_id, uid,
+                    first_name=info.get("name"), kind="pv",
+                    source="گزارش ضدحذف", last_msg_id=info.get("msg_id"))
+            except Exception as e:                 # noqa: BLE001
+                self.logger.debug(f"report remember failed: {e}")
+        return len(found)
+
+    async def _recovery_link(self, uid: int) -> str | None:
+        """
+        لینکِ باز کردن چتِ یک کاربر غیرقابل‌دسترس:
+          • از سابقه (last_msg_id) اگر داشته باشیم — همان پیام
+          • وگرنه از گزارش‌های ضدحذف
+          • وگرنه حداقل لینک باز کردن خود چت (بدون آیدی پیام)
+        """
+        try:
+            from database import db
+            rec = await db.get_user_record(self.user_id, uid)
+            if rec and rec.get("last_msg_id"):
+                return (f"tg://openmessage?user_id={uid}"
+                        f"&message_id={int(rec['last_msg_id'])}")
+        except Exception:                          # noqa: BLE001
+            pass
+        info = await self.find_in_reports(uid)
+        if info and info.get("link"):
+            return info["link"]
+        return f"tg://openmessage?user_id={uid}"
+
     # ═══════════ سابقه (دایرکتوری) ═══════════
 
     async def _from_record(self, rec: dict, how: str = "سابقه") -> dict:
@@ -717,6 +888,93 @@ class UserInfoPlugin(BasePlugin):
                 rec["last_seen"].strftime("%Y-%m-%d %H:%M") if rec.get("last_seen") else None)
             got["from_history"] = True
         return got
+
+    @staticmethod
+    def _history_kb(page: dict):
+        """دکمه‌های منوی سابقه (این‌جا ساخته می‌شود تا وابستگی به ربات کم شود)"""
+        try:
+            from bot.user_panel import history_kb
+            return history_kb(page)
+        except Exception as e:                     # noqa: BLE001
+            import logging
+            logging.getLogger("user_info").debug(f"history_kb failed: {e}")
+            return None
+
+    async def history_page(self, page: int = 0, query: str = "",
+                           per_page: int = 8) -> dict:
+        """
+        یک صفحه از سابقه (برای منوی تعاملی) — مرتب بر اساس **آخرین پیام**.
+        خروجی: {ok, text, rows:[(uid, label)], page, pages, total, groups}
+        """
+        from database import db
+        try:
+            await db.prune_directory(self.user_id)
+        except Exception as e:                     # noqa: BLE001
+            self.logger.debug(f"prune skipped: {e}")
+
+        page = max(0, int(page or 0))
+        total = await db.directory_count(self.user_id, exclude_kind="group")
+        try:
+            groups = await db.directory_count(self.user_id, kind="group")
+        except Exception:                          # noqa: BLE001
+            groups = 0
+
+        if query:
+            rows = await db.search_directory(self.user_id, query, limit=20,
+                                             exclude_kind="group")
+            pages = 1
+            page = 0
+        else:
+            pages = max(1, (total + per_page - 1) // per_page)
+            page = min(page, pages - 1)
+            rows = await db.list_directory(self.user_id, limit=per_page,
+                                           offset=page * per_page,
+                                           exclude_kind="group")
+
+        if not rows:
+            extra = (f"\n\n({groups} نفر از گپ‌ها موقتاً نگه داشته شده‌اند و "
+                     "اینجا نمایش داده نمی‌شوند.)") if groups else ""
+            return {"ok": True, "rows": [], "page": 0, "pages": 1, "total": 0,
+                    "groups": groups, "text":
+                    ("📇 <b>سابقه خالی است</b>\n\nهر کسی که در <b>پیوی</b> به "
+                     "تو پیام بدهد یا هر کاربری که خودت جست‌وجو کنی، اینجا "
+                     "ذخیره می‌شود تا حتی بعد از پاک کردن چت پیدایش کنی."
+                     + extra)}
+
+        lines = [f"📇 <b>سابقه‌ی کاربران</b> — صفحه {page + 1} از {pages}",
+                 f"<i>مرتب بر اساس آخرین پیام · مجموع {total} نفر</i>", ""]
+        kb_rows = []
+        start = page * per_page if not query else 0
+        for i, r in enumerate(rows, start=start + 1):
+            name = (" ".join(x for x in (r.get("first_name"), r.get("last_name"))
+                             if x).strip()
+                    or (f"@{r['username']}" if r.get("username")
+                        else f"بی‌نام ({r.get('tg_id')})"))
+            when = str(r.get("last_seen") or "")[:16]
+            extra = []
+            if r.get("msgs"):
+                extra.append(f"{r['msgs']} پیام")
+            if (r.get("kind") or "") == "group":
+                extra.append("گپ")
+            lines.append(f"{i}. 👤 <b>{_esc(name)}</b> · "
+                         f"<code>{r.get('tg_id')}</code>"
+                         + (" · " + " · ".join(extra) if extra else "")
+                         + f"\n    🕐 {_esc(when)}")
+            label = name if len(name) <= 28 else name[:27] + "…"
+            kb_rows.append((int(r.get("tg_id")), f"{i}. {label}"))
+
+        if groups:
+            lines.append("")
+            lines.append(f"<i>({groups} نفر از گپ‌ها موقتاً نگه داشته شده‌اند و "
+                         "این‌جا نمایش داده نمی‌شوند.)</i>")
+        if pages > 1 and not query:
+            lines.append("")
+            lines.append("<i>برای دیدن بقیه، با دکمه‌های پایین صفحه عوض کن — "
+                         "یا اسمش را جست‌وجو کن: <code>.کاربر سابقه ‹اسم›</code></i>")
+
+        return {"ok": True, "text": "\n".join(lines), "rows": kb_rows,
+                "page": page, "pages": pages, "total": total, "groups": groups,
+                "query": query}
 
     async def history_card(self, query: str = "") -> str:
         """کارت «سابقه» — کسانی که دیده‌ایم (برای وقتی چت پاک شده)"""
@@ -1060,11 +1318,23 @@ class UserInfoPlugin(BasePlugin):
         text = card_text(payload, note=note)
 
         uid = payload.get("id") if payload.get("ok") else None
-        kb = card_kb(uid, payload.get("username"), payload.get("msg_link"))
+        link = payload.get("msg_link")
+        kb = card_kb(uid, payload.get("username"), link)
 
         if photo and self._owner_tg:
-            if await runtime.notify_photo(self._owner_tg, photo, text, **{"reply_markup": kb}):
+            if await runtime.notify_photo(self._owner_tg, photo, text,
+                                          **{"reply_markup": kb}):
                 return
+
+        # بعضی کلاینت‌ها/نسخه‌ها دکمه‌ی URL با اسکیم tg:// را قبول نمی‌کنند
+        # (BUTTON_URL_INVALID). در آن حالت بدون همان دکمه دوباره می‌فرستیم؛
+        # خودِ لینک داخل متن پیام هست و از دست نمی‌رود.
+        if self._owner_tg and link and not link.startswith("http"):
+            sent = await runtime.send_card(self._owner_tg, text, reply_markup=kb,
+                                           disable_web_page_preview=True)
+            if sent is not None:
+                return
+            kb = card_kb(uid, payload.get("username"), None)
         await self._send_owner(text, kb=kb)
 
     @staticmethod
@@ -1078,7 +1348,12 @@ class UserInfoPlugin(BasePlugin):
             "<code>.کاربر 123456789 پیام سلام</code> — متن را آماده کن "
             "(ارسال فقط با تأیید خودت)\n"
             "<code>.کاربر 123456789 پیش‌نویس سلام</code> — پیش‌نویس دلخواه\n"
-            "<code>.کاربر سابقه</code> — کسانی که دیده‌ایم (حتی چت‌های پاک‌شده)\n\n"
+            "<code>.کاربر سابقه</code> — منوی کسانی که در پیوی دیده‌ایم "
+            "(صفحه‌به‌صفحه، مرتب بر اساس آخرین پیام)\n"
+            "<code>.کاربر سابقه ‹اسم›</code> — جست‌وجو در سابقه\n"
+            "<code>.کاربر سابقه پاکسازی</code> — پاک کردن ردیف‌های گپ\n"
+            "<code>.کاربر بازیابی</code> — برگرداندن کاربران از "
+            "گزارش‌های ضدحذفِ قدیمی\n\n"
             "🛡 هیچ پیامی خودکار فرستاده نمی‌شود. برای این‌که طرف مقابل "
             "<b>هیچ اطلاعی نگیرد</b>، دکمه‌ی «📂 آماده‌کردن چت» را بزن: یک "
             "پیش‌نویس ساخته می‌شود و چت در لیست تلگرام خودت بالا می‌آید."

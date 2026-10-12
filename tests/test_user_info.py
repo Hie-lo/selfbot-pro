@@ -60,12 +60,55 @@ async def _find_user_record(user_id, *, username=None, phone=None):
     return None
 
 
-async def _empty_list(*a, **kw):
-    return []
+async def _search_directory(user_id, query, limit=20, kind=None,
+                            exclude_kind=None):
+    q = (query or "").lower()
+    out = []
+    for (u, _), rec in _MEM.items():
+        if u != user_id:
+            continue
+        name = f"{rec.get('first_name') or ''} {rec.get('last_name') or ''}".lower()
+        if q in name or q in str(rec.get("tg_id")):
+            out.append(rec)
+    if kind:
+        out = [r for r in out if r.get("kind") == kind]
+    if exclude_kind:
+        out = [r for r in out if r.get("kind") != exclude_kind]
+    return out[:limit]
 
 
-async def _zero(*a, **kw):
+async def _list_directory(user_id, limit=30, kind=None, exclude_kind=None,
+                          offset=0):
+    rows = [r for (u, _), r in _MEM.items() if u == user_id]
+    if kind:
+        rows = [r for r in rows if r.get("kind") == kind]
+    if exclude_kind:
+        rows = [r for r in rows if r.get("kind") != exclude_kind]
+    rows.sort(key=lambda r: str(r.get("last_seen") or ""), reverse=True)
+    return rows[int(offset):int(offset) + int(limit)]
+
+
+async def _directory_count(user_id, kind=None, exclude_kind=None):
+    rows = [(u, tg) for (u, tg) in _MEM if u == user_id]
+    if kind:
+        rows = [r for r in rows if _MEM[r].get("kind") == kind]
+    if exclude_kind:
+        rows = [r for r in rows if _MEM[r].get("kind") != exclude_kind]
+    return len(rows)
+
+
+async def _prune_directory(user_id, **kw):
+    return {"groups": 0, "capped": 0, "total": 0}
+
+
+async def _purge_group_rows(user_id):
     return 0
+
+
+async def _set_directory_link(user_id, tg_id, last_msg_id):
+    rec = _MEM.get((user_id, tg_id))
+    if rec is not None:
+        rec["last_msg_id"] = int(last_msg_id)
 
 
 async def _get_ai_profile(user_id, target_id):
@@ -90,9 +133,12 @@ async def _set_feature(user_id, feature, enabled, config=None):
 for _name, _fn in (("remember_user", _remember_user),
                    ("get_user_record", _get_user_record),
                    ("find_user_record", _find_user_record),
-                   ("search_directory", _empty_list),
-                   ("list_directory", _empty_list),
-                   ("directory_count", _zero),
+                   ("search_directory", _search_directory),
+                   ("list_directory", _list_directory),
+                   ("directory_count", _directory_count),
+                   ("prune_directory", _prune_directory),
+                   ("purge_group_rows", _purge_group_rows),
+                   ("set_directory_link", _set_directory_link),
                    ("get_ai_profile", _get_ai_profile),
                    ("upsert_ai_profile", _upsert_ai_profile),
                    ("get_features", _get_features),
@@ -399,6 +445,74 @@ async def flows(plugin_cls=FakeClient):
     # ۸) دیتای غیرمرتبط را برنمی‌دارد
     check("دیتای غیر u: را نمی‌گیرد",
           await panel.cb_user(FakeUpdate("ai:menu"), ctx, 1) is False)
+
+    # ۹) منوی تعاملی سابقه
+    await menu_flow()
+
+
+async def menu_flow():
+    """منوی تعاملی سابقه: دکمه‌ها، صفحه‌بندی، باز کردن کارت هر نفر"""
+    import time as _t
+
+    import bot.user_panel as panel
+
+    client = FakeClient(user=FakeUser(uid=6001))
+    plugin = make_plugin(client)
+    # چند نفر در سابقه (به‌ترتیب زمان) — از دیتابیس جعلی همین فایل
+    _MEM.clear()
+    for i in range(10):
+        _MEM[(1, 6000 + i)] = {
+            "tg_id": 6000 + i, "first_name": f"کاربر{i}", "kind": "pv",
+            "msgs": i + 1, "last_seen": f"2026-10-{10 + i}:00:00"}
+    panel._plugin = lambda user_id: plugin
+    ctx = FakeContext()
+
+    # ۱) صفحه‌ی دوم منو
+    u = FakeUpdate("u:hist:1")
+    ok = await panel.cb_user(u, ctx, 1)
+    check("دکمه‌ی صفحه‌بندی منو کار می‌کند", ok is True and u.callback_query.edits,
+          str(u.callback_query.answers))
+    text, kb = u.callback_query.edits[-1]
+    check("صفحه‌ی دوم در متن نشان داده می‌شود", "صفحه 2" in text, text[:60])
+    check("دکمه‌ی هر کاربر در منو هست", "u:card:" in kb, kb[:60])
+
+    # ۲) کلیک روی یک کاربر → کارت پروفایل
+    u2 = FakeUpdate("u:card:6003")
+    ok2 = await panel.cb_user(u2, ctx, 1)
+    check("کلیک روی کاربر کارت پروفایل می‌آورد",
+          ok2 is True and u2.callback_query.edits, str(u2.callback_query.answers))
+    ctext, ckb2 = u2.callback_query.edits[-1]
+    check("کارت پروفایل نام واقعی را نشان می‌دهد", "علی رضایی" in ctext,
+          ctext[:60])
+    check("دکمه‌ی بازگشت به سابقه روی کارت است", "u:hist:0" in ckb2, ckb2[:80])
+
+    # ۳) دکمه‌ی بی‌اثر (شماره‌ی صفحه)
+    u3 = FakeUpdate("u:noop:0")
+    check("دکمه‌ی شماره‌ی صفحه بدون خطا مدیریت می‌شود",
+          await panel.cb_user(u3, ctx, 1) is True)
+
+    # ۴) «جست‌وجو در گزارش‌های ضدحذف» وقتی چیزی نیست
+    class NoReportClient(FakeClient):
+        def iter_messages(self, peer, limit=None, search=None):
+            class _I:
+                def __aiter__(self_inner):
+                    async def gen():
+                        if False:
+                            yield None
+                    return gen()
+            return _I()
+
+    plugin2 = make_plugin(NoReportClient(user=FakeUser(uid=6001)))
+    panel._plugin = lambda user_id: plugin2
+    plugin2._report_cache = {}
+    u4 = FakeUpdate("u:scan:999999")
+    ok4 = await panel.cb_user(u4, ctx, 1)
+    check("دکمه‌ی جست‌وجو در گزارش‌ها خطا نمی‌دهد", ok4 is True)
+    check("و وقتی چیزی نبود به کاربر خبر می‌دهد",
+          any(ans and "گزارش" in str(ans) for ans in u4.callback_query.answers),
+          str(u4.callback_query.answers))
+
+    panel._plugin = lambda user_id: plugin
 
 
 async def main():

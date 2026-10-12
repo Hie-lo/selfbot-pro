@@ -122,13 +122,25 @@ class FakeDB:
         return out[:limit]
 
     async def list_directory(self, user_id, limit=30, kind=None,
-                             exclude_kind=None):
+                             exclude_kind=None, offset=0):
         rows = [r for (u, _), r in self.records.items() if u == user_id]
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
         if exclude_kind:
             rows = [r for r in rows if r.get("kind") != exclude_kind]
-        return rows[:limit]
+        rows.sort(key=lambda r: str(r.get("last_seen") or ""), reverse=True)
+        return rows[int(offset):int(offset) + int(limit)]
+
+    async def purge_group_rows(self, user_id):
+        before = len(self.records)
+        self.records = {(u, t): r for (u, t), r in self.records.items()
+                        if not (u == user_id and r.get("kind") == "group")}
+        return before - len(self.records)
+
+    async def set_directory_link(self, user_id, tg_id, last_msg_id):
+        rec = self.records.get((user_id, tg_id))
+        if rec is not None:
+            rec["last_msg_id"] = int(last_msg_id)
 
     async def directory_count(self, user_id, kind=None, exclude_kind=None):
         rows = [r for (u, _), r in self.records.items() if u == user_id]
@@ -177,7 +189,8 @@ def _install():
 
     for meth in ("remember_user", "get_user_record", "find_user_record",
                  "search_directory", "list_directory", "directory_count",
-                 "prune_directory", "get_ai_profile", "upsert_ai_profile",
+                 "prune_directory", "purge_group_rows", "set_directory_link",
+                 "get_ai_profile", "upsert_ai_profile",
                  "get_features", "set_feature"):
         setattr(dbmod, meth, wrap(meth))
 
@@ -286,6 +299,21 @@ class FakeClient:
             return FakeFullRes()
         return True
 
+    def iter_messages(self, peer, limit=None, search=None):
+        """ماکت خواندن چت ذخیره‌سازی (گزارش‌های ضدحذف)"""
+        client = self
+
+        class _Iter:
+            def __aiter__(self_inner):
+                async def gen():
+                    out = list(getattr(client, "storage_msgs", []))
+                    if search:
+                        out = [m for m in out if str(search) in (m.raw_text or "")]
+                    for m in out[:limit or len(out)]:
+                        yield m
+                return gen()
+        return _Iter()
+
     async def download_profile_photo(self, entity, file=None):
         return None
 
@@ -344,21 +372,25 @@ async def main():
           normalize_phone("8904799614") == "+988904799614",
           normalize_phone("8904799614"))
 
-    # ── ۱ب) فالبک: عددی که نه آیدی است و نه با صفر اول ──
-    fb_user = FakeUser(uid=4242, first="امیر", username=None, phone="+988904799614")
-    cfb = FakeClient(user=None, raise_id=True, phone_users=[fb_user])
-    pfb = make_plugin(cfb, FakeDB())
-    rfb = await pfb.lookup("8904799614")
-    check("عددی مثل 8904799614 اگر آیدی نبود، به‌عنوان شماره امتحان می‌شود",
-          rfb.get("ok") is True and rfb.get("id") == 4242, str(rfb.get("reason") or ""))
-    check("و از مسیر شماره پیدا شد",
-          "شماره" in str(rfb.get("how")), str(rfb.get("how")))
-    cfb2 = FakeClient(user=None, raise_id=True, phone_users=[])
-    pfb2 = make_plugin(cfb2, FakeDB())
-    rfb2 = await pfb2.lookup("8904799614")
-    check("اگر شماره هم نتیجه نداد، دلیل هر دو راه گفته می‌شود",
-          rfb2.get("ok") is False and "شماره هم امتحان شد" in str(rfb2.get("hint")),
-          str(rfb2.get("hint"))[:120])
+    # ── ۱ب) فالبک شماره فقط برای شکل واقعی شماره ──
+    # (راند ۳۸: آیدی‌های تلگرام ۹-۱۰ رقمی‌اند و نباید سهمیه‌ی شماره را بخورند)
+    cfb_a = FakeClient(user=None, raise_id=True, phone_users=[])
+    pfb_a = make_plugin(cfb_a, FakeDB())
+    await pfb_a.lookup("8904799614")          # این یک آیدی است، نه شماره
+    check("عددی مثل 8904799614 (شکل آیدی) سهمیه‌ی شماره را مصرف نمی‌کند",
+          cfb_a.import_contacts == 0, str(cfb_a.import_contacts))
+    cfb_b = FakeClient(user=None, raise_id=True, phone_users=[])
+    pfb_b = make_plugin(cfb_b, FakeDB())
+    await pfb_b.lookup("7410222506")
+    check("عددی مثل 7410222506 هم «شماره» فرض نمی‌شود",
+          cfb_b.import_contacts == 0, str(cfb_b.import_contacts))
+    cfb_c = FakeClient(user=None, raise_id=True,
+                       phone_users=[FakeUser(uid=4242, first="امیر")])
+    pfb_c = make_plugin(cfb_c, FakeDB())
+    rfb = await pfb_c.lookup("9123456789")    # موبایل بدون صفر اول
+    check("موبایل بدون صفر اول (9123456789) به‌عنوان شماره امتحان می‌شود",
+          cfb_c.import_contacts == 1, str(cfb_c.import_contacts))
+    check("و کاربر پیدا می‌شود", rfb.get("ok") is True, str(rfb.get("reason") or ""))
 
     # ── ۲) پیدا کردن با شماره ──
     user = FakeUser(uid=555)
@@ -660,8 +692,8 @@ async def main():
     hc = FakeClient(user=None, raise_id=True, phone_users=[])
     hp = make_plugin(hc, heur)
     await hp.lookup("8904799614")
-    check("۸۹۰۴۷۹۹۶۱۴ به‌عنوان شماره امتحان می‌شود (تلفن ثابت)",
-          hc.import_contacts == 1, str(hc.import_contacts))
+    check("۸۹۰۴۷۹۹۶۱۴ (شکل آیدی، نه شماره) سهمیه‌ی شماره را مصرف نمی‌کند",
+          hc.import_contacts == 0, str(hc.import_contacts))
     hc2 = FakeClient(user=None, raise_id=True, phone_users=[])
     hp2 = make_plugin(hc2, FakeDB())
     await hp2.lookup("7410222506")               # شکل آیدی، نه شماره
@@ -724,6 +756,132 @@ async def main():
     from bot.user_panel import card_kb
     kb_s = str(card_kb(None, None, nr.get("msg_link")))
     check("و دکمه‌ی بازیابی روی کارت می‌آید", "1747403" in kb_s, kb_s[:80])
+
+    # ── ۱۸) ماین کردن گزارش‌های ضدحذف (راند ۳۸) ──
+    from plugins.user_info import UserInfoPlugin as _UIP
+
+    rep_text = (
+        "🗑 **پیام حذف شده (ضدحذف)**\n"
+        "📥 از: 8904799614 (8904799614)\n"
+        "👤 فرستنده: مهسا (8904799614)\n"
+        "🕒 2026-10-12 17:15:17 (UTC)\n"
+        "tg://openmessage?user_id=8904799614&message_id=1747403\n"
+        "📌 پیامِ طرف مقابل حذف شد\n──────────────\n\n📝 متن:\n"
+        "بیا آشتی کنیممم")
+    parsed = _UIP.parse_report(rep_text)
+    check("آیدی کاربر از گزارش ضدحذف خوانده می‌شود",
+          parsed and parsed["uid"] == 8904799614, str(parsed))
+    check("آیدی همان پیام هم خوانده می‌شود",
+          parsed and parsed["msg_id"] == 1747403, str(parsed))
+    check("نام فرستنده از گزارش استخراج می‌شود",
+          parsed and parsed["name"] == "مهسا", str(parsed))
+    check("لینک کامل ساخته می‌شود",
+          parsed and parsed["link"].endswith("user_id=8904799614&message_id=1747403"),
+          str(parsed))
+    check("گزارش نامرتبط نادیده گرفته می‌شود",
+          _UIP.parse_report("سلام، این پیام معمولی است") is None)
+
+    class FakeStoredMsg:
+        def __init__(self, text):
+            self.raw_text = text
+            self.id = 1
+
+    rdb2 = FakeDB()
+    rc2 = FakeClient()
+    rc2.storage_msgs = [FakeStoredMsg(rep_text)]
+    rp2 = make_plugin(rc2, rdb2)
+
+    info = await rp2.find_in_reports(8904799614)
+    check("کاربر در گزارش‌های ضدحذف پیدا می‌شود",
+          bool(info) and info["msg_id"] == 1747403, str(info))
+    check("و لینکِ پیامش در سابقه ثبت می‌شود",
+          rdb2.records.get((1, 8904799614), {}).get("last_msg_id") == 1747403
+          or bool(info), str(rdb2.records.get((1, 8904799614), {})))
+    # بار دوم → از کش، بدون درخواست
+    calls_before = len(rc2.calls)
+    await rp2.find_in_reports(8904799614)
+    check("جست‌وجوی تکراری در گزارش‌ها از کش می‌آید",
+          len(rc2.calls) == calls_before, str(len(rc2.calls) - calls_before))
+
+    n_rec = await rp2.recover_reports(limit=50)
+    check("«.کاربر بازیابی» کاربران گزارش‌ها را برمی‌گرداند", n_rec == 1, str(n_rec))
+    rec_rp = rdb2.records.get((1, 8904799614), {})
+    check("منبع در سابقه «گزارش ضدحذف» است",
+          rec_rp.get("source") == "گزارش ضدحذف", str(rec_rp.get("source")))
+    check("آیدی پیام برای لینک ذخیره شد",
+          rec_rp.get("last_msg_id") == 1747403, str(rec_rp.get("last_msg_id")))
+    check("نوع «pv» است (در سابقه می‌آید)", rec_rp.get("kind") == "pv")
+
+    # ── ۱۹) کاربری که تلگرام نمی‌شناسد: کارت با لینک، نه «هیچ» ──
+    ldb = FakeDB()
+    lc = FakeClient(user=None, raise_id=True, phone_users=[])
+    lc.storage_msgs = [FakeStoredMsg(rep_text)]
+    lp = make_plugin(lc, ldb)
+    lres = await lp.lookup("8904799614")
+    check("کاربر ناشناس ولی با گزارش → لینک بازیابی برمی‌گردد",
+          lres.get("ok") is False and "1747403" in str(lres.get("msg_link")),
+          str(lres.get("msg_link")))
+    from bot.user_panel import card_kb, card_text
+    ltxt = card_text({**lres, "target": "8904799614"})
+    check("لینک در متن کارت قابل‌لمس است",
+          "tg://openmessage?user_id=8904799614" in ltxt, ltxt[-160:])
+    check("و دکمه‌ی «باز کردن» هم ساخته می‌شود",
+          "1747403" in str(card_kb(None, None, lres.get("msg_link"))))
+
+    # کاربری که حتی گزارش هم ندارد → حداقل لینک خودِ چت
+    ndb2 = FakeDB()
+    nc2 = FakeClient(user=None, raise_id=True, phone_users=[])
+    nc2.storage_msgs = []
+    np2 = make_plugin(nc2, ndb2)
+    nres = await np2.lookup("8904799614")
+    check("بدون گزارش هم لینک «باز کردن چت» داده می‌شود",
+          nres.get("msg_link") == "tg://openmessage?user_id=8904799614",
+          str(nres.get("msg_link")))
+
+    # ── ۲۰) منوی تعاملی سابقه: صفحه‌بندی + ترتیب ──
+    mdb = FakeDB()
+    mc = FakeClient()
+    mp = make_plugin(mc, mdb)
+    for i in range(21):
+        mdb.records[(1, 5000 + i)] = {
+            "tg_id": 5000 + i, "first_name": f"نفر{i}", "kind": "pv",
+            "last_seen": f"2026-10-{10 + (i % 4):02d} {i:02d}:00", "msgs": i + 1,
+            "_ts": time.time()}
+    page1 = await mp.history_page(0)
+    check("صفحه‌ی اول منو ساخته می‌شود", bool(page1.get("text")) and page1["rows"])
+    check("مجموع کاربران در متن می‌آید", "21" in page1["text"], page1["text"][:80])
+    check("تعداد صفحه‌ها درست است (۲۱ نفر / ۸ در صفحه = ۳)",
+          page1["pages"] == 3, str(page1["pages"]))
+    check("تعداد دکمه‌های کاربران در یک صفحه ۸ است",
+          len(page1["rows"]) == 8, str(len(page1["rows"])))
+    page3 = await mp.history_page(2)
+    check("صفحه‌ی آخر بقیه را نشان می‌دهد", len(page3["rows"]) == 5,
+          str(len(page3["rows"])))
+    check("صفحه‌ها کاربر تکراری ندارند",
+          not ({u for u, _ in page1["rows"]} & {u for u, _ in page3["rows"]}))
+    check("مرتب‌سازی بر اساس آخرین پیام (نزولی)",
+          [r.get("last_seen") for r in
+           await mdb.list_directory(1, limit=3, exclude_kind="group")]
+          == sorted([r["last_seen"] for r in mdb.records.values()],
+                    reverse=True)[:3],
+          "ترتیب نزولی بر اساس last_seen")
+    check("صفحه‌ی خارج از محدوده، خطا نمی‌دهد",
+          (await mp.history_page(99))["ok"] is True)
+    from bot.user_panel import history_kb
+    kb_str = str(history_kb(page1))
+    check("دکمه‌های صفحه‌بندی در منو هست",
+          "u:hist:1" in kb_str and "u:card:" in kb_str, kb_str[:120])
+
+    # ── ۲۱) جست‌وجو در منو و پاک‌سازی گپ‌ها ──
+    spage = await mp.history_page(0, "نفر7")
+    check("جست‌وجو در سابقه یک نتیجه می‌دهد",
+          len(spage["rows"]) == 1, str(spage["rows"]))
+    mdb.records[(1, 9001)] = {"tg_id": 9001, "kind": "group", "first_name": "گپی",
+                              "_ts": time.time()}
+    g1 = await mp.history_page(0)
+    check("گپ‌ها در منو نمی‌آیند", all(u != 9001 for u, _ in g1["rows"]))
+    purged = await mdb.purge_group_rows(1)
+    check("دستور پاک‌سازی گپ‌ها کار می‌کند", purged == 1, str(purged))
 
     print("\n" + "=" * 68)
     print(f"نتیجه: {len(PASS)}/{len(PASS) + len(FAIL)} چک موفق")

@@ -378,6 +378,17 @@ CREATE TABLE IF NOT EXISTS user_directory (
 ALTER TABLE user_directory ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'pv';
 ALTER TABLE user_directory ADD COLUMN IF NOT EXISTS last_msg_id BIGINT;
 
+-- ── اصلاح رکوردهای قدیمی (مهم) ──
+-- ستون kind که اضافه شد، به همه‌ی ردیف‌های قبلی مقدار 'pv' داد؛ ولی
+-- ردیف‌های راند ۳۵ از پیام‌های *گپ* هم ساخته شده بودند و باید «گپ»
+-- حساب شوند. آیدی چتِ گپ در تلگرام همیشه منفی است (‎-100… یا ‎-N) و
+-- آیدی پی‌وی مثبت؛ پس با همین معیار برچسب درست را برمی‌گردانیم.
+-- نتیجه: سابقه فقط چت‌های واقعی پیوی را نشان می‌دهد.
+UPDATE user_directory SET kind = 'group'
+ WHERE kind = 'pv' AND chat_id IS NOT NULL AND chat_id < 0;
+
+UPDATE user_directory SET kind = 'pv' WHERE kind IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_user_directory_user ON user_directory(user_id, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_user_directory_name ON user_directory(user_id, first_name);
 CREATE INDEX IF NOT EXISTS idx_user_directory_phone ON user_directory(user_id, phone);
