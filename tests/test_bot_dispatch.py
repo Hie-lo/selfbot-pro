@@ -69,6 +69,9 @@ EXPECTED = {
     "callback:ai:idle": ("^ai:", "route_ai_callbacks"),
     "callback:ai_send:7": (r"^ai_(send|edit|drop):", "route_ai_callbacks"),
     "callback:ai_drop:7": (r"^ai_(send|edit|drop):", "route_ai_callbacks"),
+    "callback:u:draft:123": (r"^u:", "route_user_callbacks"),
+    "callback:u:msg:123": (r"^u:", "route_user_callbacks"),
+    "callback:u:send:123": (r"^u:", "route_user_callbacks"),
     "text:سلام": (None, "handle_text_router"),
     "text:.ai روشن": (None, "handle_text_router"),
 }
@@ -87,6 +90,9 @@ DATA = {
     "callback:ai:idle": "ai:idle",
     "callback:ai_send:7": "ai_send:7",
     "callback:ai_drop:7": "ai_drop:7",
+    "callback:u:draft:123": "u:draft:123",
+    "callback:u:msg:123": "u:msg:123",
+    "callback:u:send:123": "u:send:123",
 }
 
 
@@ -161,6 +167,18 @@ async def main():
         got = first_handler_name(app, cb_update(data))
         results.append((f"آپدیت «{data}» به هندلر AI نمی‌رود",
                         got != "route_ai_callbacks", f"got={got}"))
+
+    # ۳.۴) هندلر پنل کاربر (u:*) نباید بقیه را بردارد
+    for data in ("panel", "features", "ai:menu", "noop", "u", "x:u:1"):
+        got = first_handler_name(app, cb_update(data))
+        results.append((f"آپدیت «{data}» به route_user_callbacks نمی‌رود",
+                        got != "route_user_callbacks", f"got={got}"))
+
+    user_groups = [g for g, hs in app.handlers.items()
+                   if any(getattr(getattr(h, "callback", None), "__name__", "") == "route_user_callbacks"
+                          for h in hs)]
+    results.append(("دکمه‌های پنل کاربر در گروه جدا هستند (ضد بلعیده‌شدن)",
+                    user_groups == [1], f"groups={user_groups}"))
 
     # ۳.۵) هندلرهای AI باید در گروه جدا باشند (نه گروه ۰)
     ai_groups = [g for g, hs in app.handlers.items()

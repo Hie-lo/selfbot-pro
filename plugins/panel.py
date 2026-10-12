@@ -43,10 +43,11 @@ FEATURE_NAMES = {
 # باید با core.plugin_manager.ALWAYS_ON_PLUGINS یکی باشد (پنل خودش نمایش
 # داده نمی‌شود) — تست tests/test_help_coverage.py این را چک می‌کند.
 ALWAYS_ON = {"dice", "heart_animation", "save_from_link", "sticker_convert",
-             "forward_channel", "typing_animation"}
+             "forward_channel", "typing_animation", "user_info"}
 
 # نام‌های دستی برای .روشن / .خاموش
 _MANUAL_NAMES = {
+    "کاربر": "user_info",
     "تاس": "dice",
     "قلب": "heart_animation",
     "ذخیره": "save_from_link",

@@ -912,6 +912,13 @@ async def handle_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_2fa_input(update, context)
         return
 
+    # اولویت ۵.۵: متن پیام دستی پنل «کاربر»
+    if context.user_data.get("awaiting_user_msg"):
+        from bot.user_panel import handle_user_text
+        user = await get_or_create_user(update)
+        if await handle_user_text(update, context, user["id"]):
+            return
+
     # اولویت ۶: پنل هوش مصنوعی (پرسونا / ویرایش پیش‌نویس)
     if (context.user_data.get("awaiting_ai_persona")
             or context.user_data.get("awaiting_ai_draft_edit")
@@ -1487,6 +1494,26 @@ async def ban_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def route_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    مسیریاب callback های «u:*» (پنل «کاربر با آیدی عددی»).
+    مثل AI: با الگو و در گروه ۱ ثبت می‌شود تا هیچ هندلری را نبلعد.
+    """
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("u:"):
+        return
+    try:
+        user = await get_or_create_user(update)
+        from bot.user_panel import cb_user
+        await cb_user(update, context, user["id"])
+    except Exception as e:
+        logger.error(f"user panel callback failed: {type(e).__name__}: {e}")
+        try:
+            await q.answer("خطا در پنل کاربر", show_alert=True)
+        except Exception:
+            pass
+
+
 async def route_ai_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     مسیریاب callback های «ai:*» (پنل هوش مصنوعی) و پیش‌نویس‌ها.
@@ -1560,6 +1587,10 @@ def register_handlers(app: Application):
                     group=1)
     app.add_handler(CallbackQueryHandler(route_ai_callbacks,
                                          pattern=r"^ai_(send|edit|drop):"),
+                    group=1)
+
+    # ── ۵.۶ پنل کاربر با آیدی عددی (u:*) ──
+    app.add_handler(CallbackQueryHandler(route_user_callbacks, pattern=r"^u:"),
                     group=1)
 
     # منوی اصلی

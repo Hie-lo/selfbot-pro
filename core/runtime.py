@@ -18,6 +18,24 @@ bot_username: str | None = None
 selfbot_accounts: dict[int, int] = {}
 
 
+async def notify_photo(telegram_id: int, photo: bytes, caption: str = "",
+                       **kwargs) -> bool:
+    """
+    ارسال عکس از طرف ربات کنترلی (بی‌صدا در صورت خطا).
+    برای کارت پروفایل «کاربر» لازم است؛ notify_user فقط متن می‌فرستد.
+    """
+    if bot is None or not telegram_id or not photo:
+        return False
+    try:
+        kwargs.setdefault("parse_mode", "HTML")
+        await bot.send_photo(chat_id=telegram_id, photo=photo,
+                             caption=caption[:1024], **kwargs)
+        return True
+    except Exception as e:
+        logger.debug(f"notify_photo {telegram_id} skipped: {e}")
+        return False
+
+
 async def notify_user(telegram_id: int, text: str, **kwargs) -> bool:
     """ارسال پیام از طرف ربات کنترلی به کاربر (بی‌صدا در صورت خطا)"""
     if bot is None or not telegram_id:

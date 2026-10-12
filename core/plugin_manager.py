@@ -38,6 +38,7 @@ _PLUGIN_IMPORTS = {
     "AntiEditPlugin": ("plugins.anti_edit", "AntiEditPlugin"),
     "AutoResponsePlugin": ("plugins.auto_response", "AutoResponsePlugin"),
     "ChannelMonitorPlugin": ("plugins.channel_monitor", "ChannelMonitorPlugin"),
+    "UserInfoPlugin": ("plugins.user_info", "UserInfoPlugin"),
 }
 
 _loaded = {name: _safe_import(*path) for name, path in _PLUGIN_IMPORTS.items()}
@@ -51,6 +52,7 @@ ALWAYS_ON_PLUGINS = {
     "sticker_convert": StickerConvertPlugin,
     "panel": PanelPlugin,
     "typing_animation": TypingPlugin,
+    "user_info": UserInfoPlugin,
 }
 
 
