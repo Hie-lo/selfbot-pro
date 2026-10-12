@@ -305,6 +305,25 @@ async def main():
           normalize_phone("+491701234567"))
     check("آیدی عددی ۸ رقمی «شماره» حساب نمی‌شود",
           not looks_like_phone("12345678") and not looks_like_phone("987654321"))
+    check("تلفن ثابت بدون صفر اول (8904799614) → +988904799614",
+          normalize_phone("8904799614") == "+988904799614",
+          normalize_phone("8904799614"))
+
+    # ── ۱ب) فالبک: عددی که نه آیدی است و نه با صفر اول ──
+    fb_user = FakeUser(uid=4242, first="امیر", username=None, phone="+988904799614")
+    cfb = FakeClient(user=None, raise_id=True, phone_users=[fb_user])
+    pfb = make_plugin(cfb, FakeDB())
+    rfb = await pfb.lookup("8904799614")
+    check("عددی مثل 8904799614 اگر آیدی نبود، به‌عنوان شماره امتحان می‌شود",
+          rfb.get("ok") is True and rfb.get("id") == 4242, str(rfb.get("reason") or ""))
+    check("و از مسیر شماره پیدا شد",
+          "شماره" in str(rfb.get("how")), str(rfb.get("how")))
+    cfb2 = FakeClient(user=None, raise_id=True, phone_users=[])
+    pfb2 = make_plugin(cfb2, FakeDB())
+    rfb2 = await pfb2.lookup("8904799614")
+    check("اگر شماره هم نتیجه نداد، دلیل هر دو راه گفته می‌شود",
+          rfb2.get("ok") is False and "شماره هم امتحان شد" in str(rfb2.get("hint")),
+          str(rfb2.get("hint"))[:120])
 
     # ── ۲) پیدا کردن با شماره ──
     user = FakeUser(uid=555)

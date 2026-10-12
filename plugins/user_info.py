@@ -96,6 +96,8 @@ def normalize_phone(raw: str) -> str:
         return "+" + t
     if t.startswith("9") and len(t) == 10:    # 9121234567
         return "+" + IRAN_CC + t
+    if t.startswith("8") and len(t) == 10:    # 8904799614 (تلفن ثابت بدون ۰)
+        return "+" + IRAN_CC + t
     return "+" + t
 
 
@@ -397,12 +399,22 @@ class UserInfoPlugin(BasePlugin):
 
         if ent is None:
             self._last_fail[uid] = time.monotonic()
+            # شاید شماره‌ی تلفن باشد که بدون صفر اول نوشته شده
+            # (مثل 8904799614) — یک بار دیگر به‌عنوان شماره امتحان کن.
+            fb = await self._phone_fallback(raw)
+            if fb is not None and fb.get("ok"):
+                return fb
+            note = ""
+            if fb is not None and not fb.get("cooldown"):
+                note = (f"<br>🔎 به‌عنوان شماره هم امتحان شد: "
+                        f"{_esc(fb.get('reason') or '')}")
             return {
                 "ok": False,
                 "reason": "آیدی را نشناخت (نه در چت‌ها، نه مخاطبین، نه سابقه، نه نشست)",
                 "hint": "• اگر شماره‌اش را داری: <code>.کاربر 09121234567</code>\n"
                         "• اگر یوزرنیم دارد: <code>.کاربر @username</code>\n"
-                        "• اگر تا حالا به تو پیام داده، با «.کاربر سابقه» پیدایش کن.",
+                        "• اگر تا حالا به تو پیام داده، با «.کاربر سابقه» پیدایش کن."
+                        + note,
             }
 
         self._last_ok[uid] = time.monotonic()
@@ -431,6 +443,17 @@ class UserInfoPlugin(BasePlugin):
             return False, (f"{PHONE_COOLDOWN - waited:.0f} ثانیه صبر کن "
                            "(تلگرام این کار را محدود می‌کند)")
         return True, ""
+
+    async def _phone_fallback(self, raw: str) -> dict | None:
+        """
+        وقتی عددی نه آیدی بوده و نه با صفر/+ نوشته شده، ممکن است شماره‌ی
+        تلفن باشد. فقط برای عددهای ۹ تا ۱۳ رقمی و یک‌بار (با سهمیه) امتحان
+        می‌شود تا سهمیه‌ی روزانه بی‌دلیل مصرف نشود.
+        """
+        digits = (raw or "").replace(" ", "").replace("-", "")
+        if not digits.isdigit() or not (9 <= len(digits) <= 13):
+            return None
+        return await self.lookup_phone(digits)
 
     async def lookup_phone(self, raw: str) -> dict:
         """
