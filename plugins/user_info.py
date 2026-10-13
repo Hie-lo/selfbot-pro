@@ -881,10 +881,22 @@ class UserInfoPlugin(BasePlugin):
         return None, "در گروه‌ها/کانال‌هایت چنین چیزی نبود"
 
     async def chat_owner_card(self, target: str) -> dict:
-        """کارت اطلاعات گروه/کانال + مالکش"""
+        """کارت اطلاعات گروه/کانال + مالکش (با اسم/یوزرنیم/آیدی/لینک)"""
         ent, how = await self._resolve_chat(target)
         if ent is None:
             return {"ok": False, "reason": how}
+        return await self.chat_owner_from_entity(ent, how)
+
+    async def chat_owner_from_entity(self, ent, how: str = "پنل") -> dict:
+        """
+        همان کارت، ولی مستقیم از روی entity.
+
+        چرا جدا شد؟ در پنل، چت از لیست چت‌ها انتخاب می‌شود و entity از قبل
+        در حافظه است؛ این‌طور هیچ درخواست اضافه‌ای برای پیدا کردن دوباره‌اش
+        به تلگرام نمی‌رود (بهینه‌سازی درخواست‌ها).
+        """
+        if ent is None:
+            return {"ok": False, "reason": "چت پیدا نشد"}
 
         is_channel = isinstance(ent, tl.Channel)
         title = getattr(ent, "title", None) or str(getattr(ent, "id", "?"))

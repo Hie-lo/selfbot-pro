@@ -22,6 +22,7 @@ def main_menu_kb(has_account: bool = False, is_admin: bool = False) -> InlineKey
         ])
         buttons.append([
             InlineKeyboardButton("📥 فوروارد محتوا", callback_data="fwd_start"),
+            InlineKeyboardButton("⭐ ویژگی‌های ویژه", callback_data="sp:menu"),
         ])
         buttons.append([
             InlineKeyboardButton("📊 وضعیت", callback_data="status"),

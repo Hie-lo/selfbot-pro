@@ -72,6 +72,12 @@ EXPECTED = {
     "callback:u:draft:123": (r"^u:", "route_user_callbacks"),
     "callback:u:msg:123": (r"^u:", "route_user_callbacks"),
     "callback:u:send:123": (r"^u:", "route_user_callbacks"),
+    "callback:sp:menu": (r"^sp:", "route_special_callbacks"),
+    "callback:sp:own": (r"^sp:", "route_special_callbacks"),
+    "callback:sp:l:ch:1": (r"^sp:", "route_special_callbacks"),
+    "callback:sp:p:5": (r"^sp:", "route_special_callbacks"),
+    "callback:sp:f:5": (r"^sp:", "route_special_callbacks"),
+    "callback:sp:mg:5:saved": (r"^sp:", "route_special_callbacks"),
     "text:سلام": (None, "handle_text_router"),
     "text:.ai روشن": (None, "handle_text_router"),
 }
@@ -93,6 +99,12 @@ DATA = {
     "callback:u:draft:123": "u:draft:123",
     "callback:u:msg:123": "u:msg:123",
     "callback:u:send:123": "u:send:123",
+    "callback:sp:menu": "sp:menu",
+    "callback:sp:own": "sp:own",
+    "callback:sp:l:ch:1": "sp:l:ch:1",
+    "callback:sp:p:5": "sp:p:5",
+    "callback:sp:f:5": "sp:f:5",
+    "callback:sp:mg:5:saved": "sp:mg:5:saved",
 }
 
 
@@ -171,6 +183,11 @@ async def main():
     # ۳.۴) هندلر پنل کاربر (u:*) نباید بقیه را بردارد
     for data in ("panel", "features", "ai:menu", "noop", "u", "x:u:1"):
         got = first_handler_name(app, cb_update(data))
+        results.append((f"آپدیت «{data}» به route_special_callbacks نمی‌رود",
+                        got != "route_special_callbacks", f"got={got}"))
+
+    for data in ("panel", "features", "ai:menu", "noop", "u", "x:sp:1"):
+        got = first_handler_name(app, cb_update(data))
         results.append((f"آپدیت «{data}» به route_user_callbacks نمی‌رود",
                         got != "route_user_callbacks", f"got={got}"))
 
@@ -179,6 +196,12 @@ async def main():
                           for h in hs)]
     results.append(("دکمه‌های پنل کاربر در گروه جدا هستند (ضد بلعیده‌شدن)",
                     user_groups == [1], f"groups={user_groups}"))
+
+    sp_groups = [g for g, hs in app.handlers.items()
+                 if any(getattr(getattr(h, "callback", None), "__name__", "")
+                        == "route_special_callbacks" for h in hs)]
+    results.append(("دکمه‌های ویژگی‌های ویژه در گروه جدا هستند (ضد بلعیده‌شدن)",
+                    sp_groups == [1], f"groups={sp_groups}"))
 
     # ۳.۵) هندلرهای AI باید در گروه جدا باشند (نه گروه ۰)
     ai_groups = [g for g, hs in app.handlers.items()
@@ -194,6 +217,8 @@ async def main():
     results.append(("دکمه‌های مفید منو سرجایشان هستند",
                     all(k in kb for k in ("features", "storage", "ai:menu",
                                           "status", "subscription", "help")), kb[:160]))
+    results.append(("دکمه‌ی «ویژگی‌های ویژه» در منو هست",
+                    "sp:menu" in kb, kb[:200]))
 
     # ۴) تعداد هندلرهای گروه اصلی تغییری نکرده باشد (ضد حذف ناخواسته)
     n_main = sum(len(app.handlers[g]) for g in app.handlers if g >= 0)

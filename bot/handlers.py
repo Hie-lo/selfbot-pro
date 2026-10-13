@@ -1514,6 +1514,26 @@ async def route_user_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 
+async def route_special_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    مسیریاب callback های «sp:*» (⭐ ویژگی‌های ویژه — شناسنامه/دامپ/لیسن).
+    مثل AI و پنل کاربر در گروه ۱ ثبت می‌شود تا هیچ هندلری را نبلعد و اگر
+    مربوط نبود، سریع رد شود.
+    """
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("sp:"):
+        return
+    try:
+        from bot.special import route_special_callbacks as _route
+        await _route(update, context)
+    except Exception as e:
+        logger.error(f"special panel callback failed: {type(e).__name__}: {e}")
+        try:
+            await q.answer("خطا در ویژگی‌های ویژه", show_alert=True)
+        except Exception:
+            pass
+
+
 async def route_ai_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     مسیریاب callback های «ai:*» (پنل هوش مصنوعی) و پیش‌نویس‌ها.
@@ -1591,6 +1611,11 @@ def register_handlers(app: Application):
 
     # ── ۵.۶ پنل کاربر با آیدی عددی (u:*) ──
     app.add_handler(CallbackQueryHandler(route_user_callbacks, pattern=r"^u:"),
+                    group=1)
+
+    # ⭐ ویژگی‌های ویژه (شناسنامه/دامپ/لیسن) — گروه ۱، مثل AI و پنل کاربر
+    app.add_handler(CallbackQueryHandler(route_special_callbacks,
+                                        pattern=r"^sp:"),
                     group=1)
 
     # منوی اصلی
